@@ -1,0 +1,8 @@
+# Section 配置文件
+# 默认位置: ~/.config/section/config.toml
+
+# 数据目录（SQLite 数据库、加密密钥等）
+data_dir = "~/.local/share/section"
+
+# FUSE 挂载点
+mount_point = "/mnt/section"

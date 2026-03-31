@@ -1,0 +1,18 @@
+[package]
+name = "section-fuse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FUSE filesystem daemon for Section"
+
+[dependencies]
+section-core.workspace = true
+section-provider.workspace = true
+fuser.workspace = true
+opendal.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+libc.workspace = true

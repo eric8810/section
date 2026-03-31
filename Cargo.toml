@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/section-core",
+    "crates/section-fuse",
+    "crates/section-cli",
+    "crates/section-provider",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/user/section"
+
+[workspace.dependencies]
+# Internal crates
+section-core = { path = "crates/section-core" }
+section-fuse = { path = "crates/section-fuse" }
+section-provider = { path = "crates/section-provider" }
+
+# Storage abstraction
+opendal = { version = "0.55", features = ["services-fs", "services-s3", "services-webdav"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# FUSE
+fuser = { version = "0.15", default-features = false }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto (credential encryption)
+ring = "0.17"
+
+# System
+libc = "0.2"
+
+# Utils
+dirs = "6"
+
+# Testing
+cucumber = "0.22"
+tempfile = "3"
+futures = "0.3"
