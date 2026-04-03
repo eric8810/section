@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+
+jobs:
+  non_fuse:
+    name: Non-FUSE checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Keep CI truthful: the FUSE runtime path is still being validated
+      # separately per platform, so this workflow only covers the non-mount
+      # crates and scenarios that should stay portable.
+      - name: cargo check (non-FUSE crates)
+        run: cargo check -p section-core -p section-provider -p section-cli
+
+      - name: cargo test section-core + section-provider
+        run: cargo test -p section-core -p section-provider
+
+      - name: cargo test section-cli
+        run: cargo test -p section-cli

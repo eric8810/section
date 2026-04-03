@@ -137,7 +137,7 @@ fn main() -> Result<()> {
         Commands::Cp { src, dst } => cmd::file::cp(&config, &store, &src, &dst, json),
         Commands::Cat { path } => cmd::file::cat(&config, &store, &path, json),
         Commands::Rm { path, recursive } => cmd::file::rm(&config, &store, &path, recursive, json),
-        Commands::Mount { path } => cmd::mount::mount(&config, &path),
+        Commands::Mount { path } => cmd::mount::mount(&config, cli.config.as_deref(), &path),
         Commands::Unmount { path } => cmd::mount::unmount(&path),
         Commands::Refresh { path } => cmd::file::refresh(&config, &store, &path),
         Commands::Exec { path, args } => cmd::file::exec(&config, &store, &path, &args, json),

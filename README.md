@@ -2,7 +2,7 @@
 
 Agent-first unified data layer built on [Apache OpenDAL](https://github.com/apache/opendal).
 
-Section mounts multiple storage backends (S3, WebDAV, local filesystem, etc.) as a unified FUSE filesystem, primarily for AI agents to access data through standard file paths.
+Section targets macOS and Linux together. It mounts multiple storage backends (S3, WebDAV, local filesystem, etc.) as a unified FUSE filesystem where the platform runtime allows it, and exposes the same sources through a CLI for non-mount workflows.
 
 ## Features
 
@@ -15,11 +15,29 @@ Section mounts multiple storage backends (S3, WebDAV, local filesystem, etc.) as
 - **Metadata cache** — TTL-based caching to reduce backend calls
 - **Content cache** — LRU eviction cache for file content
 
+## Platform Support
+
+Section is aiming for macOS and Linux together, but the maturity level is not identical across every path yet.
+
+| Capability | Linux | macOS | Notes |
+|------------|-------|-------|-------|
+| `section-core` / `section-provider` / non-mount CLI | Target platform | Target platform | Covered by the dual-platform CI workflow for non-FUSE paths |
+| FUSE mount lifecycle | Primary validation path | Separate validation path | macOS requires macFUSE and platform-specific validation |
+| Permission model | POSIX-first implementation | POSIX-like target with runtime differences | Current permission model is still Linux-centric |
+
+Current repo truth:
+- cross-platform CLI/core/provider support is an active MVP target
+- Linux remains the primary reference path for FUSE behavior
+- macOS mount support is being hardened separately instead of being hand-waved as already done
+
 ## Quick Start
 
 ```bash
 # Build
 cargo build --release
+
+# On macOS, install macFUSE before validating mount/unmount.
+# On Linux, install a FUSE runtime such as fuse3.
 
 # Interactive setup
 section init
@@ -125,14 +143,12 @@ Sources are stored in SQLite at `{data_dir}/section.db` with credentials encrypt
 ## Development
 
 ```bash
-# Run all tests
-cargo test
+# Non-FUSE checks that are intended to stay green on both macOS and Linux
+cargo check -p section-core -p section-provider -p section-cli
+cargo test -p section-core -p section-provider
+cargo test -p section-cli
 
-# Run BDD scenarios
-cargo test --test bdd
-
-# Check compilation
-cargo check
+# Full workspace / FUSE validation is tracked separately and is not yet the truthful green path on every platform.
 
 # Run with debug logging
 RUST_LOG=debug section ls my-files/

@@ -2,8 +2,11 @@
 
 ## 当前状态
 
-项目功能开发基本完成，4 个 crate 编译通过，总计约 3,460 行 Rust 代码。
-BDD 测试 27/27 场景通过，25 个单元测试通过。
+当前仓库更接近“跨平台目标下的工程原型”，还不是已经做实的双平台 MVP。
+已验证的事实：
+- `section-cli` BDD 测试 27/27 场景通过
+- `section-provider --lib` 单元测试 3/3 通过
+- 当前 macOS 环境下，整仓 FUSE 路径还不能被视为已验证完成
 
 ### 各模块完成度
 
@@ -20,7 +23,7 @@ BDD 测试 27/27 场景通过，25 个单元测试通过。
 | **section-fuse/inode** | 100% | 动态 inode 分配、lookup 缓存、父子关系追踪 |
 | **section-cli/source** | 100% | add/remove/list + 脱敏 + JSON |
 | **section-cli/file** | 70% | ls/cp/cat/rm/write/exec 可用，cp 不支持递归和本地路径，cat 不支持流式 |
-| **section-cli/mount** | 30% | 调用 section-fuse 子进程，未经实际挂载测试 |
+| **section-cli/mount** | 35% | 调用 section-fuse 子进程，已开始补平台差异处理，但双平台挂载尚未验证 |
 | **section-cli/init** | 100% | 交互式引导创建 source |
 | **section-cli/status** | 100% | 挂载状态 + 连通性探测 + JSON |
 | **测试** | 70% | BDD 27 场景 + 25 单元测试，缺 Router/Permission/Store 单元测试 |
@@ -62,7 +65,7 @@ BDD 测试 27/27 场景通过，25 个单元测试通过。
 
 ---
 
-### Phase 1B: FUSE 挂载可用
+### Phase 1B: FUSE 挂载可用（Linux + macOS 分别验证）
 
 目标：`section mount` 后，agent 和人类能通过文件系统路径直接访问。
 
@@ -130,7 +133,7 @@ BDD 测试 27/27 场景通过，25 个单元测试通过。
 |------|------|
 | OAuth 自动流程 | Google/Microsoft/Dropbox 一键授权 |
 | MCP Server | Agent 通过 MCP 协议访问（不依赖 FUSE） |
-| macOS 支持 | macFUSE 或自研方案 |
+| macOS 支持 | macFUSE 路径验证与命令差异收敛 |
 | 同步引擎 | 本地 ↔ 远端双向同步 |
 | GUI 后端 | REST API 供桌面/Web 客户端调用 |
 | 更多 Provider | FTP, OneDrive, 阿里云 OSS, 百度网盘... |

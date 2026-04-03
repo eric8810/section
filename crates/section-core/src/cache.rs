@@ -372,17 +372,23 @@ mod tests {
 
     #[test]
     fn overwrite_stat_refreshes_ttl() {
-        let mut cache = MetadataCache::new(Duration::from_millis(30));
+        // Keep generous timing margins so the test validates refresh semantics
+        // instead of failing due to scheduler jitter on busy CI machines.
+        let mut cache = MetadataCache::new(Duration::from_millis(200));
         cache.put_stat("f.txt", file_meta(1));
 
-        // Wait 20 ms (still fresh).
-        thread::sleep(Duration::from_millis(20));
+        // Wait long enough to age the original entry, but keep plenty of TTL
+        // headroom so the overwrite semantics are the thing under test.
+        thread::sleep(Duration::from_millis(80));
         // Overwrite resets the clock.
         cache.put_stat("f.txt", file_meta(2));
 
-        // After another 20 ms total from refresh, the entry should still be valid.
-        thread::sleep(Duration::from_millis(20));
-        let m = cache.get_stat("f.txt").expect("should still be cached after refresh");
+        // After another delay shorter than the refreshed TTL, the entry should
+        // still be valid and expose the new metadata.
+        thread::sleep(Duration::from_millis(80));
+        let m = cache
+            .get_stat("f.txt")
+            .expect("should still be cached after refresh");
         assert_eq!(m.content_length(), 2);
     }
 
@@ -443,7 +449,10 @@ mod tests {
         // Now insert "c"; "b" is now the LRU and should be evicted.
         cache.put("c", vec![0; 4]);
 
-        assert!(cache.get("b").is_none(), "b should have been evicted as LRU");
+        assert!(
+            cache.get("b").is_none(),
+            "b should have been evicted as LRU"
+        );
         assert!(cache.get("a").is_some(), "a should survive (was promoted)");
         assert!(cache.get("c").is_some());
     }

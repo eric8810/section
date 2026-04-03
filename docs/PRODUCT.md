@@ -2,7 +2,7 @@
 
 ## 一句话定义
 
-Section 是一个面向 AI Agent 优先的统一数据访问层，将多个存储源以标准文件系统的形式挂载到本地，提供 Linux 权限体系管控，并通过 CLI 和 GUI 后端供人类管理。
+Section 是一个面向 AI Agent 优先的统一数据访问层，将多个存储源以标准文件系统的形式暴露给本地环境，目标同时支持 macOS 和 Linux，并通过 CLI 和 GUI 后端供人类管理。
 
 ## 核心理念
 
@@ -57,7 +57,7 @@ Source 的权限由凭证本身决定——凭证能做什么，Source 就能做
 职责：
 - 挂载统一命名空间到 `/mnt/section/`
 - 路径路由: 解析路径 → 确定 (source, sub-path) → 调用 OpenDAL
-- 权限执行: 基于 Linux 权限模型 (uid/gid/mode) 做访问控制
+- 权限执行: 基于 POSIX 风格权限模型 (当前实现更偏 Linux) 做访问控制
 - 文件缓存: 热文件本地缓存，减少远端请求
 - 执行支持: 允许执行挂载路径上的文件 (有 x 权限即可执行)
 
@@ -112,12 +112,12 @@ section refresh work-s3/data/
 职责：
 - OpenDAL 集成: 管理多个 Operator 实例，按 source name 索引
 - 路径路由器: 解析路径 `{source}/{sub_path}`，分发到对应的 Operator
-- 权限模型: Linux 权限语义的实现与持久化
+- 权限模型: POSIX 风格权限语义的实现与持久化（当前实现更偏 Linux）
 - 缓存管理: LRU 缓存策略，缓存元数据与文件内容
 
 ## 权限模型
 
-基于标准 Linux 权限体系 (POSIX)，在 FUSE 层执行。
+基于 POSIX 风格权限体系，在 FUSE 层执行；当前实现和验证深度仍明显偏 Linux。
 
 ### 设计原则
 
@@ -136,7 +136,7 @@ Agent 进程以某个系统用户身份运行，自然继承该用户的文件�
 | 平台 | 权限实现 | 优先级 |
 |------|---------|--------|
 | Linux | 原生 FUSE + POSIX 权限 | Phase 1 (MVP) |
-| macOS | 需大量调研，可能涉及自研 FUSE 方案 | Phase 2 |
+| macOS | macFUSE + POSIX 风格权限语义 | Phase 1 (MVP) |
 | Windows | WinFSP + ACL 映射 | Phase 3 |
 
 ## 缓存与一致性策略
@@ -181,7 +181,7 @@ getfattr -n section.refresh /mnt/section/work-s3/important.csv
 | 组件 | 选型 | 理由 |
 |------|------|------|
 | 存储抽象 | Apache OpenDAL | Rust 原生, Apache 2.0, 60+ 后端 |
-| FUSE | fuser (pure-rust mode) | 纯 Rust 实现, 无系统 libfuse 依赖 |
+| FUSE | fuser | 统一 Rust 接口，但运行时前提仍受平台影响 |
 | 元数据库 | SQLite (rusqlite, bundled) | 嵌入式, 零运维 |
 | 凭证加密 | ring | 本地加密存储敏感凭证 |
 | CLI 框架 | clap | Rust 生态标准 |
@@ -203,7 +203,7 @@ Apache License 2.0 — 商业友好，与 OpenDAL 一致。
 
 ## MVP 范围 (Phase 1)
 
-目标: 单机可用的 Agent 数据层 (Linux)。
+目标: 单机可用的 Agent 数据层 (macOS + Linux)。
 
 包含:
 - [ ] section-core: OpenDAL 多后端管理 + 路径路由
@@ -212,10 +212,11 @@ Apache License 2.0 — 商业友好，与 OpenDAL 一致。
 - [ ] section-provider: 本地 SQLite 存储, 手动凭证配置
 - [ ] 权限: 基础 POSIX mode 执行
 - [ ] Provider 支持: fs, s3, webdav
+- [ ] 双平台支持: macOS + Linux 的非挂载路径保持可用，挂载路径分别验证
 
 不包含:
 - GUI
 - 团队/多机同步
 - SSO / OAuth 自动流程
 - MCP Server
-- macOS / Windows 支持
+- Windows 支持
