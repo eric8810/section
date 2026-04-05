@@ -32,10 +32,10 @@ jobs:
       # separately per platform, so this workflow only covers the non-mount
       # crates and scenarios that should stay portable.
       - name: cargo check (non-FUSE crates)
-        run: cargo check -p section-core -p section-provider -p section-cli
+        run: cargo check -p section-core -p section-provider -p section-cli -p sectiond
 
       - name: cargo test section-core + section-provider
-        run: cargo test -p section-core -p section-provider
+        run: cargo test -p section-core -p section-provider -p sectiond
 
       - name: cargo test section-cli
         run: cargo test -p section-cli

@@ -58,6 +58,8 @@ CLI / API 依然重要，但它们是：
 
 正确的方向是引入一个长期驻留的本地核心进程，例如 `sectiond`，作为唯一真实状态机。
 
+`sectiond` 的第一版边界定义见 [SECTIOND.md](./SECTIOND.md)。
+
 ## 目标运行时模型
 
 ```text

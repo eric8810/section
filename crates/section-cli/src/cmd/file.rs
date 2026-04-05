@@ -4,6 +4,7 @@ use futures::TryStreamExt;
 use opendal::{Entry, Metadata, Operator};
 use section_core::{Router, SectionConfig, SectionError};
 use section_provider::ProviderStore;
+use sectiond::SectiondRuntime;
 use serde_json::json;
 use std::fs;
 use std::io::{Read, Write};
@@ -14,12 +15,8 @@ const REFRESH_XATTR_NAME: &str = "section.refresh";
 const REFRESH_XATTR_NAME_LINUX: &str = "user.section.refresh";
 
 fn build_router(config: &SectionConfig, store: &ProviderStore) -> Result<Router> {
-    let mut config = config.clone();
-    let db_sources = store.load_all()?;
-    for (name, source) in db_sources {
-        config.sources.entry(name).or_insert(source);
-    }
-    Ok(Router::from_config(&config)?)
+    let (_, router) = SectiondRuntime::from_config_and_store(config, store)?.into_parts();
+    Ok(router)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

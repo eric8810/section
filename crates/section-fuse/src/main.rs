@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use sectiond::SectiondRuntime;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -29,16 +30,8 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let mut config = section_core::SectionConfig::load(args.config.as_deref())?;
-    let store = section_provider::ProviderStore::open(&config.data_dir)?;
-
-    // Merge DB sources into config
-    let db_sources = store.load_all()?;
-    for (name, source) in db_sources {
-        config.sources.entry(name).or_insert(source);
-    }
-
-    let router = section_core::Router::from_config(&config)?;
+    let runtime = SectiondRuntime::load(args.config.as_deref())?;
+    let (config, router) = runtime.into_parts();
 
     let mount_point = args.mount_point;
     std::fs::create_dir_all(&mount_point)?;

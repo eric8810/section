@@ -5,6 +5,7 @@ members = [
     "crates/section-fuse",
     "crates/section-cli",
     "crates/section-provider",
+    "crates/sectiond",
 ]
 
 [workspace.package]
@@ -18,6 +19,7 @@ repository = "https://github.com/eric8810/section"
 section-core = { path = "crates/section-core" }
 section-fuse = { path = "crates/section-fuse" }
 section-provider = { path = "crates/section-provider" }
+sectiond = { path = "crates/sectiond" }
 
 # Storage abstraction
 opendal = { version = "0.55", features = ["services-fs", "services-s3", "services-webdav"] }

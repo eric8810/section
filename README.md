@@ -29,6 +29,7 @@ For the current roadmap, see:
 
 - [docs/PRODUCT.md](docs/PRODUCT.md)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/SECTIOND.md](docs/SECTIOND.md)
 - [docs/PLAN.md](docs/PLAN.md)
 - [docs/BACKEND_VALIDATION.md](docs/BACKEND_VALIDATION.md)
 
@@ -143,8 +144,9 @@ Current repo truth:
 | `section-cli` | CLI binary (`section` command) |
 | `section-fuse` | FUSE filesystem daemon |
 | `section-provider` | SQLite source store, credential encryption |
+| `sectiond` | Initial shared runtime boundary and future daemon skeleton |
 
-For the target architecture and the migration plan, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PLAN.md](docs/PLAN.md).
+For the target architecture and the migration plan, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SECTIOND.md](docs/SECTIOND.md), and [docs/PLAN.md](docs/PLAN.md).
 
 ## Supported Providers
 
@@ -188,8 +190,8 @@ Sources are stored in SQLite at `{data_dir}/section.db` with credentials encrypt
 
 ```bash
 # Non-FUSE checks that are intended to stay green on both macOS and Linux
-cargo check -p section-core -p section-provider -p section-cli
-cargo test -p section-core -p section-provider
+cargo check -p section-core -p section-provider -p section-cli -p sectiond
+cargo test -p section-core -p section-provider -p sectiond
 cargo test -p section-cli
 
 # Full mounted-workspace validation is tracked separately and is not yet the truthful green path on every platform.

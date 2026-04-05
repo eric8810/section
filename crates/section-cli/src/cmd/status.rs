@@ -1,6 +1,7 @@
 use anyhow::Result;
-use section_core::{Router, SectionConfig};
+use section_core::SectionConfig;
 use section_provider::ProviderStore;
+use sectiond::SectiondRuntime;
 use serde_json::json;
 
 use super::mount::is_mount_active;
@@ -10,46 +11,29 @@ pub fn run(config: &SectionConfig, store: &ProviderStore, json_mode: bool) -> Re
     let mount_point = &config.mount_point;
     let is_mounted = is_mount_active(mount_point);
 
-    // 2. Merge file-based and DB-based sources
-    let mut full_config = config.clone();
-    let db_sources = store.load_all()?;
-    for (name, source) in db_sources {
-        full_config.sources.entry(name).or_insert(source);
-    }
-
-    // Build router (this creates operators for all sources)
-    let router = if full_config.sources.is_empty() {
-        None
-    } else {
-        Some(Router::from_config(&full_config)?)
-    };
+    // 2. Let the shared runtime boundary materialize the merged source view.
+    let runtime = SectiondRuntime::from_config_and_store(config, store)?;
+    let router = runtime.router();
     let rt = tokio::runtime::Runtime::new()?;
 
     // Collect and sort source names for deterministic output
-    let mut source_names: Vec<&String> = full_config.sources.keys().collect();
-    source_names.sort();
+    let source_names = runtime.sources();
 
     if json_mode {
         let sources_json: Vec<serde_json::Value> = source_names
             .iter()
-            .map(|name| {
-                let source_cfg = &full_config.sources[*name];
-                let provider = &source_cfg.provider;
-
-                let connected = match &router {
-                    Some(r) => match r.get_operator(name) {
-                        Ok(op) => match rt.block_on(op.stat("/")) {
-                            Ok(_) => true,
-                            Err(_) => rt.block_on(op.list("/")).is_ok(),
-                        },
-                        Err(_) => false,
+            .map(|source| {
+                let connected = match router.get_operator(&source.name) {
+                    Ok(op) => match rt.block_on(op.stat("/")) {
+                        Ok(_) => true,
+                        Err(_) => rt.block_on(op.list("/")).is_ok(),
                     },
-                    None => false,
+                    Err(_) => false,
                 };
 
                 json!({
-                    "name": name,
-                    "provider": provider,
+                    "name": source.name,
+                    "provider": source.provider,
                     "connected": connected,
                 })
             })
@@ -71,30 +55,29 @@ pub fn run(config: &SectionConfig, store: &ProviderStore, json_mode: bool) -> Re
         }
 
         println!("Sources:");
-        if full_config.sources.is_empty() {
+        if source_names.is_empty() {
             println!("  (none configured)");
             return Ok(());
         }
 
-        for name in source_names {
-            let source_cfg = &full_config.sources[name];
-            let provider = &source_cfg.provider;
-
-            let status = match &router {
-                Some(r) => match r.get_operator(name) {
-                    Ok(op) => match rt.block_on(op.stat("/")) {
+        for source in source_names {
+            let status = match router.get_operator(&source.name) {
+                Ok(op) => match rt.block_on(op.stat("/")) {
+                    Ok(_) => "\u{2713} connected".to_string(),
+                    Err(_) => match rt.block_on(op.list("/")) {
                         Ok(_) => "\u{2713} connected".to_string(),
-                        Err(_) => match rt.block_on(op.list("/")) {
-                            Ok(_) => "\u{2713} connected".to_string(),
-                            Err(_) => "\u{2717} unreachable".to_string(),
-                        },
+                        Err(_) => "\u{2717} unreachable".to_string(),
                     },
-                    Err(_) => "\u{2717} unreachable".to_string(),
                 },
-                None => "\u{2717} unreachable".to_string(),
+                Err(_) => "\u{2717} unreachable".to_string(),
             };
 
-            println!("  {name:<16}(provider: {provider:<10}) {status}");
+            println!(
+                "  {name:<16}(provider: {provider:<10}, origin: {origin}) {status}",
+                name = source.name,
+                provider = source.provider,
+                origin = source.origin.as_str(),
+            );
         }
     }
 

@@ -2024,6 +2024,7 @@ dependencies = [
  "opendal",
  "section-core",
  "section-provider",
+ "sectiond",
  "serde",
  "serde_json",
  "tempfile",
@@ -2061,6 +2062,7 @@ dependencies = [
  "opendal",
  "section-core",
  "section-provider",
+ "sectiond",
  "tempfile",
  "tokio",
  "tracing",
@@ -2084,6 +2086,21 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "sectiond"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "section-core",
+ "section-provider",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

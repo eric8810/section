@@ -64,6 +64,11 @@ Section 现在不再按“多后端 CLI + FUSE 功能集合”来规划，而是
 - 状态与缓存归属关系
 - 生命周期与健康模型
 
+当前落地物：
+
+- [SECTIOND.md](./SECTIOND.md)
+- `crates/sectiond`
+
 ### Phase 2: 把共享语义真正沉到 sectiond
 
 目标：
