@@ -2061,6 +2061,7 @@ dependencies = [
  "opendal",
  "section-core",
  "section-provider",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

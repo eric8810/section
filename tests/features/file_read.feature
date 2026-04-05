@@ -34,6 +34,11 @@
     而且 输出应该包含 "dir"
     而且 输出应该包含 "hello.txt"
 
+  场景: 以 JSON 列出文件时返回真实大小
+    当 我执行 "section --json ls test/"
+    那么 命令应该成功
+    而且 JSON 输出中 "hello.txt" 的 size 应该等于 13
+
   场景: 读取文件内容
     当 我执行 "section cat test/hello.txt"
     那么 命令应该成功

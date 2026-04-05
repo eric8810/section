@@ -1,5 +1,6 @@
 use crate::SectionWorld;
 use cucumber::{then, when};
+use serde_json::Value;
 use std::fs;
 
 /// 当 我执行 "{command}"
@@ -55,6 +56,31 @@ fn output_should_equal(world: &mut SectionWorld, text: String) {
     assert_eq!(
         actual, text,
         "Expected stdout to equal '{text}'.\nActual: '{actual}'"
+    );
+}
+
+/// 而且 JSON 输出中 "{name}" 的 size 应该等于 {size}
+#[then(expr = "JSON 输出中 {string} 的 size 应该等于 {int}")]
+fn json_entry_size_should_equal(world: &mut SectionWorld, name: String, size: i64) {
+    let parsed: Value = serde_json::from_str(world.last_stdout.trim())
+        .expect("stdout should be valid JSON for this step");
+    let entries = parsed
+        .as_array()
+        .expect("expected JSON array output for this step");
+
+    let entry = entries
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name.as_str()))
+        .unwrap_or_else(|| panic!("Expected JSON output to contain entry named '{name}'"));
+
+    let actual = entry
+        .get("size")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| panic!("Expected JSON entry '{name}' to have an integer size"));
+
+    assert_eq!(
+        actual, size,
+        "Expected JSON entry '{name}' size to equal {size}, got {actual}"
     );
 }
 

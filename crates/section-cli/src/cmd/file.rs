@@ -449,21 +449,22 @@ pub fn ls(
     let mut entries = rt.block_on(op.list(&sub_path))?;
     entries.retain(|entry| !relative_to_source_root(&sub_path, entry.path()).is_empty());
     entries.sort_by(|left, right| entry_name(left).cmp(&entry_name(right)));
+    let hydrate_metadata = json_mode || long_mode;
 
     if json_mode {
         let arr: Vec<serde_json::Value> = entries
             .iter()
             .map(|entry| {
+                let meta = ls_entry_metadata(&rt, op, entry, hydrate_metadata);
                 json!({
                     "name": entry_name(entry),
-                    "type": if entry.metadata().is_dir() { "directory" } else { "file" },
-                    "size": if entry.metadata().is_file() {
-                        serde_json::Value::from(entry.metadata().content_length())
+                    "type": if meta.is_dir() { "directory" } else { "file" },
+                    "size": if meta.is_file() {
+                        serde_json::Value::from(meta.content_length())
                     } else {
                         serde_json::Value::Null
                     },
-                    "last_modified": entry
-                        .metadata()
+                    "last_modified": meta
                         .last_modified()
                         .map(|ts| ts.to_string())
                         .map(serde_json::Value::from)
@@ -474,13 +475,14 @@ pub fn ls(
         println!("{}", serde_json::to_string(&arr)?);
     } else {
         for entry in entries {
-            let kind = metadata_kind(entry.metadata(), entry.path())?;
+            let meta = ls_entry_metadata(&rt, op, &entry, hydrate_metadata);
+            let kind = metadata_kind(&meta, entry.path())?;
             let size = if kind == CopyKind::File {
-                Some(entry.metadata().content_length())
+                Some(meta.content_length())
             } else {
                 None
             };
-            let modified = entry.metadata().last_modified().map(|ts| ts.to_string());
+            let modified = meta.last_modified().map(|ts| ts.to_string());
             print_ls_entry(
                 &entry_name(&entry),
                 kind,
@@ -778,6 +780,19 @@ fn entry_name(entry: &Entry) -> String {
     } else {
         name.to_string()
     }
+}
+
+fn ls_entry_metadata(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    entry: &Entry,
+    hydrate: bool,
+) -> Metadata {
+    if !hydrate {
+        return entry.metadata().clone();
+    }
+
+    source_stat(rt, op, entry.path(), entry.path()).unwrap_or_else(|_| entry.metadata().clone())
 }
 
 fn refresh_attr_names() -> &'static [&'static str] {

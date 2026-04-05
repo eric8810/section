@@ -169,14 +169,6 @@ impl SectionFs {
     fn put_cached_listing(&mut self, parsed: &ParsedPath, entries: &[(String, opendal::Metadata)]) {
         if let Some(cache) = self.metadata_caches.get_mut(&parsed.source) {
             cache.put_listing(&parsed.sub_path, entries.to_vec());
-            for (child_name, meta) in entries {
-                let child_sub_path = if parsed.sub_path.is_empty() {
-                    child_name.clone()
-                } else {
-                    format!("{}/{}", parsed.sub_path, child_name)
-                };
-                cache.put_stat(&child_sub_path, meta.clone());
-            }
         }
     }
 
@@ -231,6 +223,7 @@ impl SectionFs {
 
         let path = file.path.clone();
         let data = file.data.clone();
+        let cached_data = data.clone();
 
         let parsed = Router::parse_path(&path).ok_or(libc::EIO)?;
         let op = self
@@ -244,7 +237,7 @@ impl SectionFs {
             .map_err(|e| opendal_to_errno(&e))?;
 
         self.invalidate_metadata_path(&parsed, false);
-        self.put_cached_content(&parsed, &data);
+        self.put_cached_content(&parsed, &cached_data);
 
         if let Some(f) = self.open_files.get_mut(&fh) {
             f.dirty = false;
@@ -1236,15 +1229,14 @@ mod tests {
     }
 
     #[test]
-    fn put_cached_listing_populates_child_stat_cache() {
+    fn put_cached_listing_does_not_populate_child_stat_cache() {
         let mut fs = build_fs(60, 300);
         let parsed = Router::parse_path("cached/docs").expect("parsed dir path");
         let child = Router::parse_path("cached/docs/readme.md").expect("parsed file path");
 
         fs.put_cached_listing(&parsed, &[("readme.md".to_string(), file_meta(42))]);
 
-        let meta = fs.cached_stat(&child).expect("stat cache hit");
-        assert_eq!(meta.content_length(), 42);
+        assert!(fs.cached_stat(&child).is_none());
     }
 
     #[test]
