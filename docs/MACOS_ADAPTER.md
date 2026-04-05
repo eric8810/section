@@ -54,10 +54,33 @@ Short-term productized path:
 - install `section-cli`
 - install `section-fuse`
 - install `macFUSE`
+- allow the macFUSE system extension if prompted
+- re-login/reboot if the installer requires it
 - run `section source add ...`
-- run `section mount ...`
+- run the reproducible smoke test in `scripts/validate-macos-mounted-workspace.sh`
 
 This is intentionally explicit. The product should not pretend macOS mount support is dependency-free while it still relies on macFUSE.
+
+## Reproducible smoke test
+
+Once the prerequisites are present on a real macOS host, the reference validation path is:
+
+```bash
+scripts/validate-macos-mounted-workspace.sh
+```
+
+What it validates:
+
+- `section source add`
+- `section mount`
+- mounted `ls` / `cat`
+- bash execution directly from the mounted workspace
+- Python execution directly from the mounted workspace
+- write-through from the mounted workspace back into the backend directory
+- refresh visibility after an out-of-band backend mutation
+- `section unmount`
+
+If prerequisites are still missing, the script should fail immediately with a concrete action list instead of a later runtime error.
 
 ## Fallback policy
 

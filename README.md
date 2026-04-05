@@ -69,6 +69,7 @@ cargo build --release
 # On macOS, install macFUSE before validating mount/unmount.
 # On Linux, install a FUSE runtime such as fuse3.
 # During development, make sure the built section-fuse binary is in PATH.
+# On a real macOS host, run scripts/validate-macos-mounted-workspace.sh after macFUSE install.
 
 # Interactive setup
 section init
