@@ -6,6 +6,7 @@
 已验证的事实：
 - `section-cli` BDD 测试 32/32 场景通过
 - `section-core` / `section-provider` 当前单元测试共 36/36 通过
+- `docs/BACKEND_VALIDATION.md` 已记录 S3 与 WebDAV 的可重复本地验证流程
 - 当前 macOS 环境下，整仓 FUSE 路径还不能被视为已验证完成
 
 ### 各模块完成度
@@ -39,8 +40,8 @@
 
 #### 1. 验证 OpenDAL 对接 [P0]
 - [x] 用本地文件系统 (provider: fs) 跑通完整 CRUD
-- [ ] 用 S3 兼容存储 (MinIO 或 AWS) 跑通完整 CRUD
-- [ ] 用 WebDAV 跑通完整 CRUD
+- [x] 用 S3 兼容存储 (Moto 本地端点) 跑通完整 CRUD
+- [x] 用 WebDAV (WsgiDAV + Cheroot) 跑通完整 CRUD
 - [x] 确认 OpenDAL API 在实际使用中的坑（via_iter 类型、write 空 Vec 歧义等）
 
 #### 2. CLI 文件操作补全 [P0]

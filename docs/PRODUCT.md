@@ -214,7 +214,7 @@ Apache License 2.0 — 商业友好，与 OpenDAL 一致。
 - [x] section-cli: source/ls/cp/cat/rm/mount/unmount/refresh 命令
 - [ ] section-provider: 本地 SQLite 存储, 手动凭证配置
 - [ ] 权限: 基础 POSIX mode 执行
-- [ ] Provider 支持: fs, s3, webdav
+- [x] Provider 支持: fs, s3, webdav（本地验证路径见 `docs/BACKEND_VALIDATION.md`）
 - [ ] 双平台支持: macOS + Linux 的 non-FUSE 路径保持可用，挂载路径分别验证并逐步收敛
 
 不包含:

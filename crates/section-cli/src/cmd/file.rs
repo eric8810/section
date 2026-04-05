@@ -447,6 +447,7 @@ pub fn ls(
     let sub_path = normalized_source_dir(&sub_path);
     let rt = tokio::runtime::Runtime::new()?;
     let mut entries = rt.block_on(op.list(&sub_path))?;
+    entries.retain(|entry| !relative_to_source_root(&sub_path, entry.path()).is_empty());
     entries.sort_by(|left, right| entry_name(left).cmp(&entry_name(right)));
 
     if json_mode {

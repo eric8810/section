@@ -79,13 +79,17 @@ impl Router {
     }
 
     fn build_operator(source_cfg: &SourceConfig) -> Result<Operator> {
+        let mut options = source_cfg.options.clone();
+        if source_cfg.provider == "webdav" {
+            if let Some(endpoint) = options.get_mut("endpoint") {
+                *endpoint = endpoint.trim_end_matches('/').to_string();
+            }
+        }
+
         let op = Operator::via_iter(
             opendal::Scheme::from_str(&source_cfg.provider)
                 .map_err(|e| anyhow::anyhow!("unknown provider '{}': {e}", source_cfg.provider))?,
-            source_cfg
-                .options
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone())),
+            options.into_iter(),
         )
         .map_err(|e| {
             anyhow::anyhow!(
