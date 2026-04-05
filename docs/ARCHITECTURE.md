@@ -10,7 +10,7 @@ Section 的主目标从“挂载统一命名空间”调整为：
 
 - `source/path` 是主工作面
 - `sectiond` 是真实状态机
-- `runtime` 单独负责执行一致性
+- `execution` 不在当前项目范围
 - 对外状态保持在 `ready / syncing / conflict / error`
 
 ## 顶层原则
@@ -38,16 +38,9 @@ Section 的主目标从“挂载统一命名空间”调整为：
 
 而应统一放进 `sectiond`。
 
-### 3. Execution 不是 FS 层承诺
+### 3. Execution 不在当前项目范围
 
-Section 不尝试用文件系统方案统一：
-
-- POSIX shell 行为
-- Windows 原生执行行为
-- 所有平台的权限与 metadata 语义
-
-Section 统一 source/path sync contract；
-execution contract 由 runtime 层承接。
+Section 当前只统一 source/path sync contract，不处理执行方案。
 
 ## 目标运行时模型
 
@@ -162,12 +155,7 @@ CLI 不再是“产品本体”，而是 control plane client。
 2. local change is observed
 3. `sectiond` stages sync work
 4. remote write succeeds or conflict is surfaced
-
-### Execution
-
-1. runtime points at local paths
-2. Section guarantees public state plus local detail visibility only
-3. runtime owns interpreter/container/OS-specific execution behavior
+5. conflict requires explicit `use-local` / `use-remote` / `mark-merged`
 
 ## 为什么这样比 FUSE-first 更合理
 
@@ -194,7 +182,7 @@ CLI 不再是“产品本体”，而是 control plane client。
 - path public/detail state model
 - local change ingestion
 - bidirectional sync loop
-- conflict surfacing
+- conflict surfacing and resolution
 - source/path-oriented CLI
 
 ## 非目标

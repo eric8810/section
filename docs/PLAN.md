@@ -9,7 +9,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 更直接地说：
 
 - **主线**：source/path + `ready / syncing / conflict / error`
-- **执行**：靠 runtime contract
+- **execution**：当前项目不处理，只写清楚非目标边界
 
 `FUSE` 不再是普通用户默认入口。
 
@@ -99,6 +99,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 - remote change ingest
 - bidirectional reconciliation
 - conflict surfacing
+- explicit conflict resolution flow
 
 ### Phase 5: 重写 control plane
 
@@ -113,19 +114,6 @@ Section 现在从 `FS-first mount product` pivot 到：
 - sync / pull / pin / repair
 - conflict inspection
 
-### Phase 6: 定义 execution contract
-
-目标：
-
-- 承认 source/path sync 与 execution 分层
-- 明确 agent/script 如何在本地可用 path 上工作
-
-产出：
-
-- runtime assumptions
-- POSIX-only workloads 的边界
-- Windows 的执行策略
-
 ## 建议 issue map
 
 下面这些是 pivot 后应该优先推进的主 issue：
@@ -135,9 +123,8 @@ Section 现在从 `FS-first mount product` pivot 到：
 | Phase 1 | 定义 source/path sync contract 与非目标 | `#19` |
 | Phase 2 | 将 `sectiond` 重定义为 source/path sync core | `#22` |
 | Phase 3 | 实现 source local-root 绑定与 path detail state | `#21` |
-| Phase 4 | 实现本地变更检测、远端变更收敛与 conflict surfacing | `#20` |
+| Phase 4 | 实现本地变更检测、远端变更收敛与 conflict resolution | `#20` |
 | Phase 5 | 将 CLI 重构为 source/path control plane | `#24` |
-| Phase 6 | 定义 execution contract（runtime、local path、Windows 边界） | `#23` |
 
 ## 建议执行顺序
 
@@ -146,7 +133,6 @@ Section 现在从 `FS-first mount product` pivot 到：
 3. 再做 local-root / detail state
 4. 再做双向同步与冲突
 5. 再做 source/path-oriented CLI
-6. 再定 execution contract
 
 ## 当前 repo truth
 

@@ -9,7 +9,7 @@ Section is pivoting away from a mount-first product model toward a source/path-f
 - a local bound directory is a manifestation of a source, not a new top-level product object
 - public path state should stay simple: `ready / syncing / conflict / error`
 - CLI/API remain the control plane
-- execution semantics are treated as a separate runtime problem, not something the filesystem layer can magically unify
+- execution semantics are outside the current project scope
 
 The next architectural center is `sectiond`: a long-lived local core that will own source registry, local sync bindings, path state, local-presence detail, refresh, conflicts, and health semantics for the current project.
 
@@ -25,7 +25,7 @@ What is true today:
 What is changing now:
 
 - the repo is moving away from a "CLI + FUSE feature bundle" story
-- the current project route map is `source/path sync state -> sectiond sync core -> execution contract`
+- the current project route map is `source/path sync state -> sectiond sync core -> conflict resolution -> source/path control plane`
 
 For the current roadmap, see:
 

@@ -109,10 +109,8 @@ This is intentional and explicit. The next pivot issue (`#22`) is where these se
 - `#21`
   - add source local-root binding and path detail state
 - `#20`
-  - add bidirectional sync and conflict surfacing
+  - add bidirectional sync and conflict resolution
 - `#24`
   - move CLI toward source/path control-plane behavior
-- `#23`
-  - formalize execute/scripting on local paths
 - `#25`
   - evaluate later adapter paths

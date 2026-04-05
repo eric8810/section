@@ -124,26 +124,37 @@ Section should define:
 
 - what counts as concurrent local/remote divergence
 - how conflict surfaces to user and agent
-- what automatic merges are allowed, if any
 - what repair actions exist
+
+### MVP Conflict Policy
+
+MVP should use explicit resolution, not auto-merge.
+
+When a conflict is detected:
+
+- the path state becomes `conflict`
+- automatic sync for that path stops
+- the local current file is preserved
+- the competing remote version is stored in an internal conflict store
+
+The allowed resolution actions are:
+
+- `use-local`
+- `use-remote`
+- `mark-merged`
+
+After an explicit resolution, the path can return to normal sync.
 
 ## Execution Boundary
 
-Section does not promise that every file visible under a source path is immediately safe to execute on every host.
+Execution is outside the current project scope.
 
-Section should promise only:
+The current project promises only:
 
 - public state visibility
 - local presence detail when needed
 - clear local vs remote state
 - truthful source/path state
-
-Execution must be defined separately by runtime policy, for example:
-
-- explicit interpreters
-- containers
-- WSL
-- remote POSIX runners
 
 ## User-Facing Truth
 

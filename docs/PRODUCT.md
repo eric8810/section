@@ -20,7 +20,7 @@ Section 是一个**跨平台 source/path sync 协作层**：
 所以主线改成：
 
 1. **source/path + sync state 是主线**
-2. **execution contract 单独定义**
+2. **execution 不是当前项目范围**
 
 ## 产品承诺
 
@@ -69,16 +69,13 @@ Section 主线不承诺的是：
 - sync / pull / pin / repair
 - 配置、认证、安装引导
 
-### Execution Plane
+### Execution Non-Goal
 
-这是单独的一层，不应和 source/path sync 混成一个承诺：
+当前项目只需要把边界说清楚：
 
-- Python / Node / Java 等显式 runtime
-- POSIX shell runtime
-- Windows 原生 runtime
-- 容器 / WSL / remote runner
-
-Section 统一的是 source/path sync contract，不直接承诺统一宿主机执行语义。
+- Section 不承诺统一宿主机执行语义
+- 当前项目不定义 scripts / agents 的执行方案
+- 当前项目只保证 source/path sync 与冲突处理
 
 ## Source/Path Sync Contract
 
@@ -124,7 +121,26 @@ Section 统一的是 source/path sync contract，不直接承诺统一宿主机�
 - pull / pin
 - observe local changes
 - sync remote changes
-- surface conflicts honestly
+- resolve conflicts explicitly
+
+### 冲突解决方案
+
+MVP 不做自动 merge。
+
+发生冲突时：
+
+- path 状态进入 `conflict`
+- 该 path 的自动同步暂停
+- 本地当前版本保留不动
+- 远端竞争版本写入内部 conflict store，而不是偷偷覆盖本地文件
+
+用户只允许 3 种解决动作：
+
+- `use-local`
+- `use-remote`
+- `mark-merged`
+
+只有显式 resolve 后，这个 path 才恢复正常同步。
 
 ## 平台策略
 
@@ -143,7 +159,7 @@ Section 统一的是 source/path sync contract，不直接承诺统一宿主机�
 3. 本地修改与远端修改都能被收敛
 4. source/path 级别的 `ready / syncing / conflict / error` 状态可见
 5. agent 与人类都在同一份本地 path 工作
-6. execution 通过明确 runtime 路线承接，而不是依赖“天然 POSIX 等价”
+6. 当前项目不处理 execution 方案，只明确它不在承诺范围内
 
 
 它们应该建立在稳定的 source/path sync contract 之上，而不是反过来定义产品。
