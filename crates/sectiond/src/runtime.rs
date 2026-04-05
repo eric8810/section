@@ -43,6 +43,21 @@ pub struct RuntimeSnapshot {
     pub contract: SectiondContract,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SourceStatusSnapshot {
+    pub name: String,
+    pub provider: String,
+    pub origin: SourceOrigin,
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StatusSnapshot {
+    pub mount_path: PathBuf,
+    pub mount_active: bool,
+    pub sources: Vec<SourceStatusSnapshot>,
+}
+
 pub struct SectiondRuntime {
     config: SectionConfig,
     router: Router,
@@ -131,6 +146,34 @@ impl SectiondRuntime {
             sources: self.sources.clone(),
             contract: self.contract.clone(),
         }
+    }
+
+    pub fn status_snapshot(&self, mount_path: &Path, mount_active: bool) -> Result<StatusSnapshot> {
+        let rt = tokio::runtime::Runtime::new()?;
+        let mut sources = Vec::with_capacity(self.sources.len());
+
+        for source in &self.sources {
+            let connected = match self.router.get_operator(&source.name) {
+                Ok(op) => match rt.block_on(op.stat("/")) {
+                    Ok(_) => true,
+                    Err(_) => rt.block_on(op.list("/")).is_ok(),
+                },
+                Err(_) => false,
+            };
+
+            sources.push(SourceStatusSnapshot {
+                name: source.name.clone(),
+                provider: source.provider.clone(),
+                origin: source.origin,
+                connected,
+            });
+        }
+
+        Ok(StatusSnapshot {
+            mount_path: mount_path.to_path_buf(),
+            mount_active,
+            sources,
+        })
     }
 
     pub fn into_parts(self) -> (SectionConfig, Router) {
@@ -238,5 +281,30 @@ mod tests {
             runtime.router().sources(),
             vec!["config-only".to_string(), "db-only".to_string()]
         );
+    }
+
+    #[test]
+    fn status_snapshot_reports_mount_state_and_connectivity() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let source_root = TempDir::new().expect("source root");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+
+        let mut config = SectionConfig::default();
+        config.data_dir = temp_dir.path().to_path_buf();
+        config.sources.insert(
+            "config-only".to_string(),
+            fs_source(source_root.path().to_str().expect("utf8 path"), 60, 300),
+        );
+
+        let runtime = SectiondRuntime::from_config_and_store(&config, &store).expect("runtime");
+        let snapshot = runtime
+            .status_snapshot(Path::new("/mnt/section"), true)
+            .expect("status snapshot");
+
+        assert_eq!(snapshot.mount_path, PathBuf::from("/mnt/section"));
+        assert!(snapshot.mount_active);
+        assert_eq!(snapshot.sources.len(), 1);
+        assert_eq!(snapshot.sources[0].name, "config-only");
+        assert!(snapshot.sources[0].connected);
     }
 }
