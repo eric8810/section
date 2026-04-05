@@ -21,7 +21,6 @@ Section 是一个**跨平台 source/path sync 协作层**：
 
 1. **source/path + sync state 是主线**
 2. **execution contract 单独定义**
-3. **FUSE 只保留为 future / advanced mode**
 
 ## 产品承诺
 
@@ -127,42 +126,12 @@ Section 统一的是 source/path sync contract，不直接承诺统一宿主机�
 - sync remote changes
 - surface conflicts honestly
 
-## 为什么不是 platform sync engine 先行
-
-Section 主线是 `source/path + sync state`，但这不等于第一版就必须绑定：
-
-- macOS File Provider
-- Windows CFAPI
-
-第一阶段更合理的是：
-
-- 先把 Section 自己的 source/path sync contract 做出来
-- 用普通本地目录把同步工作流跑通
-- 原生 sync engine / shell integration 明确放到当前项目范围外
-
-否则会过早把产品定义绑定到平台专有模型。
-
-## 为什么不是 FUSE 主线
-
-原因非常现实：
-
-- 普通用户安装和批准复杂度过高
-- 跨平台支持成本高
-- 即使统一了文件系统入口，也不能统一 Windows 的原生执行语义
-
-因此 `FUSE` 不是主产品入口，而是：
-
-- Linux / advanced mode
-- future enhancement
-- power user path
-
 ## 平台策略
 
 | 能力 | Linux | macOS | Windows | 主线判断 |
 |------|-------|-------|---------|----------|
 | core/provider/CLI | 支持 | 支持 | 目标支持 | 必须持续 green |
 | source/path sync | 主线 | 主线 | 主线 | 产品默认入口 |
-| 原生 mount / adapter | advanced | advanced / future | advanced / future | 不是 MVP 前提 |
 | execution | runtime 负责 | runtime 负责 | runtime 负责 | 不由 FS 层硬统一 |
 
 ## MVP 定义（pivot 后）
@@ -176,13 +145,5 @@ Section 主线是 `source/path + sync state`，但这不等于第一版就必须
 5. agent 与人类都在同一份本地 path 工作
 6. execution 通过明确 runtime 路线承接，而不是依赖“天然 POSIX 等价”
 
-## 当前项目范围外
-
-下面这些都保留，但不属于当前项目范围：
-
-- Linux `FUSE` / macOS `macFUSE` / Windows `WinFsp`
-- macOS File Provider
-- Windows Cloud Files API
-- SMB 导出 / shared source tree server mode
 
 它们应该建立在稳定的 source/path sync contract 之上，而不是反过来定义产品。

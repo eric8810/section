@@ -17,7 +17,6 @@ The next architectural center is `sectiond`: a long-lived local core that will o
 
 What is true today:
 
-- Linux has a validated FUSE happy path
 - macOS and Linux non-mount flows are covered by CI
 - S3, WebDAV, and local filesystem backends have real validation coverage
 - the current repo is still **pre-sectiond**
@@ -27,7 +26,6 @@ What is changing now:
 
 - the repo is moving away from a "CLI + FUSE feature bundle" story
 - the current project route map is `source/path sync state -> sectiond sync core -> execution contract`
-- adapter/native integration work is explicitly outside the current project scope
 
 For the current roadmap, see:
 
@@ -47,7 +45,6 @@ For the current roadmap, see:
 - **Control-plane CLI** — source management, path operations, sync state, refresh, and fallback file operations
 - **Credential encryption** — AES-256-GCM encrypted storage in SQLite
 - **JSON output** — `--json` flag for machine-readable output (agent-friendly)
-- **Mount groundwork** — Linux FUSE and macOS/macFUSE groundwork remain available as future/advanced tracks
 - **Metadata cache** — TTL-based caching to reduce backend calls
 - **Content cache** — LRU eviction cache for file content
 
@@ -59,13 +56,10 @@ Section is targeting macOS, Linux, and Windows as a source/path sync product, bu
 |------------|-------|-------|---------|-------|
 | `section-core` / `section-provider` / non-mount CLI | Target platform | Target platform | Target platform | current CI covers Linux/macOS non-FUSE paths |
 | Source/path sync mainline | Pivot target | Pivot target | Pivot target | not implemented end-to-end yet |
-| Mount / adapter path | Advanced track | Advanced track | Advanced track | no longer the main product path |
 
 Current repo truth:
 - cross-platform core/provider/control-plane support is real
-- Linux remains the place where the old mounted-workspace path is most validated
 - source/path sync is now the product mainline, but still needs dedicated implementation work
-- macOS mount details remain documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md) as a future/advanced path, not the default user journey
 
 ## Quick Start
 
@@ -106,8 +100,6 @@ section status
 ```
 
 Current and target source/path sync semantics are documented in [docs/SYNC_MODEL.md](docs/SYNC_MODEL.md).
-Old mounted-workspace execute/scripting semantics remain documented in [docs/EXECUTION_MODEL.md](docs/EXECUTION_MODEL.md) as groundwork/history.
-macOS mount prerequisite / preflight / fallback policy remains documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md) for the advanced path.
 
 ## Architecture
 
@@ -132,8 +124,6 @@ Current repo truth:
 
 - `sectiond` is the target center, not a finished component yet
 - today's crates still reflect a pre-sectiond and pre-source-path-sync structure
-- old Linux mount validation exists already, but is no longer the default product path
-- adapters remain later separate tracks, not current project scope
 
 ### Current Crates
 
@@ -192,10 +182,6 @@ Sources are stored in SQLite at `{data_dir}/section.db` with credentials encrypt
 cargo check -p section-core -p section-provider -p section-cli -p sectiond
 cargo test -p section-core -p section-provider -p sectiond
 cargo test -p section-cli
-
-# Old mounted-workspace validation remains available as groundwork/history
-scripts/validate-mounted-workspace-exec.sh
-
 # Run with debug logging
 RUST_LOG=debug section ls my-files/
 ```

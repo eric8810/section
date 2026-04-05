@@ -19,7 +19,7 @@ Section is only on the right path if these things stay true:
 1. `source/path` stays the only primary product mental model.
 2. Sync and conflict live on sources and paths, not in a separate top-level abstraction.
 3. Public state stays simple: `ready / syncing / conflict / error`.
-4. CLI/API and future adapters must consume the same `sectiond`-owned source/path state model.
+4. CLI/API must consume the same `sectiond`-owned source/path state model.
 
 ## sectiond ownership
 
@@ -43,10 +43,9 @@ The long-lived local runtime should own the shared semantics that must not diver
 
 - parsing human CLI flags
 - rendering terminal output
-- direct platform mount syscalls
 - GUI-specific presentation
 
-Those remain client or adapter responsibilities.
+Those remain client responsibilities.
 
 ## Surface split
 
@@ -61,13 +60,12 @@ These are client-facing management actions:
 - status / diagnostics
 - refresh / repair / health checks
 - config/bootstrap/preflight
-- explicit fallback flows when mount is unavailable
 
 Today these still surface through `section-cli`, but the route-map direction is explicit: those commands should enter through `sectiond`, not keep accumulating parallel runtime logic in the CLI process.
 
 ### Data plane
 
-These are the semantics that users and future adapters depend on:
+These are the semantics that users depend on:
 
 - path traversal
 - list/read/write/delete/rename
@@ -76,7 +74,6 @@ These are the semantics that users and future adapters depend on:
 - refresh visibility
 - shell/script/editor access against the local tree when configured
 
-Linux/macOS/Windows adapters should expose these semantics through the same `sectiond`-owned state machine.
 
 ## Runtime boundary
 

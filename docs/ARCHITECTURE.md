@@ -11,7 +11,6 @@ Section 的主目标从“挂载统一命名空间”调整为：
 - `source/path` 是主工作面
 - `sectiond` 是真实状态机
 - `runtime` 单独负责执行一致性
-- mount / native integration 变成后续 adapter，而不是主线前提
 - 对外状态保持在 `ready / syncing / conflict / error`
 
 ## 顶层原则
@@ -117,19 +116,6 @@ CLI 不再是“产品本体”，而是 control plane client。
 - 任意复杂文件类型完整支持
 - 平台原生 mount 语义
 
-### Later Separate Tracks
-
-这些都不删，但明确不属于当前项目范围：
-
-- Linux `FUSE`
-- macOS `macFUSE`
-- Windows `WinFsp`
-- macOS File Provider
-- Windows CFAPI
-- SMB export
-
-它们以后应该消费 `sectiond` 的 source/path contract，而不是定义主产品。
-
 ## 核心状态模型
 
 ### Public Path State
@@ -190,12 +176,6 @@ CLI 不再是“产品本体”，而是 control plane client。
 - 普通用户真的能用
 - agent 和人类能共享本地目录
 - 跨平台可交付
-
-而把下面这些明确放到当前项目范围外：
-
-- mount fidelity
-- native shell integration
-- deeper OS-specific file presentation
 
 ## 当前 repo 与目标架构的关系
 

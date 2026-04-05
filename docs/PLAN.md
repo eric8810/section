@@ -10,7 +10,6 @@ Section 现在从 `FS-first mount product` pivot 到：
 
 - **主线**：source/path + `ready / syncing / conflict / error`
 - **执行**：靠 runtime contract
-- **当前项目范围外**：FUSE / native integration / SMB export
 
 `FUSE` 不再是普通用户默认入口。
 
@@ -148,15 +147,6 @@ Section 现在从 `FS-first mount product` pivot 到：
 4. 再做双向同步与冲突
 5. 再做 source/path-oriented CLI
 6. 再定 execution contract
-
-## 当前项目范围外
-
-下面这些可以以后再做，但不应作为当前项目路线图的一部分：
-
-- FUSE advanced mode
-- macOS File Provider
-- Windows CFAPI
-- SMB export
 
 ## 当前 repo truth
 
