@@ -6,14 +6,14 @@ use fuser::{
 use section_core::permission::Permission;
 use section_core::router::ParsedPath;
 use section_core::Router;
-use section_core::{ContentCache, MetadataCache, SectionConfig};
+use section_core::SectionConfig;
+use sectiond::SectiondDataPlane;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
 
 const TTL: Duration = Duration::from_secs(1);
-const DEFAULT_CONTENT_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const REFRESH_XATTR_NAME: &str = "section.refresh";
 const REFRESH_XATTR_NAME_LINUX: &str = "user.section.refresh";
 
@@ -46,43 +46,21 @@ struct OpenFile {
 
 /// Section FUSE filesystem implementation.
 pub struct SectionFs {
-    router: Router,
+    data_plane: SectiondDataPlane,
     inodes: InodeTable,
     rt: Runtime,
     next_fh: u64,
     open_files: HashMap<u64, OpenFile>,
-    metadata_caches: HashMap<String, MetadataCache>,
-    content_caches: HashMap<String, ContentCache>,
 }
 
 impl SectionFs {
     pub fn new(config: &SectionConfig, router: Router) -> Self {
         let rt = Runtime::new().expect("failed to create tokio runtime");
         let mut inodes = InodeTable::new();
-        let mut metadata_caches = HashMap::new();
-        let mut content_caches = HashMap::new();
+        let data_plane = SectiondDataPlane::new(config, router);
 
         // Pre-populate source directories under root.
-        for source in router.sources() {
-            let cache_cfg = config.sources.get(&source).map(|cfg| &cfg.cache);
-            let metadata_ttl_secs = cache_cfg.map(|cfg| cfg.metadata_ttl_secs).unwrap_or(60);
-            let content_cache_enabled = cache_cfg
-                .map(|cfg| cfg.content_ttl_secs > 0)
-                .unwrap_or(true);
-
-            if metadata_ttl_secs > 0 {
-                metadata_caches.insert(
-                    source.clone(),
-                    MetadataCache::new(Duration::from_secs(metadata_ttl_secs)),
-                );
-            }
-            if content_cache_enabled {
-                content_caches.insert(
-                    source.clone(),
-                    ContentCache::new(DEFAULT_CONTENT_CACHE_MAX_BYTES),
-                );
-            }
-
+        for source in data_plane.source_names() {
             inodes.ensure(
                 ROOT_INO,
                 &source,
@@ -95,13 +73,11 @@ impl SectionFs {
         }
 
         Self {
-            router,
+            data_plane,
             inodes,
             rt,
             next_fh: 1,
             open_files: HashMap::new(),
-            metadata_caches,
-            content_caches,
         }
     }
 
@@ -147,71 +123,47 @@ impl SectionFs {
     }
 
     fn cached_stat(&mut self, parsed: &ParsedPath) -> Option<opendal::Metadata> {
-        self.metadata_caches
-            .get_mut(&parsed.source)?
-            .get_stat(&parsed.sub_path)
-            .cloned()
+        self.data_plane.cached_stat(parsed)
     }
 
     fn put_cached_stat(&mut self, parsed: &ParsedPath, meta: &opendal::Metadata) {
-        if let Some(cache) = self.metadata_caches.get_mut(&parsed.source) {
-            cache.put_stat(&parsed.sub_path, meta.clone());
-        }
+        self.data_plane.put_cached_stat(parsed, meta);
     }
 
     fn cached_listing(&mut self, parsed: &ParsedPath) -> Option<Vec<(String, opendal::Metadata)>> {
-        self.metadata_caches
-            .get_mut(&parsed.source)?
-            .get_listing(&parsed.sub_path)
-            .cloned()
+        self.data_plane.cached_listing(parsed)
     }
 
     fn put_cached_listing(&mut self, parsed: &ParsedPath, entries: &[(String, opendal::Metadata)]) {
-        if let Some(cache) = self.metadata_caches.get_mut(&parsed.source) {
-            cache.put_listing(&parsed.sub_path, entries.to_vec());
-        }
+        self.data_plane.put_cached_listing(parsed, entries);
     }
 
     fn cached_content(&mut self, parsed: &ParsedPath) -> Option<Vec<u8>> {
-        self.content_caches
-            .get_mut(&parsed.source)?
-            .get(&parsed.sub_path)
-            .map(|data| data.to_vec())
+        self.data_plane.cached_content(parsed)
     }
 
     fn put_cached_content(&mut self, parsed: &ParsedPath, data: &[u8]) {
-        if let Some(cache) = self.content_caches.get_mut(&parsed.source) {
-            cache.put(&parsed.sub_path, data.to_vec());
-        }
+        self.data_plane.put_cached_content(parsed, data);
     }
 
     fn invalidate_metadata_path(&mut self, parsed: &ParsedPath, recursive: bool) {
-        if let Some(cache) = self.metadata_caches.get_mut(&parsed.source) {
-            if recursive {
-                cache.invalidate_prefix(&parsed.sub_path);
-            }
-            cache.invalidate(&parsed.sub_path);
-        }
+        self.data_plane.invalidate_metadata_path(parsed, recursive);
     }
 
     fn invalidate_all_path(&mut self, parsed: &ParsedPath, recursive: bool) {
-        self.invalidate_metadata_path(parsed, recursive);
-        if let Some(cache) = self.content_caches.get_mut(&parsed.source) {
-            if recursive {
-                cache.remove_prefix(&parsed.sub_path);
-            } else {
-                cache.remove(&parsed.sub_path);
-            }
-        }
+        self.data_plane.invalidate_all_path(parsed, recursive);
     }
 
     fn clear_all_caches(&mut self) {
-        for cache in self.metadata_caches.values_mut() {
-            cache.clear();
-        }
-        for cache in self.content_caches.values_mut() {
-            cache.clear();
-        }
+        self.data_plane.clear_all_caches();
+    }
+
+    fn get_operator(&self, source: &str) -> section_core::Result<&opendal::Operator> {
+        self.data_plane.router().get_operator(source)
+    }
+
+    fn source_names(&self) -> Vec<String> {
+        self.data_plane.source_names()
     }
 
     /// Flush dirty content for a file handle to the backend. Returns Ok on success.
@@ -227,7 +179,6 @@ impl SectionFs {
 
         let parsed = Router::parse_path(&path).ok_or(libc::EIO)?;
         let op = self
-            .router
             .get_operator(&parsed.source)
             .map_err(|_| libc::ENOENT)?
             .clone();
@@ -276,7 +227,7 @@ impl Filesystem for SectionFs {
             tracing::debug!(source = %parsed.source, path = %parsed.sub_path, "getattr metadata cache hit");
             meta
         } else {
-            let op = match self.router.get_operator(&parsed.source) {
+            let op = match self.get_operator(&parsed.source) {
                 Ok(op) => op.clone(),
                 Err(_) => {
                     reply.error(libc::ENOENT);
@@ -370,7 +321,7 @@ impl Filesystem for SectionFs {
 
         // Root → source directory lookup.
         if parent == ROOT_INO {
-            if self.router.sources().iter().any(|s| s == name_str.as_ref()) {
+            if self.source_names().iter().any(|s| s == name_str.as_ref()) {
                 let ino = self.inodes.ensure(
                     ROOT_INO,
                     &name_str,
@@ -404,7 +355,7 @@ impl Filesystem for SectionFs {
             }
         };
 
-        let op = match self.router.get_operator(&parsed.source) {
+        let op = match self.get_operator(&parsed.source) {
             Ok(o) => o.clone(),
             Err(_) => {
                 reply.error(libc::ENOENT);
@@ -476,7 +427,7 @@ impl Filesystem for SectionFs {
 
         if ino == ROOT_INO {
             // List source directories.
-            for source in self.router.sources() {
+            for source in self.source_names() {
                 let child_ino = self.inodes.ensure(
                     ROOT_INO,
                     &source,
@@ -498,7 +449,7 @@ impl Filesystem for SectionFs {
                 }
             };
 
-            let op = match self.router.get_operator(&parsed.source) {
+            let op = match self.get_operator(&parsed.source) {
                 Ok(o) => o.clone(),
                 Err(_) => {
                     reply.error(libc::ENOENT);
@@ -613,7 +564,7 @@ impl Filesystem for SectionFs {
             }
         };
 
-        let op = match self.router.get_operator(&parsed.source) {
+        let op = match self.get_operator(&parsed.source) {
             Ok(o) => o.clone(),
             Err(_) => {
                 reply.error(libc::ENOENT);
@@ -790,7 +741,7 @@ impl Filesystem for SectionFs {
             }
         };
 
-        let op = match self.router.get_operator(&parsed.source) {
+        let op = match self.get_operator(&parsed.source) {
             Ok(o) => o.clone(),
             Err(_) => {
                 reply.error(libc::ENOENT);
@@ -876,7 +827,7 @@ impl Filesystem for SectionFs {
             }
         };
 
-        let op = match self.router.get_operator(&parsed.source) {
+        let op = match self.get_operator(&parsed.source) {
             Ok(o) => o.clone(),
             Err(_) => {
                 reply.error(libc::ENOENT);
@@ -952,7 +903,7 @@ impl Filesystem for SectionFs {
             }
         };
 
-        let op = match self.router.get_operator(&parsed.source) {
+        let op = match self.get_operator(&parsed.source) {
             Ok(o) => o.clone(),
             Err(_) => {
                 reply.error(libc::ENOENT);
@@ -1007,7 +958,7 @@ impl Filesystem for SectionFs {
             }
         };
 
-        let op = match self.router.get_operator(&parsed.source) {
+        let op = match self.get_operator(&parsed.source) {
             Ok(o) => o.clone(),
             Err(_) => {
                 reply.error(libc::ENOENT);
@@ -1111,7 +1062,7 @@ impl Filesystem for SectionFs {
             return;
         }
 
-        let op = match self.router.get_operator(&old_parsed.source) {
+        let op = match self.get_operator(&old_parsed.source) {
             Ok(o) => o.clone(),
             Err(_) => {
                 reply.error(libc::ENOENT);

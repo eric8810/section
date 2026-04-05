@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 section-core.workspace = true
 section-provider.workspace = true
+opendal.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true

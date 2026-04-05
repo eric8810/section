@@ -21,7 +21,7 @@ Validated flows for the Linux FUSE path:
 - `section mount`
 - `ls` / `cat` through the mounted path
 - write-through via the mounted path
-- `section refresh` after an out-of-band backend mutation
+- refresh via the mount xattr after an out-of-band backend mutation
 - `section unmount`
 
 ## Prerequisites
@@ -209,7 +209,10 @@ printf 'written-through-mount\n' > .tmp/linux-fuse-mnt/my-files/mounted.txt
 cat .tmp/linux-fuse-src/mounted.txt
 
 printf 'updated-from-backend\n' > .tmp/linux-fuse-src/hello.txt
-./target/debug/section --config .tmp/linux-fuse.toml refresh my-files/hello.txt
+python3 - <<'PY'
+import os
+print(os.getxattr(".tmp/linux-fuse-mnt/my-files/hello.txt", "user.section.refresh").decode())
+PY
 cat .tmp/linux-fuse-mnt/my-files/hello.txt
 
 ./target/debug/section --config .tmp/linux-fuse.toml unmount .tmp/linux-fuse-mnt
@@ -220,7 +223,7 @@ Observed result:
 - `ls -l` on both CLI and mount path reported the correct file size for `hello.txt` (`19` bytes in the validation fixture), instead of the previous incorrect `0`.
 - `cat` through the mount returned the backend content.
 - writing `mounted.txt` through the mount persisted the file into the backend directory.
-- after an out-of-band backend update, the mounted view stayed stale until `section refresh`, then returned the new content.
+- after an out-of-band backend update, reading the `user.section.refresh` xattr invalidated the mounted view and the next `cat` returned the new content.
 - `section unmount` cleanly removed the mount.
 
 ## Known Caveats
