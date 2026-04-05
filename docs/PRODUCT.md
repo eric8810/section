@@ -125,20 +125,25 @@ Section 主线不承诺的是：
 
 ### 冲突解决方案
 
-MVP 不做自动 merge。
+MVP 不做自动 merge，也不做版本分叉模型。
+
+这里的 `conflict` 只表示一件事：
+
+- 本地上传基于旧的 remote 状态，Section 拒绝做 blind overwrite
 
 发生冲突时：
 
 - path 状态进入 `conflict`
 - 该 path 的自动同步暂停
 - 本地当前版本保留不动
-- 远端竞争版本写入内部 conflict store，而不是偷偷覆盖本地文件
+- 当前 remote 版本不会被自动覆盖
 
-用户只允许 3 种解决动作：
+用户只允许 2 种解决动作：
 
 - `use-local`
 - `use-remote`
-- `mark-merged`
+
+如果用户想手工 merge，也是在本地编辑完成后，最终再执行一次 `use-local`。
 
 只有显式 resolve 后，这个 path 才恢复正常同步。
 

@@ -122,26 +122,31 @@ Conflict is not an edge case; it is a first-class source/path state.
 
 Section should define:
 
-- what counts as concurrent local/remote divergence
+- what counts as a stale overwrite attempt
 - how conflict surfaces to user and agent
 - what repair actions exist
 
 ### MVP Conflict Policy
 
-MVP should use explicit resolution, not auto-merge.
+MVP should use explicit resolution, not auto-merge or version branches.
+
+In MVP, `conflict` means one thing:
+
+- local upload is based on an older remote version, and Section refuses a blind overwrite
 
 When a conflict is detected:
 
 - the path state becomes `conflict`
 - automatic sync for that path stops
 - the local current file is preserved
-- the competing remote version is stored in an internal conflict store
+- the remote current version is not overwritten automatically
 
 The allowed resolution actions are:
 
 - `use-local`
 - `use-remote`
-- `mark-merged`
+
+If a user wants to merge manually in an editor, that still ends as `use-local` after the merged local file is ready.
 
 After an explicit resolution, the path can return to normal sync.
 

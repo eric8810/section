@@ -112,5 +112,3 @@ This is intentional and explicit. The next pivot issue (`#22`) is where these se
   - add bidirectional sync and conflict resolution
 - `#24`
   - move CLI toward source/path control-plane behavior
-- `#25`
-  - evaluate later adapter paths

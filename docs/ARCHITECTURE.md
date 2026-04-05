@@ -154,8 +154,8 @@ CLI 不再是“产品本体”，而是 control plane client。
 1. user/agent edits local file
 2. local change is observed
 3. `sectiond` stages sync work
-4. remote write succeeds or conflict is surfaced
-5. conflict requires explicit `use-local` / `use-remote` / `mark-merged`
+4. remote write succeeds, or Section detects that the write is based on stale remote state
+5. stale overwrite is blocked and requires explicit `use-local` / `use-remote`
 
 ## 为什么这样比 FUSE-first 更合理
 

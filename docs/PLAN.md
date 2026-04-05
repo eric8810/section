@@ -98,8 +98,8 @@ Section 现在从 `FS-first mount product` pivot 到：
 - local change ingest
 - remote change ingest
 - bidirectional reconciliation
-- conflict surfacing
-- explicit conflict resolution flow
+- stale-overwrite detection
+- explicit overwrite/discard resolution flow
 
 ### Phase 5: 重写 control plane
 
