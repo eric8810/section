@@ -9,7 +9,6 @@ description = "FUSE filesystem daemon for Section"
 section-core.workspace = true
 section-provider.workspace = true
 sectiond.workspace = true
-fuser.workspace = true
 opendal.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
@@ -17,6 +16,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fuser = { workspace = true, features = ["libfuse"] }
 
 [dev-dependencies]
 tempfile.workspace = true

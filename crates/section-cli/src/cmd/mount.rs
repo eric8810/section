@@ -104,6 +104,29 @@ fn mount_hint() -> &'static str {
     }
 }
 
+fn mount_runtime_hint() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if Path::new("/Library/Filesystems/macfuse.fs").exists() && !macfuse_loaded() {
+            return Some(
+                "macFUSE is installed but its kernel extension is not approved/loaded. Open System Settings -> Privacy & Security, allow macFUSE, then re-login/reboot before retrying mount.".to_string(),
+            );
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macfuse_loaded() -> bool {
+    let output = match Command::new("kmutil").arg("showloaded").output() {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+
+    String::from_utf8_lossy(&output.stdout).contains("io.macfuse.filesystems.macfuse")
+}
+
 fn run_mount_preflight(mount_point: &Path) -> Result<()> {
     let mut issues = Vec::new();
 
@@ -204,21 +227,27 @@ fn wait_for_mount_ready(mut child: Child, mount_point: &Path) -> Result<()> {
         }
 
         if let Some(status) = child.try_wait()? {
+            let runtime_hint = mount_runtime_hint().unwrap_or_default();
             anyhow::bail!(
-                "section-fuse exited before {} became an active mount (status: {}). {}",
+                "section-fuse exited before {} became an active mount (status: {}). {}{}{}",
                 mount_point.display(),
                 status,
                 mount_hint(),
+                if runtime_hint.is_empty() { "" } else { " " },
+                runtime_hint,
             );
         }
 
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            let runtime_hint = mount_runtime_hint().unwrap_or_default();
             anyhow::bail!(
-                "Timed out waiting for {} to become an active mount. {}",
+                "Timed out waiting for {} to become an active mount. {}{}{}",
                 mount_point.display(),
                 mount_hint(),
+                if runtime_hint.is_empty() { "" } else { " " },
+                runtime_hint,
             );
         }
 
