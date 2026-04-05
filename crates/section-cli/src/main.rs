@@ -32,9 +32,15 @@ enum Commands {
     Ls {
         /// Path (e.g., my-s3/documents/)
         path: Option<String>,
+        /// Show richer metadata output
+        #[arg(short = 'l', long)]
+        long: bool,
     },
     /// Copy files
     Cp {
+        /// Copy directories recursively
+        #[arg(short, long)]
+        recursive: bool,
         /// Source path
         src: String,
         /// Destination path
@@ -133,8 +139,12 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Source { action } => cmd::source::run(action, &store, json),
-        Commands::Ls { path } => cmd::file::ls(&config, &store, path.as_deref(), json),
-        Commands::Cp { src, dst } => cmd::file::cp(&config, &store, &src, &dst, json),
+        Commands::Ls { path, long } => cmd::file::ls(&config, &store, path.as_deref(), json, long),
+        Commands::Cp {
+            recursive,
+            src,
+            dst,
+        } => cmd::file::cp(&config, &store, &src, &dst, recursive, json),
         Commands::Cat { path } => cmd::file::cat(&config, &store, &path, json),
         Commands::Rm { path, recursive } => cmd::file::rm(&config, &store, &path, recursive, json),
         Commands::Mount { path } => cmd::mount::mount(&config, cli.config.as_deref(), &path),

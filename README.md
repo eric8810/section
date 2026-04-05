@@ -55,8 +55,12 @@ section source list
 
 # File operations
 section ls my-files/
+section ls -l my-files/
 section cat my-files/hello.txt
 section cp my-files/doc.pdf work-s3/backup/doc.pdf
+section cp ./local.txt my-files/local.txt
+section cp my-files/report.pdf ./report.pdf
+section cp -r my-files/docs/ work-s3/docs/
 echo "hello" | section write my-files/greeting.txt
 section rm work-s3/old-file.txt
 

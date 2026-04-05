@@ -1,8 +1,12 @@
 use super::mount::is_mount_active;
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
+use futures::TryStreamExt;
+use opendal::{Entry, Metadata, Operator};
 use section_core::{Router, SectionConfig, SectionError};
 use section_provider::ProviderStore;
 use serde_json::json;
+use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const REFRESH_XATTR_NAME: &str = "section.refresh";
@@ -18,67 +22,471 @@ fn build_router(config: &SectionConfig, store: &ProviderStore) -> Result<Router>
     Ok(Router::from_config(&config)?)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyKind {
+    File,
+    Dir,
+}
+
+enum CopyLocation<'a> {
+    Source {
+        op: &'a Operator,
+        raw: &'a str,
+        sub_path: String,
+    },
+    Local {
+        raw: &'a str,
+        path: PathBuf,
+    },
+}
+
+impl CopyLocation<'_> {
+    fn display(&self) -> &str {
+        match self {
+            CopyLocation::Source { raw, .. } | CopyLocation::Local { raw, .. } => raw,
+        }
+    }
+
+    fn file_name(&self) -> Result<String> {
+        match self {
+            CopyLocation::Source { raw, sub_path, .. } => path_last_segment(sub_path)
+                .or_else(|| path_last_segment(raw))
+                .map(str::to_string),
+            CopyLocation::Local { path, .. } => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string),
+        }
+        .ok_or_else(|| anyhow!("unable to determine a file name for {}", self.display()))
+    }
+}
+
+fn is_source_path(router: &Router, path: &str) -> bool {
+    if path.is_empty()
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || path == "."
+        || path == ".."
+        || path.starts_with("~/")
+        || Path::new(path).is_absolute()
+    {
+        return false;
+    }
+
+    let trimmed = path.trim_start_matches('/');
+    let Some(source) = trimmed.split('/').next() else {
+        return false;
+    };
+
+    !source.is_empty() && router.get_operator(source).is_ok()
+}
+
+fn resolve_copy_location<'a>(router: &'a Router, raw: &'a str) -> Result<CopyLocation<'a>> {
+    if is_source_path(router, raw) {
+        let (op, sub_path) = router.resolve(raw)?;
+        Ok(CopyLocation::Source { op, raw, sub_path })
+    } else {
+        Ok(CopyLocation::Local {
+            raw,
+            path: PathBuf::from(raw),
+        })
+    }
+}
+
+fn metadata_kind(meta: &Metadata, path: &str) -> Result<CopyKind> {
+    if meta.is_dir() {
+        Ok(CopyKind::Dir)
+    } else if meta.is_file() {
+        Ok(CopyKind::File)
+    } else {
+        bail!("unsupported entry type for {path}")
+    }
+}
+
+fn raw_has_trailing_separator(raw: &str) -> bool {
+    raw.ends_with('/') || raw.ends_with(std::path::MAIN_SEPARATOR)
+}
+
+fn path_last_segment(path: &str) -> Option<&str> {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+}
+
+fn normalized_source_dir(path: &str) -> String {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}/")
+    }
+}
+
+fn join_source_path(base: &str, child: &str) -> String {
+    let base = base.trim_matches('/');
+    let child = child.trim_matches('/');
+
+    match (base.is_empty(), child.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => child.to_string(),
+        (false, true) => base.to_string(),
+        (false, false) => format!("{base}/{child}"),
+    }
+}
+
+fn source_parent_dir(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    trimmed
+        .rsplit_once('/')
+        .map(|(parent, _)| normalized_source_dir(parent))
+        .filter(|parent| !parent.is_empty())
+}
+
+fn source_path_with_relative(root: &str, relative: &str, kind: CopyKind) -> String {
+    let joined = join_source_path(root, relative);
+    if kind == CopyKind::Dir {
+        normalized_source_dir(&joined)
+    } else {
+        joined
+    }
+}
+
+fn relative_to_source_root(root: &str, path: &str) -> String {
+    let root = normalized_source_dir(root);
+    if root.is_empty() {
+        path.trim_matches('/').to_string()
+    } else {
+        path.strip_prefix(&root)
+            .unwrap_or(path)
+            .trim_matches('/')
+            .to_string()
+    }
+}
+
+fn source_stat(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    sub_path: &str,
+    raw: &str,
+) -> std::result::Result<Metadata, SectionError> {
+    let mut last_not_found = None;
+
+    for candidate in [sub_path.to_string(), normalized_source_dir(sub_path)] {
+        if candidate.is_empty() {
+            continue;
+        }
+
+        match rt.block_on(op.stat(&candidate)) {
+            Ok(meta) => return Ok(meta),
+            Err(err) if err.kind() == opendal::ErrorKind::NotFound => {
+                last_not_found = Some(err);
+            }
+            Err(err) => return Err(SectionError::from_opendal(err, raw)),
+        }
+    }
+
+    Err(SectionError::from_opendal(
+        last_not_found
+            .unwrap_or_else(|| opendal::Error::new(opendal::ErrorKind::NotFound, "path not found")),
+        raw,
+    ))
+}
+
+fn source_kind(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    sub_path: &str,
+    raw: &str,
+) -> Result<CopyKind> {
+    if sub_path.is_empty() {
+        return Ok(CopyKind::Dir);
+    }
+
+    Ok(metadata_kind(&source_stat(rt, op, sub_path, raw)?, raw)?)
+}
+
+fn local_kind(path: &Path, raw: &str) -> Result<CopyKind> {
+    let meta =
+        fs::metadata(path).map_err(|err| anyhow!("failed to read metadata for {raw}: {err}"))?;
+    if meta.is_dir() {
+        Ok(CopyKind::Dir)
+    } else if meta.is_file() {
+        Ok(CopyKind::File)
+    } else {
+        bail!("unsupported local file type for {raw}")
+    }
+}
+
+fn copy_kind(rt: &tokio::runtime::Runtime, location: &CopyLocation<'_>) -> Result<CopyKind> {
+    match location {
+        CopyLocation::Source {
+            op, raw, sub_path, ..
+        } => source_kind(rt, op, sub_path, raw),
+        CopyLocation::Local { raw, path } => local_kind(path, raw),
+    }
+}
+
+fn ensure_local_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_source_parent(rt: &tokio::runtime::Runtime, op: &Operator, path: &str) -> Result<()> {
+    if let Some(parent) = source_parent_dir(path) {
+        rt.block_on(op.create_dir(&parent))?;
+    }
+    Ok(())
+}
+
+fn resolve_local_file_destination(raw: &str, path: &Path, file_name: &str) -> PathBuf {
+    if path.is_dir() || raw_has_trailing_separator(raw) {
+        path.join(file_name)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn resolve_source_file_destination(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    raw: &str,
+    sub_path: &str,
+    file_name: &str,
+) -> Result<String> {
+    if sub_path.is_empty() {
+        return Ok(file_name.to_string());
+    }
+
+    match source_stat(rt, op, sub_path, raw) {
+        Ok(meta) if meta.is_dir() => Ok(join_source_path(sub_path, file_name)),
+        Ok(_) => Ok(sub_path.to_string()),
+        Err(SectionError::FileNotFound(_)) | Err(SectionError::InvalidPath(_)) => {
+            if raw_has_trailing_separator(raw) {
+                Ok(join_source_path(sub_path, file_name))
+            } else {
+                Ok(sub_path.to_string())
+            }
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn source_dir_destination_root(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    raw: &str,
+    sub_path: &str,
+) -> Result<String> {
+    if sub_path.is_empty() {
+        return Ok(String::new());
+    }
+
+    match source_stat(rt, op, sub_path, raw) {
+        Ok(meta) if meta.is_file() => bail!(
+            "destination {} is a file; directory copy requires a directory destination",
+            raw
+        ),
+        Ok(_) | Err(SectionError::FileNotFound(_)) | Err(SectionError::InvalidPath(_)) => {
+            Ok(sub_path.to_string())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn local_dir_destination_root(raw: &str, path: &Path) -> Result<PathBuf> {
+    if path.exists() && !path.is_dir() {
+        bail!(
+            "destination {} is a file; directory copy requires a directory destination",
+            raw
+        );
+    }
+    Ok(path.to_path_buf())
+}
+
+fn list_source_tree(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    root: &str,
+    raw: &str,
+) -> Result<Vec<(String, CopyKind)>> {
+    let entries: Vec<Entry> = rt.block_on(async {
+        op.list_with(&normalized_source_dir(root))
+            .recursive(true)
+            .await
+    })?;
+    let mut items = Vec::new();
+
+    for entry in entries {
+        let relative = relative_to_source_root(root, entry.path());
+        if relative.is_empty() {
+            continue;
+        }
+        items.push((relative, metadata_kind(entry.metadata(), raw)?));
+    }
+
+    items.sort_by(|(left, _), (right, _)| left.cmp(right));
+    Ok(items)
+}
+
+fn list_local_tree(root: &Path) -> Result<Vec<(PathBuf, CopyKind)>> {
+    fn walk(current: &Path, root: &Path, items: &mut Vec<(PathBuf, CopyKind)>) -> Result<()> {
+        let mut entries = fs::read_dir(current)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|err| {
+                    anyhow!(
+                        "failed to derive relative path for {}: {err}",
+                        path.display()
+                    )
+                })?
+                .to_path_buf();
+            let metadata = entry.metadata()?;
+
+            if metadata.is_dir() {
+                items.push((relative.clone(), CopyKind::Dir));
+                walk(&path, root, items)?;
+            } else if metadata.is_file() {
+                items.push((relative, CopyKind::File));
+            } else {
+                bail!("unsupported local file type for {}", path.display());
+            }
+        }
+
+        Ok(())
+    }
+
+    let mut items = Vec::new();
+    walk(root, root, &mut items)?;
+    Ok(items)
+}
+
+fn relative_path_to_source(relative: &Path) -> Result<String> {
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(value) => parts.push(
+                value
+                    .to_str()
+                    .ok_or_else(|| anyhow!("non-utf8 path component in {}", relative.display()))?
+                    .to_string(),
+            ),
+            _ => bail!("unsupported path component in {}", relative.display()),
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+fn print_ls_entry(
+    name: &str,
+    kind: CopyKind,
+    size: Option<u64>,
+    modified: Option<&str>,
+    long: bool,
+) {
+    if long {
+        let entry_type = match kind {
+            CopyKind::Dir => "dir",
+            CopyKind::File => "file",
+        };
+        let size = size
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let modified = modified.unwrap_or("-");
+        println!("{entry_type:<4} {size:>12} {modified:<30} {name}");
+    } else if kind == CopyKind::Dir {
+        println!("  {name}");
+    } else {
+        let size = size.unwrap_or_default();
+        println!("  {name}  ({size} bytes)");
+    }
+}
+
 pub fn ls(
     config: &SectionConfig,
     store: &ProviderStore,
     path: Option<&str>,
     json_mode: bool,
+    long_mode: bool,
 ) -> Result<()> {
     let router = build_router(config, store)?;
-
     let path = path.unwrap_or("").trim_matches('/');
 
-    // Root level: list all sources
     if path.is_empty() {
         if json_mode {
             let arr: Vec<serde_json::Value> = router
                 .sources()
                 .into_iter()
-                .map(|s| json!({"name": format!("{s}/"), "type": "directory"}))
+                .map(|source| {
+                    json!({
+                        "name": format!("{source}/"),
+                        "type": "directory",
+                        "size": serde_json::Value::Null,
+                        "last_modified": serde_json::Value::Null,
+                    })
+                })
                 .collect();
             println!("{}", serde_json::to_string(&arr)?);
         } else {
             for source in router.sources() {
-                println!("  {source}/");
+                print_ls_entry(&format!("{source}/"), CopyKind::Dir, None, None, long_mode);
             }
         }
         return Ok(());
     }
 
-    // Check if path is just a source name (no sub-path)
     let (op, sub_path) = router.resolve(path)?;
-    let sub_path = if sub_path.is_empty() || sub_path.ends_with('/') {
-        sub_path
-    } else {
-        format!("{sub_path}/")
-    };
-
+    let sub_path = normalized_source_dir(&sub_path);
     let rt = tokio::runtime::Runtime::new()?;
-    let entries = rt.block_on(op.list(&sub_path))?;
+    let mut entries = rt.block_on(op.list(&sub_path))?;
+    entries.sort_by(|left, right| entry_name(left).cmp(&entry_name(right)));
 
     if json_mode {
         let arr: Vec<serde_json::Value> = entries
             .iter()
             .map(|entry| {
-                let name = entry.name();
-                if entry.metadata().is_dir() {
-                    json!({"name": format!("{name}/"), "type": "directory"})
-                } else {
-                    let size = entry.metadata().content_length();
-                    json!({"name": name, "type": "file", "size": size})
-                }
+                json!({
+                    "name": entry_name(entry),
+                    "type": if entry.metadata().is_dir() { "directory" } else { "file" },
+                    "size": if entry.metadata().is_file() {
+                        serde_json::Value::from(entry.metadata().content_length())
+                    } else {
+                        serde_json::Value::Null
+                    },
+                    "last_modified": entry
+                        .metadata()
+                        .last_modified()
+                        .map(|ts| ts.to_string())
+                        .map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null),
+                })
             })
             .collect();
         println!("{}", serde_json::to_string(&arr)?);
     } else {
         for entry in entries {
-            let name = entry.name();
-            if entry.metadata().is_dir() {
-                println!("  {name}/");
+            let kind = metadata_kind(entry.metadata(), entry.path())?;
+            let size = if kind == CopyKind::File {
+                Some(entry.metadata().content_length())
             } else {
-                let size = entry.metadata().content_length();
-                println!("  {name}  ({size} bytes)");
-            }
+                None
+            };
+            let modified = entry.metadata().last_modified().map(|ts| ts.to_string());
+            print_ls_entry(
+                &entry_name(&entry),
+                kind,
+                size,
+                modified.as_deref(),
+                long_mode,
+            );
         }
     }
 
@@ -95,16 +503,21 @@ pub fn cat(
     let (op, sub_path) = router.resolve(path)?;
 
     let rt = tokio::runtime::Runtime::new()?;
-    let data = rt
-        .block_on(op.read(&sub_path))
-        .map_err(|e| SectionError::from_opendal(e, path))?;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    std::io::Write::write_all(&mut handle, &data.to_vec())?;
+    let reader = rt
+        .block_on(op.reader(&sub_path))
+        .map_err(|e| SectionError::from_opendal(e, path))?;
+    let mut stream = rt
+        .block_on(reader.into_bytes_stream(..))
+        .map_err(|e| SectionError::from_opendal(e, path))?;
 
-    // cat outputs raw content to stdout. The JSON flag is accepted for
-    // signature consistency but has no additional effect since the primary
-    // output IS the file content.
+    while let Some(chunk) = rt
+        .block_on(stream.try_next())
+        .map_err(|e| anyhow!("failed to stream {path}: {e}"))?
+    {
+        handle.write_all(chunk.as_ref())?;
+    }
 
     Ok(())
 }
@@ -114,29 +527,213 @@ pub fn cp(
     store: &ProviderStore,
     src: &str,
     dst: &str,
+    recursive: bool,
     json_mode: bool,
 ) -> Result<()> {
     let router = build_router(config, store)?;
-    let (src_op, src_path) = router.resolve(src)?;
-    let (dst_op, dst_path) = router.resolve(dst)?;
-
+    let src_location = resolve_copy_location(&router, src)?;
+    let dst_location = resolve_copy_location(&router, dst)?;
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let data = src_op
-            .read(&src_path)
-            .await
-            .map_err(|e| SectionError::from_opendal(e, src))?;
-        dst_op
-            .write(&dst_path, data)
-            .await
-            .map_err(|e| SectionError::from_opendal(e, dst))?;
-        Ok::<_, SectionError>(())
-    })?;
+
+    match copy_kind(&rt, &src_location)? {
+        CopyKind::File => {
+            let src_name = src_location.file_name()?;
+            match (&src_location, &dst_location) {
+                (
+                    CopyLocation::Source {
+                        op: src_op,
+                        sub_path: src_path,
+                        ..
+                    },
+                    CopyLocation::Source {
+                        op: dst_op,
+                        raw: dst_raw,
+                        sub_path: dst_path,
+                    },
+                ) => {
+                    let target =
+                        resolve_source_file_destination(&rt, dst_op, dst_raw, dst_path, &src_name)?;
+                    let data = rt
+                        .block_on(src_op.read(src_path))
+                        .map_err(|e| SectionError::from_opendal(e, src))?;
+                    ensure_source_parent(&rt, dst_op, &target)?;
+                    rt.block_on(dst_op.write(&target, data))
+                        .map_err(|e| SectionError::from_opendal(e, dst))?;
+                }
+                (
+                    CopyLocation::Source {
+                        op: src_op,
+                        sub_path: src_path,
+                        ..
+                    },
+                    CopyLocation::Local {
+                        raw: dst_raw,
+                        path: dst_path,
+                    },
+                ) => {
+                    let target = resolve_local_file_destination(dst_raw, dst_path, &src_name);
+                    ensure_local_parent(&target)?;
+                    let data = rt
+                        .block_on(src_op.read(src_path))
+                        .map_err(|e| SectionError::from_opendal(e, src))?;
+                    fs::write(&target, data.to_bytes())?;
+                }
+                (
+                    CopyLocation::Local { path: src_path, .. },
+                    CopyLocation::Source {
+                        op: dst_op,
+                        raw: dst_raw,
+                        sub_path: dst_path,
+                    },
+                ) => {
+                    let target =
+                        resolve_source_file_destination(&rt, dst_op, dst_raw, dst_path, &src_name)?;
+                    ensure_source_parent(&rt, dst_op, &target)?;
+                    rt.block_on(dst_op.write(&target, fs::read(src_path)?))
+                        .map_err(|e| SectionError::from_opendal(e, dst))?;
+                }
+                (
+                    CopyLocation::Local { path: src_path, .. },
+                    CopyLocation::Local {
+                        raw: dst_raw,
+                        path: dst_path,
+                    },
+                ) => {
+                    let target = resolve_local_file_destination(dst_raw, dst_path, &src_name);
+                    ensure_local_parent(&target)?;
+                    fs::copy(src_path, &target)?;
+                }
+            }
+        }
+        CopyKind::Dir => {
+            if !recursive {
+                bail!("{} is a directory; use -r to copy recursively", src);
+            }
+
+            match (&src_location, &dst_location) {
+                (
+                    CopyLocation::Source {
+                        op: src_op,
+                        raw: src_raw,
+                        sub_path: src_root,
+                    },
+                    CopyLocation::Source {
+                        op: dst_op,
+                        raw: dst_raw,
+                        sub_path: dst_root,
+                    },
+                ) => {
+                    let dst_root = source_dir_destination_root(&rt, dst_op, dst_raw, dst_root)?;
+                    if !dst_root.is_empty() {
+                        rt.block_on(dst_op.create_dir(&normalized_source_dir(&dst_root)))?;
+                    }
+                    for (relative, kind) in list_source_tree(&rt, src_op, src_root, src_raw)? {
+                        let src_path = source_path_with_relative(src_root, &relative, kind);
+                        let dst_path = source_path_with_relative(&dst_root, &relative, kind);
+                        match kind {
+                            CopyKind::Dir => {
+                                rt.block_on(dst_op.create_dir(&dst_path))?;
+                            }
+                            CopyKind::File => {
+                                ensure_source_parent(&rt, dst_op, &dst_path)?;
+                                let data = rt
+                                    .block_on(src_op.read(&src_path))
+                                    .map_err(|e| SectionError::from_opendal(e, src))?;
+                                rt.block_on(dst_op.write(&dst_path, data))
+                                    .map_err(|e| SectionError::from_opendal(e, dst))?;
+                            }
+                        }
+                    }
+                }
+                (
+                    CopyLocation::Source {
+                        op: src_op,
+                        raw: src_raw,
+                        sub_path: src_root,
+                    },
+                    CopyLocation::Local {
+                        raw: dst_raw,
+                        path: dst_root,
+                    },
+                ) => {
+                    let dst_root = local_dir_destination_root(dst_raw, dst_root)?;
+                    fs::create_dir_all(&dst_root)?;
+                    for (relative, kind) in list_source_tree(&rt, src_op, src_root, src_raw)? {
+                        let target = dst_root.join(&relative);
+                        match kind {
+                            CopyKind::Dir => fs::create_dir_all(&target)?,
+                            CopyKind::File => {
+                                ensure_local_parent(&target)?;
+                                let src_path = source_path_with_relative(src_root, &relative, kind);
+                                let data = rt
+                                    .block_on(src_op.read(&src_path))
+                                    .map_err(|e| SectionError::from_opendal(e, src))?;
+                                fs::write(&target, data.to_bytes())?;
+                            }
+                        }
+                    }
+                }
+                (
+                    CopyLocation::Local {
+                        raw: src_raw,
+                        path: src_root,
+                    },
+                    CopyLocation::Source {
+                        op: dst_op,
+                        raw: dst_raw,
+                        sub_path: dst_root,
+                    },
+                ) => {
+                    let dst_root = source_dir_destination_root(&rt, dst_op, dst_raw, dst_root)?;
+                    if !dst_root.is_empty() {
+                        rt.block_on(dst_op.create_dir(&normalized_source_dir(&dst_root)))?;
+                    }
+                    for (relative, kind) in list_local_tree(src_root)? {
+                        let relative = relative_path_to_source(&relative)?;
+                        let dst_path = source_path_with_relative(&dst_root, &relative, kind);
+                        match kind {
+                            CopyKind::Dir => {
+                                rt.block_on(dst_op.create_dir(&dst_path))?;
+                            }
+                            CopyKind::File => {
+                                ensure_source_parent(&rt, dst_op, &dst_path)?;
+                                let src_path = src_root
+                                    .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+                                rt.block_on(dst_op.write(&dst_path, fs::read(src_path)?))
+                                    .map_err(|e| SectionError::from_opendal(e, dst))?;
+                            }
+                        }
+                    }
+                    let _ = src_raw;
+                }
+                (
+                    CopyLocation::Local { path: src_root, .. },
+                    CopyLocation::Local {
+                        raw: dst_raw,
+                        path: dst_root,
+                    },
+                ) => {
+                    let dst_root = local_dir_destination_root(dst_raw, dst_root)?;
+                    fs::create_dir_all(&dst_root)?;
+                    for (relative, kind) in list_local_tree(src_root)? {
+                        let target = dst_root.join(&relative);
+                        match kind {
+                            CopyKind::Dir => fs::create_dir_all(&target)?,
+                            CopyKind::File => {
+                                ensure_local_parent(&target)?;
+                                fs::copy(src_root.join(&relative), &target)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if json_mode {
         println!(
             "{}",
-            json!({"ok": true, "message": format!("Copied {src} -> {dst}")})
+            json!({"ok": true, "recursive": recursive, "message": format!("Copied {src} -> {dst}")})
         );
     } else {
         println!("Copied {src} -> {dst}");
@@ -171,6 +768,15 @@ pub fn rm(
         println!("Removed {path}");
     }
     Ok(())
+}
+
+fn entry_name(entry: &Entry) -> String {
+    let name = entry.name().trim_end_matches('/');
+    if entry.metadata().is_dir() {
+        format!("{name}/")
+    } else {
+        name.to_string()
+    }
 }
 
 fn refresh_attr_names() -> &'static [&'static str] {
@@ -268,7 +874,7 @@ pub fn write_stdin(
     let (op, sub_path) = router.resolve(path)?;
 
     let mut buf = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
+    std::io::stdin().read_to_end(&mut buf)?;
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(op.write(&sub_path, buf))?;

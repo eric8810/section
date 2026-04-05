@@ -49,6 +49,9 @@ fn create_read_test_dir(world: &mut SectionWorld, path: String) {
             ("data/config.yaml", "key: value"),
         ],
     );
+
+    let large = "0123456789abcdef".repeat(16 * 1024) + "END-OF-LARGE-FILE";
+    fs::write(base.join("large.txt"), large).expect("failed to write large test file");
 }
 
 // --- file_copy.feature background ---
@@ -138,4 +141,15 @@ fn external_modify_file(world: &mut SectionWorld, path: String, content: String)
     let mut f = fs::File::create(&path).expect("failed to open file for external modify");
     f.write_all(content.as_bytes())
         .expect("failed to write external modification");
+}
+
+/// 假如 本地文件 "{path}" 内容为 "{content}"
+#[given(expr = "本地文件 {string} 内容为 {string}")]
+fn local_file_with_content(world: &mut SectionWorld, path: String, content: String) {
+    let _ = world;
+    let file_path = Path::new(&path);
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent).expect("failed to create local file parent");
+    }
+    fs::write(file_path, content).expect("failed to write local file content");
 }

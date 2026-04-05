@@ -4,8 +4,8 @@
 
 当前仓库更接近“跨平台目标下的工程原型”，还不是已经做实的双平台 MVP。
 已验证的事实：
-- `section-cli` BDD 测试 27/27 场景通过
-- `section-provider --lib` 单元测试 3/3 通过
+- `section-cli` BDD 测试 32/32 场景通过
+- `section-core` / `section-provider` 当前单元测试共 36/36 通过
 - 当前 macOS 环境下，整仓 FUSE 路径还不能被视为已验证完成
 
 ### 各模块完成度
@@ -13,20 +13,20 @@
 | 模块 | 状态 | 说明 |
 |------|------|------|
 | **section-core/config** | 90% | 配置加载/序列化可用，缺少配置校验 |
-| **section-core/router** | 90% | 路径解析和 Operator 构建可用，fs 后端 BDD 验证通过，缺单元测试 |
-| **section-core/permission** | 70% | 数据结构和检查逻辑完整，已接入 FUSE，未持久化到 SQLite，缺单元测试 |
-| **section-core/cache** | 50% | MetadataCache (TTL) + ContentCache (LRU) 已实现含 23 个单元测试，但未接入 FUSE |
-| **section-provider/store** | 90% | SQLite CRUD 完整，AES-256-GCM 加密存储，脱敏显示 |
+| **section-core/router** | 100% | 路径解析、Operator 构建、排序与错误路径单元测试已补齐 |
+| **section-core/permission** | 85% | 数据结构和检查逻辑完整，已接入 FUSE，未持久化到 SQLite，关键权限单元测试已补齐 |
+| **section-core/cache** | 90% | MetadataCache + ContentCache 已接入 FUSE，并支持 refresh/xattr 失效 |
+| **section-provider/store** | 95% | SQLite CRUD、AES-256-GCM 加密存储、脱敏显示、明文迁移测试已就位 |
 | **section-provider/crypto** | 100% | AES-256-GCM 加解密，密钥自动生成/加载，3 个单元测试 |
 | **section-provider/oauth** | 0% | 未实现（Phase 2） |
-| **section-fuse/fs** | 85% | 完整 FUSE 实现（读写删改名权限），缓存未接入 |
+| **section-fuse/fs** | 90% | 完整 FUSE 实现（读写删改名权限），metadata/content cache 与 refresh 已接入，缺真实挂载验证 |
 | **section-fuse/inode** | 100% | 动态 inode 分配、lookup 缓存、父子关系追踪 |
 | **section-cli/source** | 100% | add/remove/list + 脱敏 + JSON |
-| **section-cli/file** | 70% | ls/cp/cat/rm/write/exec 可用，cp 不支持递归和本地路径，cat 不支持流式 |
+| **section-cli/file** | 95% | ls/cp/cat/rm/write/exec 可用，已补齐 `ls -l`、本地/remote copy、递归 copy、cat 流式输出 |
 | **section-cli/mount** | 35% | 调用 section-fuse 子进程，已开始补平台差异处理，但双平台挂载尚未验证 |
 | **section-cli/init** | 100% | 交互式引导创建 source |
 | **section-cli/status** | 100% | 挂载状态 + 连通性探测 + JSON |
-| **测试** | 70% | BDD 27 场景 + 25 单元测试，缺 Router/Permission/Store 单元测试 |
+| **测试** | 85% | BDD 32 场景 + 40 单元测试，仍缺真实后端与真实挂载路径验证 |
 | **文档** | 80% | PRODUCT.md + README.md 完成，缺 config.example.toml |
 
 ---
@@ -44,10 +44,10 @@
 - [x] 确认 OpenDAL API 在实际使用中的坑（via_iter 类型、write 空 Vec 歧义等）
 
 #### 2. CLI 文件操作补全 [P0]
-- [ ] `section ls` 输出优化（大小、时间、权限的格式化显示）— 当前仅 name + size
-- [ ] `section cp` 支持递归复制目录 — 当前仅单文件
-- [ ] `section cp` 支持本地路径 ↔ source 路径互拷 — 当前仅 source 间
-- [ ] `section cat` 支持大文件流式输出 — 当前一次性读入内存
+- [x] `section ls` 输出优化（大小、时间、权限的格式化显示）— 已支持 `ls -l`
+- [x] `section cp` 支持递归复制目录
+- [x] `section cp` 支持本地路径 ↔ source 路径互拷
+- [x] `section cat` 支持大文件流式输出
 - [x] `section exec` 实现（下载到临时文件 → chmod +x → 执行 → 清理）
 - [x] `section write` 或管道写入支持（`echo "data" | section write work-s3/file.txt`）
 
@@ -56,10 +56,10 @@
 - [x] 敏感字段在 `section source list` 中脱敏显示
 
 #### 4. 基础测试 [P1]
-- [ ] section-core: Router 路径解析单元测试
-- [ ] section-core: Permission 权限检查单元测试
-- [ ] section-provider: ProviderStore CRUD 单元测试
-- [x] section-cli: 集成测试（用 fs provider 做端到端，27 个 BDD 场景）
+- [x] section-core: Router 路径解析单元测试
+- [x] section-core: Permission 权限检查单元测试
+- [x] section-provider: ProviderStore CRUD / 迁移 单元测试
+- [x] section-cli: 集成测试（用 fs provider 做端到端，32 个 BDD 场景）
 
 **交付物：一个可用的 CLI 工具，能管理多 source 并执行文件操作。** ✅ 基本达成
 

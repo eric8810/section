@@ -27,6 +27,13 @@
     而且 输出应该包含 "readme.md"
     而且 输出应该包含 "guide.md"
 
+  场景: 以长格式列出 source 根目录
+    当 我执行 "section ls -l test/"
+    那么 命令应该成功
+    而且 输出应该包含 "file"
+    而且 输出应该包含 "dir"
+    而且 输出应该包含 "hello.txt"
+
   场景: 读取文件内容
     当 我执行 "section cat test/hello.txt"
     那么 命令应该成功
@@ -36,6 +43,11 @@
     当 我执行 "section cat test/docs/readme.md"
     那么 命令应该成功
     而且 输出应该等于 "# README"
+
+  场景: 读取较大文件内容
+    当 我执行 "section cat test/large.txt"
+    那么 命令应该成功
+    而且 输出应该包含 "END-OF-LARGE-FILE"
 
   场景: 读取不存在的文件
     当 我执行 "section cat test/nonexistent.txt"

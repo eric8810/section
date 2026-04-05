@@ -32,3 +32,21 @@
     那么 命令应该成功
     当 我执行 "section cat src/report-backup.pdf"
     那么 输出应该等于 "PDF_CONTENT"
+
+  场景: 从本地文件拷贝到 source
+    假如 本地文件 "/tmp/section-test-local/local.txt" 内容为 "LOCAL_CONTENT"
+    当 我执行 "section cp /tmp/section-test-local/local.txt dst/from-local.txt"
+    那么 命令应该成功
+    当 我执行 "section cat dst/from-local.txt"
+    那么 输出应该等于 "LOCAL_CONTENT"
+
+  场景: 从 source 拷贝到本地文件
+    当 我执行 "section cp src/report.pdf /tmp/section-test-out/report.pdf"
+    那么 命令应该成功
+    而且 本地文件 "/tmp/section-test-out/report.pdf" 内容应该等于 "PDF_CONTENT"
+
+  场景: 递归拷贝目录
+    当 我执行 "section cp -r src/data/ dst/copied-data/"
+    那么 命令应该成功
+    当 我执行 "section cat dst/copied-data/a.csv"
+    那么 输出应该等于 "col1,col2"

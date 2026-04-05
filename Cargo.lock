@@ -2021,6 +2021,7 @@ dependencies = [
  "clap",
  "cucumber",
  "futures",
+ "opendal",
  "section-core",
  "section-provider",
  "serde",
