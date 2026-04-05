@@ -6,7 +6,7 @@ This document defines the new product mainline for Section after the pivot away 
 
 The mainline question is now:
 
-> What does Section guarantee when it exposes sources and paths with truthful sync, materialization, and conflict state?
+> What does Section guarantee when it exposes sources and paths with truthful sync and conflict state?
 
 ## Core Promise
 
@@ -16,9 +16,9 @@ That means:
 
 - sources remain the primary configured objects
 - paths remain the primary content objects
-- files and directories can be materialized locally
+- files and directories can be synced into a local directory
 - local and remote changes can be reconciled
-- sync, pending, conflict, and readiness states are visible
+- user-facing state stays simple and truthful
 
 It does **not** mean:
 
@@ -32,7 +32,7 @@ Each source should define:
 
 - backend/provider identity
 - remote root
-- optional local materialized root
+- optional local root
 - source health
 - source sync mode / policy
 
@@ -54,27 +54,35 @@ Deferred object classes:
 
 ## State Model
 
-### Object Readiness
+### Public Path State
 
-Each path object should surface at least:
+Each path should expose only:
 
-- `materialized`
-- `not_materialized`
+- `ready`
 - `syncing`
-- `dirty_local`
-- `dirty_remote`
 - `conflict`
 - `error`
 
-### Source Health
+### Public Source State
 
-Each source should surface at least:
+Each source should expose only:
 
-- `healthy`
+- `ready`
 - `syncing`
-- `offline`
-- `degraded`
-- `conflict_present`
+- `conflict`
+- `error`
+
+### Detail Fields
+
+The following should stay out of the main user-facing state model and only appear in details / diagnostics / machine-readable output:
+
+- `local_present`
+- `dirty_local`
+- `dirty_remote`
+- `pinned`
+- `stale`
+- health reason
+- error reason
 
 ## Metadata Policy
 
@@ -96,17 +104,17 @@ MVP should not promise strict preservation of:
 
 If some of these are present on a specific platform/backend combination, they are best-effort enhancements, not the primary contract.
 
-## Materialization Model
+## Local Presence Model
 
-Section needs explicit states for:
+Section still needs internal detail for:
 
 - source local-root binding
-- on-demand materialization
+- local file presence
 - pinned local content
 - evictable local content
 - stale local content awaiting refresh
 
-The product should prefer explicitness over pretending all visible paths are equally ready.
+But these should not become the primary user-facing state names.
 
 ## Conflict Model
 
@@ -125,7 +133,8 @@ Section does not promise that every file visible under a source path is immediat
 
 Section should promise only:
 
-- readiness/materialization visibility
+- public state visibility
+- local presence detail when needed
 - clear local vs remote state
 - truthful source/path state
 
@@ -140,11 +149,11 @@ Execution must be defined separately by runtime policy, for example:
 
 The product must be honest about:
 
-- which files are local
-- which files are only placeholders or not yet materialized
-- which files are dirty
+- which paths are `ready / syncing / conflict / error`
+- which files are already local when users need that detail
+- which files are dirty when diagnostics require it
 - which files are conflicted
-- which sources are healthy / syncing / degraded / offline
+- which sources are `ready / syncing / conflict / error`
 - which objects fall outside MVP fidelity
 
 ## Future Extensions

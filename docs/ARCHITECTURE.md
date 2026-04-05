@@ -12,6 +12,7 @@ Section 的主目标从“挂载统一命名空间”调整为：
 - `sectiond` 是真实状态机
 - `runtime` 单独负责执行一致性
 - mount / native integration 变成后续 adapter，而不是主线前提
+- 对外状态保持在 `ready / syncing / conflict / error`
 
 ## 顶层原则
 
@@ -21,7 +22,7 @@ Section 的主目标从“挂载统一命名空间”调整为：
 
 - 一个 source 和它的 path 视图
 - 某些 source/path 可以落在本地目录里直接使用
-- 可以知道哪些内容已物化、哪些待同步、哪些冲突
+- 可以知道当前是 `ready / syncing / conflict / error`
 
 而不是：
 
@@ -30,7 +31,7 @@ Section 的主目标从“挂载统一命名空间”调整为：
 
 ### 2. sectiond 是唯一真实状态机
 
-缓存、同步、refresh、冲突、materialization、source 生命周期，不应散落在：
+缓存、同步、refresh、冲突、本地状态、source 生命周期，不应散落在：
 
 - `section-cli`
 - 未来 GUI
@@ -54,10 +55,10 @@ execution contract 由 runtime 层承接。
 ```text
  Humans / Agents / Shell / Editors
                 |
-   Local Materialized Source Paths
+        Local Source Trees
                 |
             sectiond core
- source registry / sync state / materialization
+ source registry / sync state / local detail
  local change ingest / remote change ingest / conflicts
                 |
        +--------+--------+
@@ -79,7 +80,8 @@ execution contract 由 runtime 层承接。
 - source registry
 - source local-root bindings
 - remote operator 生命周期
-- source/path materialization 状态
+- source/path public state
+- source/path detail state
 - sync scheduler
 - metadata/content cache
 - local change detection ingestion
@@ -95,20 +97,20 @@ CLI 的目标职责：
 
 - source / path 管理
 - status / health / diagnostics
-- sync / materialize / pin / repair
+- sync / pull / pin / repair
 - conflict inspection
 - 在无 GUI 时充当控制面入口
 
 CLI 不再是“产品本体”，而是 control plane client。
 
-### Local Materialized Tree
+### Local Source Tree
 
-本地 materialized tree 是主工作面，但它不是额外的顶层对象。
+本地 source tree 是主工作面，但它不是额外的顶层对象。
 
 它应该支持：
 
 - 普通文件/目录读写
-- 部分内容未物化时的诚实状态
+- 简单而诚实的外部状态
 - 本地修改可被检测和同步
 - agent 与人类共享同一目录
 
@@ -133,26 +135,34 @@ CLI 不再是“产品本体”，而是 control plane client。
 
 ## 核心状态模型
 
-### Object State
+### Public Path State
 
-每个 path object 至少要区分：
+每个 path 对外只区分：
 
-- present and materialized
-- present but not materialized
-- local dirty
-- remote newer
-- in conflict
-- failed / needs repair
+- `ready`
+- `syncing`
+- `conflict`
+- `error`
 
-### Source State
+### Public Source State
 
-每个 source 至少要区分：
+每个 source 对外只区分：
 
-- healthy
-- syncing
-- offline
-- degraded
-- conflict present
+- `ready`
+- `syncing`
+- `conflict`
+- `error`
+
+### Detail Fields
+
+内部或详情视图可以再细分：
+
+- `local_present`
+- `dirty_local`
+- `dirty_remote`
+- `pinned`
+- `stale`
+- health/error reason
 
 ## 核心数据流
 
@@ -160,7 +170,7 @@ CLI 不再是“产品本体”，而是 control plane client。
 
 1. remote source emits or is polled for change
 2. `sectiond` updates object state
-3. object is materialized or marked stale
+3. object detail is updated and public state stays truthful
 4. source/path exposes the current truthful local state
 
 ### Local to Remote
@@ -172,8 +182,8 @@ CLI 不再是“产品本体”，而是 control plane client。
 
 ### Execution
 
-1. runtime points at local materialized paths
-2. Section guarantees readiness/materialization contract only
+1. runtime points at local paths
+2. Section guarantees public state plus local detail visibility only
 3. runtime owns interpreter/container/OS-specific execution behavior
 
 ## 为什么这样比 FUSE-first 更合理
@@ -204,7 +214,7 @@ CLI 不再是“产品本体”，而是 control plane client。
 仍缺的主线能力：
 
 - source local-root binding model
-- path state model
+- path public/detail state model
 - local change ingestion
 - bidirectional sync loop
 - conflict surfacing

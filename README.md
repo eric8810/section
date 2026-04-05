@@ -5,12 +5,13 @@ Cross-platform source/path sync collaboration layer for humans and agents, built
 Section is pivoting away from a mount-first product model toward a source/path-first sync model:
 
 - `source/path` remains the primary product mental model
-- sync, materialization, and conflict become state on sources and paths
-- a local materialized directory is a manifestation of a source, not a new top-level product object
+- sync and conflict become state on sources and paths
+- a local bound directory is a manifestation of a source, not a new top-level product object
+- public path state should stay simple: `ready / syncing / conflict / error`
 - CLI/API remain the control plane
 - execution semantics are treated as a separate runtime problem, not something the filesystem layer can magically unify
 
-The next architectural center is `sectiond`: a long-lived local core that will own source registry, local sync bindings, path state, materialization, refresh, conflicts, and health semantics for both control-plane clients and future adapters.
+The next architectural center is `sectiond`: a long-lived local core that will own source registry, local sync bindings, path state, local-presence detail, refresh, conflicts, and health semantics for both control-plane clients and future adapters.
 
 ## Project Truth
 
@@ -39,7 +40,8 @@ For the current roadmap, see:
 ## Features
 
 - **Source/path mainline** — sources and paths remain the primary product model
-- **Local materialization** — sources and paths can be synced into a truthful local directory view
+- **Simple status model** — user-facing path state stays at `ready / syncing / conflict / error`
+- **Local directory sync** — sources and paths can be synced into a truthful local directory view
 - **60+ storage backends** via OpenDAL (S3, WebDAV, Google Drive, Azure Blob, etc.)
 - **Control-plane CLI** — source management, path operations, sync state, refresh, and fallback file operations
 - **Credential encryption** — AES-256-GCM encrypted storage in SQLite
@@ -113,10 +115,10 @@ Section is moving toward this runtime model:
 ```
  Humans / Agents / Shell / Editors
                 |
-   Local Materialized Source Paths
+       Local Source Trees
                 |
              sectiond
- route / cache / sync / materialize / conflicts / health
+ route / cache / sync / local state / conflicts / health
                 |
       +---------+---------+
       |                   |

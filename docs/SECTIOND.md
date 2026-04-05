@@ -17,8 +17,9 @@ This repo is still in transition, so the goal of this document is not to pretend
 Section is only on the right path if these things stay true:
 
 1. `source/path` stays the only primary product mental model.
-2. Sync, materialization, and conflict state live on sources and paths, not in a separate top-level abstraction.
-3. CLI/API and future adapters must consume the same `sectiond`-owned source/path state model.
+2. Sync and conflict live on sources and paths, not in a separate top-level abstraction.
+3. Public state stays simple: `ready / syncing / conflict / error`.
+4. CLI/API and future adapters must consume the same `sectiond`-owned source/path state model.
 
 ## sectiond ownership
 
@@ -30,7 +31,8 @@ The long-lived local runtime should own the shared semantics that must not diver
 - source local-root bindings
 - operator lifecycle
 - routing
-- source/path sync state
+- source/path public state
+- source/path detail state
 - metadata/content cache
 - refresh/invalidation
 - permissions/conflict semantics
@@ -55,7 +57,7 @@ These are client-facing management actions:
 - source add/remove/list
 - source bind-local-root / unbind-local-root
 - source sync / source status
-- path materialize / pin / inspect / repair
+- path pull / pin / inspect / repair
 - status / diagnostics
 - refresh / repair / health checks
 - config/bootstrap/preflight
@@ -72,7 +74,7 @@ These are the semantics that users and future adapters depend on:
 - cache-backed visibility
 - source/path state visibility
 - refresh visibility
-- shell/script/editor access against the local materialized tree when configured
+- shell/script/editor access against the local tree when configured
 
 Linux/macOS/Windows adapters should expose these semantics through the same `sectiond`-owned state machine.
 
@@ -81,7 +83,7 @@ Linux/macOS/Windows adapters should expose these semantics through the same `sec
 The first practical boundary is:
 
 1. load local config
-2. materialize a merged source registry
+2. build a merged source registry
 3. build routing/runtime state once
 4. expose it to control-plane and data-plane clients
 
@@ -108,12 +110,12 @@ This is intentional and explicit. The next pivot issue (`#22`) is where these se
 - `#22`
   - move shared source/path sync semantics into `sectiond`
 - `#21`
-  - add source local-root binding and path readiness/materialization state
+  - add source local-root binding and path detail state
 - `#20`
   - add bidirectional sync and conflict surfacing
 - `#24`
   - move CLI toward source/path control-plane behavior
 - `#23`
-  - formalize execute/scripting on materialized paths
+  - formalize execute/scripting on local paths
 - `#25`
   - evaluate later adapter paths

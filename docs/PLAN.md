@@ -8,7 +8,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 
 更直接地说：
 
-- **主线**：source/path + sync/materialize/conflict
+- **主线**：source/path + `ready / syncing / conflict / error`
 - **执行**：靠 runtime contract
 - **高级模式**：FUSE / native integration / SMB export
 
@@ -53,9 +53,10 @@ Section 现在从 `FS-first mount product` pivot 到：
 产出：
 
 - source model
-- path state model
+- 4-state public model
+- detail fields model
 - metadata scope / non-goals
-- readiness / materialize / pin model
+- local-root / local-present model
 - conflict model
 
 ### Phase 2: sectiond 变成 source/path sync core
@@ -69,7 +70,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 - source registry
 - source local-root binding model
 - sync state store
-- materialization state machine
+- local state machine
 - sync scheduler
 
 ### Phase 3: 打通本地目录绑定与状态落地
@@ -77,13 +78,13 @@ Section 现在从 `FS-first mount product` pivot 到：
 目标：
 
 - source 可以绑定本地目录
-- path 的 materialization/readiness 可以被真实表达
+- path 的本地状态可以被真实表达，但不污染对外状态模型
 
 产出：
 
 - local root binding
 - local path state persistence
-- readiness/materialization inspection
+- detail inspection
 
 ### Phase 4: 打通双向同步
 
@@ -110,7 +111,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 
 - source sync bind/status
 - path state inspect
-- sync / pin / materialize / repair
+- sync / pull / pin / repair
 - conflict inspection
 
 ### Phase 6: 定义 execution contract
@@ -118,7 +119,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 目标：
 
 - 承认 source/path sync 与 execution 分层
-- 明确 agent/script 如何在 materialized path 上工作
+- 明确 agent/script 如何在本地可用 path 上工作
 
 产出：
 
@@ -148,17 +149,17 @@ Section 现在从 `FS-first mount product` pivot 到：
 |------|------|--------------|
 | Phase 1 | 定义 source/path sync contract 与非目标 | `#19` |
 | Phase 2 | 将 `sectiond` 重定义为 source/path sync core | `#22` |
-| Phase 3 | 实现 source local-root 绑定与 path readiness/materialization state | `#21` |
+| Phase 3 | 实现 source local-root 绑定与 path detail state | `#21` |
 | Phase 4 | 实现本地变更检测、远端变更收敛与 conflict surfacing | `#20` |
 | Phase 5 | 将 CLI 重构为 source/path control plane | `#24` |
-| Phase 6 | 定义 execution contract（runtime、materialize、Windows 边界） | `#23` |
+| Phase 6 | 定义 execution contract（runtime、local path、Windows 边界） | `#23` |
 | Phase 7 | 评估 future adapters：FUSE / File Provider / CFAPI / SMB | `#25` |
 
 ## 建议执行顺序
 
 1. 先定 `source/path sync contract`
 2. 再定 `sectiond sync core`
-3. 再做 local-root / readiness / materialization
+3. 再做 local-root / detail state
 4. 再做双向同步与冲突
 5. 再做 source/path-oriented CLI
 6. 再定 execution contract
