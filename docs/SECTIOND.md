@@ -64,6 +64,8 @@ These are client-facing management actions:
 
 Binding a local root should also materialize a lightweight discovery marker so agents starting from an arbitrary path can discover the corresponding Section root before calling the control plane.
 
+In the common case, agents should not parse that marker themselves. Control-plane clients should accept a local path, perform discovery internally, and then resolve the path onto the authoritative source/path state owned by `sectiond`.
+
 Today these still surface through `section-cli`, but the route-map direction is explicit: those commands should enter through `sectiond`, not keep accumulating parallel runtime logic in the CLI process.
 
 ### Data plane

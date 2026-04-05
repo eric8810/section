@@ -186,6 +186,8 @@ So the contract is:
 - ordinary apps work against local files
 - Section-aware clients query and control sync state through the control plane
 
+For normal agent ergonomics, these control-plane entry points should accept a local path inside a bound root, not force the caller to manually reconstruct `source/path`.
+
 ## Local Discovery Entry
 
 If a bound local root has no local discovery entry, agents cannot reliably know they are inside a Section-managed tree.
@@ -215,6 +217,13 @@ This keeps the split clean:
 - local files remain normal files
 - discovery is local and cheap
 - sync truth still comes from the control plane
+
+The preferred call flow is:
+
+1. agent passes a local path to `path inspect` / `path compare` / `path resolve`
+2. the client discovers `.section/root.json` internally
+3. the client resolves that local path to the real source/path binding
+4. the control plane returns sync truth or performs the requested action
 
 ## Execution Boundary
 

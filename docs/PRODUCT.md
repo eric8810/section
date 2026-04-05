@@ -209,6 +209,25 @@ agent 的发现流程应是：
 - root marker 负责 discovery
 - control plane 负责 sync truth
 
+但对 agent 的常用入口，不该要求它手动解析 marker 再自己拼 source/path。
+
+更合理的 agent UX 应该是：
+
+- `section path inspect ./some/local/file --json`
+- `section path compare ./some/local/file --json`
+- `section path resolve ./some/local/file --strategy use-local`
+
+也就是说：
+
+- 命令直接接受本地路径
+- CLI/GUI/API 在内部完成：
+  - 向上查找 `.section/root.json`
+  - 识别 source 与 local root
+  - 把本地路径映射成真实的 source/path
+  - 返回 sync truth 或执行 resolve
+
+这样 agent 的正常使用流程才不会太笨重。
+
 ## 平台策略
 
 | 能力 | Linux | macOS | Windows | 主线判断 |

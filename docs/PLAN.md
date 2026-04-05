@@ -111,9 +111,9 @@ Section 现在从 `FS-first mount product` pivot 到：
 产出：
 
 - source sync bind/status
-- path state inspect
-- path compare
-- path resolve
+- local-path-aware path inspect
+- local-path-aware path compare
+- local-path-aware path resolve
 - sync / pull / pin / repair
 - conflict inspection
 
