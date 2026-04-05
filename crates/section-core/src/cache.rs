@@ -111,8 +111,8 @@ impl MetadataCache {
     /// Useful when a directory is renamed or deleted and all descendants must
     /// be flushed.
     pub fn invalidate_prefix(&mut self, prefix: &str) {
-        self.stats.retain(|k, _| !k.starts_with(prefix));
-        self.listings.retain(|k, _| !k.starts_with(prefix));
+        self.stats.retain(|k, _| !path_matches_prefix(k, prefix));
+        self.listings.retain(|k, _| !path_matches_prefix(k, prefix));
     }
 
     /// Drop all cached entries.
@@ -210,6 +210,20 @@ impl ContentCache {
         }
     }
 
+    /// Remove every cached item whose path equals `prefix` or lives under it.
+    pub fn remove_prefix(&mut self, prefix: &str) {
+        let keys: Vec<String> = self
+            .entries
+            .keys()
+            .filter(|path| path_matches_prefix(path, prefix))
+            .cloned()
+            .collect();
+
+        for key in keys {
+            self.remove(&key);
+        }
+    }
+
     /// Clear the entire cache.
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -245,6 +259,20 @@ impl ContentCache {
 fn parent_dir(path: &str) -> Option<&str> {
     let path = path.trim_end_matches('/');
     path.rfind('/').map(|idx| &path[..idx])
+}
+
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    let path = path.trim_matches('/');
+    let prefix = prefix.trim_matches('/');
+
+    if prefix.is_empty() {
+        return true;
+    }
+
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -356,6 +384,18 @@ mod tests {
         // Entries outside the prefix survive.
         assert!(cache.get_stat("proj/README.md").is_some());
         assert!(cache.get_listing("other").is_some());
+    }
+
+    #[test]
+    fn invalidate_prefix_respects_path_boundaries() {
+        let mut cache = MetadataCache::new(Duration::from_secs(60));
+        cache.put_stat("proj/src/main.rs", file_meta(100));
+        cache.put_stat("proj/src-two/main.rs", file_meta(200));
+
+        cache.invalidate_prefix("proj/src");
+
+        assert!(cache.get_stat("proj/src/main.rs").is_none());
+        assert!(cache.get_stat("proj/src-two/main.rs").is_some());
     }
 
     #[test]
@@ -504,6 +544,18 @@ mod tests {
         assert!(cache.get("a").is_none());
         assert!(cache.get("b").is_none());
         assert_eq!(cache.size(), 0);
+    }
+
+    #[test]
+    fn content_cache_remove_prefix_respects_boundaries() {
+        let mut cache = ContentCache::new(100);
+        cache.put("proj/src/main.rs", vec![1]);
+        cache.put("proj/src-two/main.rs", vec![2]);
+
+        cache.remove_prefix("proj/src");
+
+        assert!(cache.get("proj/src/main.rs").is_none());
+        assert_eq!(cache.get("proj/src-two/main.rs"), Some([2u8].as_slice()));
     }
 
     #[test]

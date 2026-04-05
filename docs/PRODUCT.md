@@ -172,8 +172,11 @@ sources:
 
 ```bash
 section refresh work-s3/data/
-# FUSE 层通过 xattr 支持强一致读
-getfattr -n section.refresh /mnt/section/work-s3/important.csv
+# FUSE 层通过 xattr 支持强制失效
+# macOS:
+xattr -p section.refresh /mnt/section/work-s3/important.csv
+# Linux:
+getfattr -n user.section.refresh /mnt/section/work-s3/important.csv
 ```
 
 ## 技术选型
@@ -208,7 +211,7 @@ Apache License 2.0 — 商业友好，与 OpenDAL 一致。
 包含:
 - [ ] section-core: OpenDAL 多后端管理 + 路径路由
 - [ ] section-fuse: FUSE 挂载, 支持 read/write/readdir/stat/exec
-- [ ] section-cli: source/ls/cp/cat/rm/mount/unmount/refresh 命令
+- [x] section-cli: source/ls/cp/cat/rm/mount/unmount/refresh 命令
 - [ ] section-provider: 本地 SQLite 存储, 手动凭证配置
 - [ ] 权限: 基础 POSIX mode 执行
 - [ ] Provider 支持: fs, s3, webdav

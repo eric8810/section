@@ -45,7 +45,7 @@ fn main() -> Result<()> {
 
     tracing::info!("mounting section filesystem at {}", mount_point.display());
 
-    let section_fs = fs::SectionFs::new(router);
+    let section_fs = fs::SectionFs::new(&config, router);
     let mut options = vec![
         fuser::MountOption::FSName("section".to_string()),
         fuser::MountOption::AutoUnmount,

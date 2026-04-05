@@ -139,7 +139,7 @@ fn main() -> Result<()> {
         Commands::Rm { path, recursive } => cmd::file::rm(&config, &store, &path, recursive, json),
         Commands::Mount { path } => cmd::mount::mount(&config, cli.config.as_deref(), &path),
         Commands::Unmount { path } => cmd::mount::unmount(&path),
-        Commands::Refresh { path } => cmd::file::refresh(&config, &store, &path),
+        Commands::Refresh { path } => cmd::file::refresh(&config, &store, &path, json),
         Commands::Exec { path, args } => cmd::file::exec(&config, &store, &path, &args, json),
         Commands::Write { path } => cmd::file::write_stdin(&config, &store, &path, json),
         Commands::Status => cmd::status::run(&config, &store, json),

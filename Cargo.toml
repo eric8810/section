@@ -56,6 +56,7 @@ libc = "0.2"
 
 # Utils
 dirs = "6"
+xattr = "1"
 
 # Testing
 cucumber = "0.22"

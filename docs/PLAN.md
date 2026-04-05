@@ -82,9 +82,9 @@
 #### 6. 缓存层 [P0]
 - [x] 元数据缓存（MetadataCache：stat + listing 结果，TTL 过期，11 个单元测试）
 - [x] 内容缓存（ContentCache：LRU 淘汰，12 个单元测试）
-- [ ] **缓存接入 FUSE**：MetadataCache/ContentCache 已实现但未被 SectionFs 使用
-- [ ] write-through：Section 写入时同步更新缓存
-- [ ] `section refresh` 接入缓存失效 — 当前是空壳 (TODO 注释)
+- [x] **缓存接入 FUSE**：`lookup` / `readdir` / `open` 已接入 metadata/content cache
+- [x] write-through：Section 写入回刷后同步更新内容缓存并失效元数据缓存
+- [x] `section refresh` 接入缓存失效：挂载路径通过 xattr 触发 FUSE 侧缓存清理，CLI 未挂载时返回明确 no-op 提示
 
 #### 7. 权限接入 FUSE [P1]
 - [ ] 权限元数据持久化到 SQLite — 当前仅内存中
