@@ -29,6 +29,7 @@ The long-lived local runtime should own the shared semantics that must not diver
 
 - source registry
 - source local-root bindings
+- bound-root discovery marker metadata
 - operator lifecycle
 - routing
 - source/path public state
@@ -60,6 +61,8 @@ These are client-facing management actions:
 - status / diagnostics
 - refresh / repair / health checks
 - config/bootstrap/preflight
+
+Binding a local root should also materialize a lightweight discovery marker so agents starting from an arbitrary path can discover the corresponding Section root before calling the control plane.
 
 Today these still surface through `section-cli`, but the route-map direction is explicit: those commands should enter through `sectiond`, not keep accumulating parallel runtime logic in the CLI process.
 

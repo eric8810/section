@@ -182,6 +182,33 @@ MVP 不做自动 merge，也不做版本分叉模型。
 - 应用本身不会“自动知道”
 - Section-aware 客户端必须主动调用 control plane
 
+### Agent 如何发现这是 Section 目录
+
+如果本地目录里完全没有入口，agent 就无从发现。
+
+所以每个 bound local root 都应该放一个极轻量的本地 marker：
+
+- `.section/root.json`
+
+它不是同步状态数据库，只承担 discovery 作用，至少包含：
+
+- `source_id`
+- `local_root`
+- `sectiond` control-plane endpoint
+
+agent 的发现流程应是：
+
+1. 从当前工作路径开始向上找
+2. 找到 `.section/root.json`
+3. 确认当前路径属于某个 Section-bound local root
+4. 再调用 `path inspect / compare / resolve`
+
+这样区分很清楚：
+
+- 本地文件树负责日常读写
+- root marker 负责 discovery
+- control plane 负责 sync truth
+
 ## 平台策略
 
 | 能力 | Linux | macOS | Windows | 主线判断 |

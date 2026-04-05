@@ -186,6 +186,36 @@ So the contract is:
 - ordinary apps work against local files
 - Section-aware clients query and control sync state through the control plane
 
+## Local Discovery Entry
+
+If a bound local root has no local discovery entry, agents cannot reliably know they are inside a Section-managed tree.
+
+So each bound local root should contain one lightweight marker:
+
+- `.section/root.json`
+
+Its purpose is only discovery, not full sync-state storage.
+
+At minimum it should identify:
+
+- `source_id`
+- `local_root`
+- control-plane endpoint for `sectiond`
+
+The discovery algorithm is:
+
+1. start from the current path
+2. walk up parent directories
+3. stop when `.section/root.json` is found
+4. treat that directory as the bound local root
+5. use the marker to query the control plane for sync truth
+
+This keeps the split clean:
+
+- local files remain normal files
+- discovery is local and cheap
+- sync truth still comes from the control plane
+
 ## Execution Boundary
 
 Execution is outside the current project scope.

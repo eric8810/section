@@ -82,6 +82,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 产出：
 
 - local root binding
+- bound-root discovery marker
 - local path state persistence
 - detail inspection
 
