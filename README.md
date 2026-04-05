@@ -105,6 +105,8 @@ cat /mnt/section/work-s3/report.csv
 section status
 ```
 
+Mounted-workspace execute/scripting semantics are documented in [docs/EXECUTION_MODEL.md](docs/EXECUTION_MODEL.md).
+
 ## Architecture
 
 Section is moving toward this runtime model:
@@ -195,6 +197,9 @@ cargo test -p section-core -p section-provider -p sectiond
 cargo test -p section-cli
 
 # Full mounted-workspace validation is tracked separately and is not yet the truthful green path on every platform.
+
+# Linux reference validation for script-driven mounted workflows
+scripts/validate-mounted-workspace-exec.sh
 
 # Run with debug logging
 RUST_LOG=debug section ls my-files/
