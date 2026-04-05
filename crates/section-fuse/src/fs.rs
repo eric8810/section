@@ -8,6 +8,7 @@ use section_core::router::ParsedPath;
 use section_core::Router;
 use section_core::SectionConfig;
 use sectiond::SectiondDataPlane;
+use sectiond::{ensure_directory_write_allowed, ensure_open_allowed};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -111,6 +112,14 @@ impl SectionFs {
         self.inodes
             .get(ino)
             .map(|e| Permission::new(e.attr.uid, e.attr.gid, e.attr.perm))
+    }
+
+    fn ensure_parent_writable(&self, req: &Request, ino: u64) -> Result<(), i32> {
+        if let Some(permission) = self.inode_permission(ino) {
+            ensure_directory_write_allowed(&permission, req.uid(), req.gid())
+        } else {
+            Ok(())
+        }
     }
 
     fn is_virtual_directory(path: &str) -> bool {
@@ -534,24 +543,10 @@ impl Filesystem for SectionFs {
             return;
         }
 
-        // Permission check based on open flags.
-        let perm = Permission::new(entry.attr.uid, entry.attr.gid, entry.attr.perm);
-        let access_mode = flags & libc::O_ACCMODE;
-        if access_mode == libc::O_RDONLY {
-            if !perm.can_read(req.uid(), req.gid()) {
-                reply.error(libc::EACCES);
-                return;
-            }
-        } else if access_mode == libc::O_WRONLY {
-            if !perm.can_write(req.uid(), req.gid()) {
-                reply.error(libc::EACCES);
-                return;
-            }
-        } else if access_mode == libc::O_RDWR {
-            if !perm.can_read(req.uid(), req.gid()) || !perm.can_write(req.uid(), req.gid()) {
-                reply.error(libc::EACCES);
-                return;
-            }
+        let permission = Permission::new(entry.attr.uid, entry.attr.gid, entry.attr.perm);
+        if let Err(errno) = ensure_open_allowed(&permission, req.uid(), req.gid(), flags) {
+            reply.error(errno);
+            return;
         }
 
         let path = entry.path.clone();
@@ -716,12 +711,9 @@ impl Filesystem for SectionFs {
         _flags: i32,
         reply: ReplyCreate,
     ) {
-        // Check write permission on parent directory.
-        if let Some(perm) = self.inode_permission(parent) {
-            if !perm.can_write(req.uid(), req.gid()) {
-                reply.error(libc::EACCES);
-                return;
-            }
+        if let Err(errno) = self.ensure_parent_writable(req, parent) {
+            reply.error(errno);
+            return;
         }
 
         let name_str = name.to_string_lossy().to_string();
@@ -802,12 +794,9 @@ impl Filesystem for SectionFs {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        // Check write permission on parent directory.
-        if let Some(perm) = self.inode_permission(parent) {
-            if !perm.can_write(req.uid(), req.gid()) {
-                reply.error(libc::EACCES);
-                return;
-            }
+        if let Err(errno) = self.ensure_parent_writable(req, parent) {
+            reply.error(errno);
+            return;
         }
 
         let name_str = name.to_string_lossy().to_string();
@@ -869,12 +858,9 @@ impl Filesystem for SectionFs {
     // ── unlink ───────────────────────────────────────────────────────────
 
     fn unlink(&mut self, req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        // Check write permission on parent directory.
-        if let Some(perm) = self.inode_permission(parent) {
-            if !perm.can_write(req.uid(), req.gid()) {
-                reply.error(libc::EACCES);
-                return;
-            }
+        if let Err(errno) = self.ensure_parent_writable(req, parent) {
+            reply.error(errno);
+            return;
         }
 
         let name_str = name.to_string_lossy();
@@ -924,12 +910,9 @@ impl Filesystem for SectionFs {
     // ── rmdir ────────────────────────────────────────────────────────────
 
     fn rmdir(&mut self, req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        // Check write permission on parent directory.
-        if let Some(perm) = self.inode_permission(parent) {
-            if !perm.can_write(req.uid(), req.gid()) {
-                reply.error(libc::EACCES);
-                return;
-            }
+        if let Err(errno) = self.ensure_parent_writable(req, parent) {
+            reply.error(errno);
+            return;
         }
 
         let name_str = name.to_string_lossy();
@@ -995,18 +978,13 @@ impl Filesystem for SectionFs {
         _flags: u32,
         reply: ReplyEmpty,
     ) {
-        // Check write permission on both old and new parent directories.
-        if let Some(perm) = self.inode_permission(parent) {
-            if !perm.can_write(req.uid(), req.gid()) {
-                reply.error(libc::EACCES);
-                return;
-            }
+        if let Err(errno) = self.ensure_parent_writable(req, parent) {
+            reply.error(errno);
+            return;
         }
-        if let Some(perm) = self.inode_permission(newparent) {
-            if !perm.can_write(req.uid(), req.gid()) {
-                reply.error(libc::EACCES);
-                return;
-            }
+        if let Err(errno) = self.ensure_parent_writable(req, newparent) {
+            reply.error(errno);
+            return;
         }
 
         let old_name = name.to_string_lossy();

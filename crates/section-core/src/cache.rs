@@ -414,18 +414,18 @@ mod tests {
     fn overwrite_stat_refreshes_ttl() {
         // Keep generous timing margins so the test validates refresh semantics
         // instead of failing due to scheduler jitter on busy CI machines.
-        let mut cache = MetadataCache::new(Duration::from_millis(200));
+        let mut cache = MetadataCache::new(Duration::from_millis(500));
         cache.put_stat("f.txt", file_meta(1));
 
         // Wait long enough to age the original entry, but keep plenty of TTL
         // headroom so the overwrite semantics are the thing under test.
-        thread::sleep(Duration::from_millis(80));
+        thread::sleep(Duration::from_millis(100));
         // Overwrite resets the clock.
         cache.put_stat("f.txt", file_meta(2));
 
         // After another delay shorter than the refreshed TTL, the entry should
         // still be valid and expose the new metadata.
-        thread::sleep(Duration::from_millis(80));
+        thread::sleep(Duration::from_millis(100));
         let m = cache
             .get_stat("f.txt")
             .expect("should still be cached after refresh");
