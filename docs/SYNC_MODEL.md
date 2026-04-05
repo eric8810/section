@@ -1,4 +1,4 @@
-# Sync Workspace Contract
+# Source/Path Sync Contract
 
 ## Purpose
 
@@ -6,18 +6,19 @@ This document defines the new product mainline for Section after the pivot away 
 
 The mainline question is now:
 
-> What does Section guarantee when it gives humans and agents a local workspace that is backed by remote sources?
+> What does Section guarantee when it exposes sources and paths with truthful sync, materialization, and conflict state?
 
 ## Core Promise
 
-Section guarantees a **truthful local workspace**, not a cross-platform POSIX illusion.
+Section guarantees a **truthful source/path model**, not a cross-platform POSIX illusion.
 
 That means:
 
+- sources remain the primary configured objects
+- paths remain the primary content objects
 - files and directories can be materialized locally
 - local and remote changes can be reconciled
 - sync, pending, conflict, and readiness states are visible
-- humans and agents can work against the same local directory
 
 It does **not** mean:
 
@@ -25,7 +26,17 @@ It does **not** mean:
 - full POSIX metadata round-trips across all backends and OSes
 - every object type is preserved in MVP
 
-## Workspace Object Model
+## Source Model
+
+Each source should define:
+
+- backend/provider identity
+- remote root
+- optional local materialized root
+- source health
+- source sync mode / policy
+
+## Path Object Model
 
 MVP-supported object classes:
 
@@ -45,7 +56,7 @@ Deferred object classes:
 
 ### Object Readiness
 
-Each object should surface at least:
+Each path object should surface at least:
 
 - `materialized`
 - `not_materialized`
@@ -55,9 +66,9 @@ Each object should surface at least:
 - `conflict`
 - `error`
 
-### Workspace Health
+### Source Health
 
-Each workspace should surface at least:
+Each source should surface at least:
 
 - `healthy`
 - `syncing`
@@ -89,16 +100,17 @@ If some of these are present on a specific platform/backend combination, they ar
 
 Section needs explicit states for:
 
+- source local-root binding
 - on-demand materialization
 - pinned local content
 - evictable local content
 - stale local content awaiting refresh
 
-The product should prefer explicitness over pretending all visible files are equally ready.
+The product should prefer explicitness over pretending all visible paths are equally ready.
 
 ## Conflict Model
 
-Conflict is not an edge case; it is a first-class workspace state.
+Conflict is not an edge case; it is a first-class source/path state.
 
 Section should define:
 
@@ -109,13 +121,13 @@ Section should define:
 
 ## Execution Boundary
 
-Section does not promise that every file visible in the workspace is immediately safe to execute on every host.
+Section does not promise that every file visible under a source path is immediately safe to execute on every host.
 
 Section should promise only:
 
 - readiness/materialization visibility
 - clear local vs remote state
-- truthful workspace state
+- truthful source/path state
 
 Execution must be defined separately by runtime policy, for example:
 
@@ -132,6 +144,7 @@ The product must be honest about:
 - which files are only placeholders or not yet materialized
 - which files are dirty
 - which files are conflicted
+- which sources are healthy / syncing / degraded / offline
 - which objects fall outside MVP fidelity
 
 ## Future Extensions

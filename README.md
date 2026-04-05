@@ -1,15 +1,16 @@
 # Section
 
-Cross-platform sync workspace collaboration layer for humans and agents, built on [Apache OpenDAL](https://github.com/apache/opendal).
+Cross-platform source/path sync collaboration layer for humans and agents, built on [Apache OpenDAL](https://github.com/apache/opendal).
 
-Section is pivoting away from a mount-first product model toward a sync-workspace-first model:
+Section is pivoting away from a mount-first product model toward a source/path-first sync model:
 
-- the main working surface is a local materialized workspace
-- humans, agents, shell tools, and editors should operate on the same local directory
+- `source/path` remains the primary product mental model
+- sync, materialization, and conflict become state on sources and paths
+- a local materialized directory is a manifestation of a source, not a new top-level product object
 - CLI/API remain the control plane
 - execution semantics are treated as a separate runtime problem, not something the filesystem layer can magically unify
 
-The next architectural center is `sectiond`: a long-lived local core that will own routing, cache, sync state, materialization, refresh, conflicts, and health semantics for both workspace clients and future adapters.
+The next architectural center is `sectiond`: a long-lived local core that will own source registry, local sync bindings, path state, materialization, refresh, conflicts, and health semantics for both control-plane clients and future adapters.
 
 ## Project Truth
 
@@ -19,27 +20,28 @@ What is true today:
 - macOS and Linux non-mount flows are covered by CI
 - S3, WebDAV, and local filesystem backends have real validation coverage
 - the current repo is still **pre-sectiond**
-- the repo still reflects the older mount-first route map more than the new sync-workspace route
+- the repo still reflects the older mount-first route map more than the new source/path sync route
 
 What is changing now:
 
 - the repo is moving away from a "CLI + FUSE feature bundle" story
-- the new route map is `sync workspace -> sectiond sync core -> execution contract -> future adapters`
+- the new route map is `source/path sync state -> sectiond sync core -> execution contract -> future adapters`
 
 For the current roadmap, see:
 
 - [docs/PRODUCT.md](docs/PRODUCT.md)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [docs/SYNC_WORKSPACE.md](docs/SYNC_WORKSPACE.md)
+- [docs/SYNC_MODEL.md](docs/SYNC_MODEL.md)
 - [docs/SECTIOND.md](docs/SECTIOND.md)
 - [docs/PLAN.md](docs/PLAN.md)
 - [docs/BACKEND_VALIDATION.md](docs/BACKEND_VALIDATION.md)
 
 ## Features
 
-- **Unified local workspace** — the new target product model is a materialized sync workspace shared by humans and agents
+- **Source/path mainline** — sources and paths remain the primary product model
+- **Local materialization** — sources and paths can be synced into a truthful local directory view
 - **60+ storage backends** via OpenDAL (S3, WebDAV, Google Drive, Azure Blob, etc.)
-- **Control-plane CLI** — source management, status, refresh, and fallback file operations
+- **Control-plane CLI** — source management, path operations, sync state, refresh, and fallback file operations
 - **Credential encryption** — AES-256-GCM encrypted storage in SQLite
 - **JSON output** — `--json` flag for machine-readable output (agent-friendly)
 - **Mount groundwork** — Linux FUSE and macOS/macFUSE groundwork remain available as future/advanced tracks
@@ -48,18 +50,18 @@ For the current roadmap, see:
 
 ## Platform Support
 
-Section is targeting macOS, Linux, and Windows as a sync-workspace product, but the current repo maturity still reflects earlier mount-focused work.
+Section is targeting macOS, Linux, and Windows as a source/path sync product, but the current repo maturity still reflects earlier mount-focused work.
 
 | Capability | Linux | macOS | Windows | Notes |
 |------------|-------|-------|---------|-------|
 | `section-core` / `section-provider` / non-mount CLI | Target platform | Target platform | Target platform | current CI covers Linux/macOS non-FUSE paths |
-| Sync workspace mainline | Pivot target | Pivot target | Pivot target | not implemented end-to-end yet |
+| Source/path sync mainline | Pivot target | Pivot target | Pivot target | not implemented end-to-end yet |
 | Mount / adapter path | Advanced track | Advanced track | Advanced track | no longer the main product path |
 
 Current repo truth:
 - cross-platform core/provider/control-plane support is real
 - Linux remains the place where the old mounted-workspace path is most validated
-- sync workspace is now the product mainline, but still needs dedicated implementation work
+- source/path sync is now the product mainline, but still needs dedicated implementation work
 - macOS mount details remain documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md) as a future/advanced path, not the default user journey
 
 ## Quick Start
@@ -100,7 +102,7 @@ section exec my-files/scripts/deploy.sh -- --env prod
 section status
 ```
 
-Current and target workspace semantics are documented in [docs/SYNC_WORKSPACE.md](docs/SYNC_WORKSPACE.md).
+Current and target source/path sync semantics are documented in [docs/SYNC_MODEL.md](docs/SYNC_MODEL.md).
 Old mounted-workspace execute/scripting semantics remain documented in [docs/EXECUTION_MODEL.md](docs/EXECUTION_MODEL.md) as groundwork/history.
 macOS mount prerequisite / preflight / fallback policy remains documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md) for the advanced path.
 
@@ -111,7 +113,7 @@ Section is moving toward this runtime model:
 ```
  Humans / Agents / Shell / Editors
                 |
-       Local Sync Workspace
+   Local Materialized Source Paths
                 |
              sectiond
  route / cache / sync / materialize / conflicts / health
@@ -129,7 +131,7 @@ Section is moving toward this runtime model:
 Current repo truth:
 
 - `sectiond` is the target center, not a finished component yet
-- today's crates still reflect a pre-sectiond and pre-sync-workspace structure
+- today's crates still reflect a pre-sectiond and pre-source-path-sync structure
 - old Linux mount validation exists already, but is no longer the default product path
 
 ### Current Crates
@@ -142,7 +144,7 @@ Current repo truth:
 | `section-provider` | SQLite source store, credential encryption |
 | `sectiond` | Initial shared runtime boundary and future daemon skeleton |
 
-For the target architecture and the migration plan, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SYNC_WORKSPACE.md](docs/SYNC_WORKSPACE.md), [docs/SECTIOND.md](docs/SECTIOND.md), and [docs/PLAN.md](docs/PLAN.md).
+For the target architecture and the migration plan, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SYNC_MODEL.md](docs/SYNC_MODEL.md), [docs/SECTIOND.md](docs/SECTIOND.md), and [docs/PLAN.md](docs/PLAN.md).
 
 ## Supported Providers
 

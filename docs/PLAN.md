@@ -4,11 +4,11 @@
 
 Section 现在从 `FS-first mount product` pivot 到：
 
-> `sync workspace first` 产品主线
+> `source/path first + sync state` 产品主线
 
 更直接地说：
 
-- **主线**：本地 workspace + sync/materialize/conflict
+- **主线**：source/path + sync/materialize/conflict
 - **执行**：靠 runtime contract
 - **高级模式**：FUSE / native integration / SMB export
 
@@ -20,7 +20,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 
 1. 普通用户使用 `FUSE` 成本过高
 2. mount 路线并不能顺便统一 Windows 的原生执行语义
-3. 真正需要统一的是 workspace，不是宿主机 POSIX
+3. 主 mental model 已经是 `source/path`，不应该为了 sync 再包出一个新顶层对象
 
 ## 当前已完成的 groundwork
 
@@ -42,35 +42,50 @@ Section 现在从 `FS-first mount product` pivot 到：
 
 ## 新主路线
 
-### Phase 1: 定义 sync workspace contract
+### Phase 1: 定义 source/path sync contract
 
 目标：
 
-- 定清楚 workspace 是什么
+- 定清楚 source 的同步语义
+- 定清楚 path 的状态语义
 - 定清楚保什么、不保什么
-- 定清楚 agent / 人类如何共享同一份本地目录
 
 产出：
 
-- workspace object model
+- source model
+- path state model
 - metadata scope / non-goals
 - readiness / materialize / pin model
 - conflict model
 
-### Phase 2: sectiond 变成 sync core
+### Phase 2: sectiond 变成 source/path sync core
 
 目标：
 
-- 让 `sectiond` 从 mount-centric boundary 变成 workspace sync core
+- 让 `sectiond` 从 mount-centric boundary 变成 source/path sync core
 
 产出：
 
-- workspace registry
+- source registry
+- source local-root binding model
 - sync state store
 - materialization state machine
 - sync scheduler
 
-### Phase 3: 打通双向同步
+### Phase 3: 打通本地目录绑定与状态落地
+
+目标：
+
+- source 可以绑定本地目录
+- path 的 materialization/readiness 可以被真实表达
+
+产出：
+
+- local root binding
+- local path state persistence
+- readiness/materialization inspection
+
+### Phase 4: 打通双向同步
 
 目标：
 
@@ -85,24 +100,25 @@ Section 现在从 `FS-first mount product` pivot 到：
 - bidirectional reconciliation
 - conflict surfacing
 
-### Phase 4: 重写 control plane
+### Phase 5: 重写 control plane
 
 目标：
 
-- CLI/GUI/API 不再围绕 mount，而围绕 workspace
+- CLI/GUI/API 不再围绕 mount，但仍保持 source/path 心智
 
 产出：
 
-- workspace create/list/status
+- source sync bind/status
+- path state inspect
 - sync / pin / materialize / repair
 - conflict inspection
 
-### Phase 5: 定义 execution contract
+### Phase 6: 定义 execution contract
 
 目标：
 
-- 承认 workspace 与 execution 分层
-- 明确 agent/script 如何在 workspace 上工作
+- 承认 source/path sync 与 execution 分层
+- 明确 agent/script 如何在 materialized path 上工作
 
 产出：
 
@@ -110,11 +126,11 @@ Section 现在从 `FS-first mount product` pivot 到：
 - POSIX-only workloads 的边界
 - Windows 的执行策略
 
-### Phase 6: 评估后续 adapter / native integration
+### Phase 7: 评估后续 adapter / native integration
 
 目标：
 
-- 在 workspace contract 稳定后，再评估：
+- 在 source/path sync contract 稳定后，再评估：
   - FUSE advanced mode
   - macOS File Provider
   - Windows CFAPI
@@ -126,26 +142,27 @@ Section 现在从 `FS-first mount product` pivot 到：
 
 ## 建议 issue map
 
-下面这些是 pivot 后应该优先开的主 issue：
+下面这些是 pivot 后应该优先推进的主 issue：
 
 | 阶段 | 主题 | GitHub issue |
 |------|------|--------------|
-| Phase 1 | 定义 sync workspace product contract 与非目标 | `TBD` |
-| Phase 2 | 将 `sectiond` 重定义为 workspace sync core | `TBD` |
-| Phase 3 | 实现 local materialization / sync state / readiness model | `TBD` |
-| Phase 3 | 实现本地变更检测、远端变更收敛与 conflict surfacing | `TBD` |
-| Phase 4 | 将 CLI 重构为 workspace control plane | `TBD` |
-| Phase 5 | 定义 execution contract（runtime、materialize、Windows 边界） | `TBD` |
-| Phase 6 | 评估 future adapters：FUSE / File Provider / CFAPI / SMB | `TBD` |
+| Phase 1 | 定义 source/path sync contract 与非目标 | `#19` |
+| Phase 2 | 将 `sectiond` 重定义为 source/path sync core | `#22` |
+| Phase 3 | 实现 source local-root 绑定与 path readiness/materialization state | `#21` |
+| Phase 4 | 实现本地变更检测、远端变更收敛与 conflict surfacing | `#20` |
+| Phase 5 | 将 CLI 重构为 source/path control plane | `#24` |
+| Phase 6 | 定义 execution contract（runtime、materialize、Windows 边界） | `#23` |
+| Phase 7 | 评估 future adapters：FUSE / File Provider / CFAPI / SMB | `#25` |
 
 ## 建议执行顺序
 
-1. 先定 `workspace contract`
+1. 先定 `source/path sync contract`
 2. 再定 `sectiond sync core`
-3. 再做双向同步与冲突
-4. 再做 workspace-oriented CLI
-5. 再定 execution contract
-6. 最后才讨论 mount / native integration / SMB
+3. 再做 local-root / readiness / materialization
+4. 再做双向同步与冲突
+5. 再做 source/path-oriented CLI
+6. 再定 execution contract
+7. 最后才讨论 mount / native integration / SMB
 
 ## 当前 repo truth
 
@@ -153,7 +170,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 
 - repo 已有不少可复用基础能力
 - 但 repo 的主叙事仍是 pre-pivot
-- 真正缺的是：把现有能力收拢成一个 `sync workspace` 产品，而不是继续在 mount 路线上打磨
+- 真正缺的是：把现有能力收拢成一个 `source/path + sync state` 产品，而不是继续在 mount 路线上打磨
 
 ## 不再建议的路线
 

@@ -4,23 +4,23 @@
 
 Section 的主目标从“挂载统一命名空间”调整为：
 
-> 提供一个跨平台、可靠、可物化的 sync workspace，让人类和 agent 在同一份本地工作区上协作。
+> 提供一个跨平台、可靠、可物化的 source/path sync 层，让人类和 agent 在同一份本地目录上协作。
 
 这意味着：
 
-- `workspace` 是主工作面
+- `source/path` 是主工作面
 - `sectiond` 是真实状态机
 - `runtime` 单独负责执行一致性
 - mount / native integration 变成后续 adapter，而不是主线前提
 
 ## 顶层原则
 
-### 1. Workspace first
+### 1. Source/path first
 
 最终用户首先应该看到的是：
 
-- 一个本地目录
-- 文件确实落在本地时可直接使用
+- 一个 source 和它的 path 视图
+- 某些 source/path 可以落在本地目录里直接使用
 - 可以知道哪些内容已物化、哪些待同步、哪些冲突
 
 而不是：
@@ -46,7 +46,7 @@ Section 不尝试用文件系统方案统一：
 - Windows 原生执行行为
 - 所有平台的权限与 metadata 语义
 
-Section 统一 workspace contract；
+Section 统一 source/path sync contract；
 execution contract 由 runtime 层承接。
 
 ## 目标运行时模型
@@ -54,7 +54,7 @@ execution contract 由 runtime 层承接。
 ```text
  Humans / Agents / Shell / Editors
                 |
-         Local Sync Workspace
+   Local Materialized Source Paths
                 |
             sectiond core
  source registry / sync state / materialization
@@ -77,9 +77,9 @@ execution contract 由 runtime 层承接。
 `sectiond` 目标职责：
 
 - source registry
-- workspace registry
+- source local-root bindings
 - remote operator 生命周期
-- local materialization 状态
+- source/path materialization 状态
 - sync scheduler
 - metadata/content cache
 - local change detection ingestion
@@ -93,7 +93,7 @@ execution contract 由 runtime 层承接。
 
 CLI 的目标职责：
 
-- source / workspace 管理
+- source / path 管理
 - status / health / diagnostics
 - sync / materialize / pin / repair
 - conflict inspection
@@ -101,9 +101,9 @@ CLI 的目标职责：
 
 CLI 不再是“产品本体”，而是 control plane client。
 
-### Local Workspace
+### Local Materialized Tree
 
-本地 workspace 是主工作面。
+本地 materialized tree 是主工作面，但它不是额外的顶层对象。
 
 它应该支持：
 
@@ -129,13 +129,13 @@ CLI 不再是“产品本体”，而是 control plane client。
 - Windows CFAPI
 - SMB export
 
-它们应该消费 `sectiond` 的 workspace contract，而不是定义主产品。
+它们应该消费 `sectiond` 的 source/path contract，而不是定义主产品。
 
 ## 核心状态模型
 
 ### Object State
 
-每个 workspace object 至少要区分：
+每个 path object 至少要区分：
 
 - present and materialized
 - present but not materialized
@@ -144,9 +144,9 @@ CLI 不再是“产品本体”，而是 control plane client。
 - in conflict
 - failed / needs repair
 
-### Workspace State
+### Source State
 
-每个 workspace 至少要区分：
+每个 source 至少要区分：
 
 - healthy
 - syncing
@@ -161,7 +161,7 @@ CLI 不再是“产品本体”，而是 control plane client。
 1. remote source emits or is polled for change
 2. `sectiond` updates object state
 3. object is materialized or marked stale
-4. workspace exposes the current truthful local state
+4. source/path exposes the current truthful local state
 
 ### Local to Remote
 
@@ -172,7 +172,7 @@ CLI 不再是“产品本体”，而是 control plane client。
 
 ### Execution
 
-1. runtime points at local workspace
+1. runtime points at local materialized paths
 2. Section guarantees readiness/materialization contract only
 3. runtime owns interpreter/container/OS-specific execution behavior
 
@@ -203,12 +203,12 @@ CLI 不再是“产品本体”，而是 control plane client。
 
 仍缺的主线能力：
 
-- workspace registry
-- materialization state model
+- source local-root binding model
+- path state model
 - local change ingestion
 - bidirectional sync loop
 - conflict surfacing
-- workspace-oriented CLI
+- source/path-oriented CLI
 
 ## 非目标
 

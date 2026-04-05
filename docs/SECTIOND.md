@@ -6,7 +6,7 @@
 
 The short version:
 
-- `FS` is the primary working surface
+- `source/path` is the primary working surface
 - `CLI / API` are the control plane
 - `sectiond` is the future single local runtime center
 
@@ -16,9 +16,9 @@ This repo is still in transition, so the goal of this document is not to pretend
 
 Section is only on the right path if these things stay true:
 
-1. Humans, agents, shell tools, and editors can work on the same mounted namespace.
-2. Platform differences live in mount adapters, not in the product mental model.
-3. CLI/API may help manage the system, but they do not replace the shared mounted workspace as the main collaboration surface.
+1. `source/path` stays the only primary product mental model.
+2. Sync, materialization, and conflict state live on sources and paths, not in a separate top-level abstraction.
+3. CLI/API and future adapters must consume the same `sectiond`-owned source/path state model.
 
 ## sectiond ownership
 
@@ -27,8 +27,10 @@ The long-lived local runtime should own the shared semantics that must not diver
 ### sectiond owns
 
 - source registry
+- source local-root bindings
 - operator lifecycle
 - routing
+- source/path sync state
 - metadata/content cache
 - refresh/invalidation
 - permissions/conflict semantics
@@ -51,6 +53,9 @@ Those remain client or adapter responsibilities.
 These are client-facing management actions:
 
 - source add/remove/list
+- source bind-local-root / unbind-local-root
+- source sync / source status
+- path materialize / pin / inspect / repair
 - status / diagnostics
 - refresh / repair / health checks
 - config/bootstrap/preflight
@@ -60,16 +65,16 @@ Today these still surface through `section-cli`, but the route-map direction is 
 
 ### Data plane
 
-These are the semantics that mounted workspace users depend on:
+These are the semantics that users and future adapters depend on:
 
 - path traversal
 - list/read/write/delete/rename
 - cache-backed visibility
-- permission checks
+- source/path state visibility
 - refresh visibility
-- shell/script/editor access against the mounted tree
+- shell/script/editor access against the local materialized tree when configured
 
-Linux and macOS adapters should expose these semantics through the same `sectiond`-owned state machine.
+Linux/macOS/Windows adapters should expose these semantics through the same `sectiond`-owned state machine.
 
 ## Runtime boundary
 
@@ -94,20 +99,21 @@ Right now the runtime boundary still has transitional behavior:
 - when the same source exists in both places, config-file entries still win
 - `sectiond` is a skeleton crate, not the final daemon process
 
-This is intentional and explicit. The next issue (`#14`) is where these semantics should consolidate into a single authoritative local state machine.
+This is intentional and explicit. The next pivot issue (`#22`) is where these semantics should consolidate into a single authoritative local state machine.
 
 ## Immediate follow-up mapping
 
-- `#13`
-  - define boundary, contract, ownership, lifecycle
-  - create the first concrete `sectiond` crate/snapshot boundary
-- `#14`
-  - move shared semantics into `sectiond`
-- `#15`
-  - move CLI toward control-plane client behavior
-- `#16`
-  - route Linux mount adapter through `sectiond`
-- `#17`
-  - formalize execute/scripting on the mounted workspace
-- `#18` + `#11`
-  - productize and validate the macOS adapter path
+- `#19`
+  - define the source/path sync contract and non-goals
+- `#22`
+  - move shared source/path sync semantics into `sectiond`
+- `#21`
+  - add source local-root binding and path readiness/materialization state
+- `#20`
+  - add bidirectional sync and conflict surfacing
+- `#24`
+  - move CLI toward source/path control-plane behavior
+- `#23`
+  - formalize execute/scripting on materialized paths
+- `#25`
+  - evaluate later adapter paths

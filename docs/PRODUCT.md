@@ -2,10 +2,11 @@
 
 ## 一句话定义
 
-Section 是一个**跨平台 sync workspace 协作层**：
+Section 是一个**跨平台 source/path sync 协作层**：
 
-- 把任意后端介质同步/物化到本地工作区
-- 让人类、agent、shell、editor 对着同一份本地 workspace 工作
+- 保持 `source/path` 作为主 mental model
+- 把任意后端介质同步/物化到本地目录
+- 让人类、agent、shell、editor 对着同一份本地 materialized path 工作
 - 不把“统一宿主机 POSIX 执行语义”当成主产品承诺
 
 ## 核心产品判断
@@ -13,11 +14,12 @@ Section 是一个**跨平台 sync workspace 协作层**：
 这次 pivot 的关键不是“哪种文件系统技术更纯粹”，而是：
 
 - 普通用户很难可靠使用 `FUSE` 作为默认入口
-- 但是人类和 agent 仍然需要在同一份本地工作区里协作
+- 但是人类和 agent 仍然需要在同一份本地目录里协作
+- 新路线不该为了 sync 再发明一个额外的顶层对象
 
 所以主线改成：
 
-1. **sync workspace 是主线**
+1. **source/path + sync state 是主线**
 2. **execution contract 单独定义**
 3. **FUSE 只保留为 future / advanced mode**
 
@@ -25,10 +27,10 @@ Section 是一个**跨平台 sync workspace 协作层**：
 
 Section 主线应该承诺的是：
 
-- 用户得到一个可工作的本地 workspace
-- workspace 背后可以连接不同介质和协议
+- 用户面对的仍然是 `source/path`
+- 某个 source 可以绑定一个本地 materialized root
 - 文件内容、目录结构、materialization 状态、同步状态、冲突状态是可见和可控的
-- 人类和 agent 都在同一份本地 workspace 上工作
+- 人类和 agent 都在同一份本地 materialized path 上工作
 
 Section 主线不承诺的是：
 
@@ -40,43 +42,45 @@ Section 主线不承诺的是：
 
 | 用户 / 进程 | 主访问方式 | 说明 |
 |-------------|------------|------|
-| 人类用户 | 本地 workspace 目录 | Finder / Explorer / shell / editor |
-| AI Agent | 同一份本地 workspace | 不走专有 API 作为主路径 |
-| CLI / GUI / API | 控制面 | 管 workspace、状态、同步、冲突、pin/materialize |
+| 人类用户 | 本地 materialized path | Finder / Explorer / shell / editor |
+| AI Agent | 同一份本地 materialized path | 不走专有 API 作为主路径 |
+| CLI / GUI / API | 控制面 | 管 source/path、状态、同步、冲突、pin/materialize |
 | Runtime | 执行面 | 解释器 / 容器 / WSL / remote runner |
 
 ## 产品分层
 
-### Workspace Plane
+### Source/Path Plane
 
 这是主工作面：
 
-- 本地目录
+- `source/path`
+- source 绑定到本地目录
 - 普通文件 / 目录工作流
 - agent 与人类共享
-- sync / materialize / conflict 都围绕它发生
+- sync / materialize / conflict 都围绕 source 与 path 状态发生
 
 ### Control Plane
 
 这是管理面：
 
-- source / workspace 管理
+- source 管理
+- source 绑定本地目录
 - status / health / diagnostics
 - sync / materialize / pin / repair
 - 配置、认证、安装引导
 
 ### Execution Plane
 
-这是单独的一层，不应和 workspace 混成一个承诺：
+这是单独的一层，不应和 source/path sync 混成一个承诺：
 
 - Python / Node / Java 等显式 runtime
 - POSIX shell runtime
 - Windows 原生 runtime
 - 容器 / WSL / remote runner
 
-Section 统一 workspace，不直接承诺统一宿主机执行语义。
+Section 统一的是 source/path sync contract，不直接承诺统一宿主机执行语义。
 
-## Workspace Contract
+## Source/Path Sync Contract
 
 主线 MVP 应先定义清楚：
 
@@ -98,22 +102,22 @@ Section 统一 workspace，不直接承诺统一宿主机执行语义。
 ### 核心产品动作
 
 - attach source
-- create workspace
+- bind local root
 - materialize / pin
 - observe local changes
 - sync remote changes
 - surface conflicts honestly
 
-## 为什么不是 sync engine API 先行
+## 为什么不是 platform sync engine 先行
 
-Section 主线是 `sync workspace`，但这不等于第一版就必须绑定：
+Section 主线是 `source/path + sync state`，但这不等于第一版就必须绑定：
 
 - macOS File Provider
 - Windows CFAPI
 
 第一阶段更合理的是：
 
-- 先把 Section 自己的 workspace contract 做出来
+- 先把 Section 自己的 source/path sync contract 做出来
 - 用普通本地目录把同步工作流跑通
 - 原生 sync engine / shell integration 作为第二阶段增强
 
@@ -138,7 +142,7 @@ Section 主线是 `sync workspace`，但这不等于第一版就必须绑定：
 | 能力 | Linux | macOS | Windows | 主线判断 |
 |------|-------|-------|---------|----------|
 | core/provider/CLI | 支持 | 支持 | 目标支持 | 必须持续 green |
-| sync workspace | 主线 | 主线 | 主线 | 产品默认入口 |
+| source/path sync | 主线 | 主线 | 主线 | 产品默认入口 |
 | 原生 mount / adapter | advanced | advanced / future | advanced / future | 不是 MVP 前提 |
 | execution | runtime 负责 | runtime 负责 | runtime 负责 | 不由 FS 层硬统一 |
 
@@ -147,10 +151,10 @@ Section 主线是 `sync workspace`，但这不等于第一版就必须绑定：
 新的 MVP 应该是：
 
 1. 能连接一个或多个 source
-2. 能把 regular files / directories 同步或 materialize 到本地 workspace
+2. 能为 source 绑定本地目录，并把 regular files / directories 同步或 materialize 到本地
 3. 本地修改与远端修改都能被收敛
-4. conflict / pending / offline 状态可见
-5. agent 与人类都在同一份本地 workspace 工作
+4. source/path 级别的 conflict / pending / offline 状态可见
+5. agent 与人类都在同一份本地 materialized path 工作
 6. execution 通过明确 runtime 路线承接，而不是依赖“天然 POSIX 等价”
 
 ## Future Tracks
@@ -160,6 +164,6 @@ Section 主线是 `sync workspace`，但这不等于第一版就必须绑定：
 - Linux `FUSE` / macOS `macFUSE` / Windows `WinFsp`
 - macOS File Provider
 - Windows Cloud Files API
-- SMB 导出 / shared workspace server mode
+- SMB 导出 / shared source tree server mode
 
-它们应该建立在稳定的 workspace contract 之上，而不是反过来定义产品。
+它们应该建立在稳定的 source/path sync contract 之上，而不是反过来定义产品。
