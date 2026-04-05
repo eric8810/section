@@ -138,7 +138,7 @@ Section 主线是 `source/path + sync state`，但这不等于第一版就必须
 
 - 先把 Section 自己的 source/path sync contract 做出来
 - 用普通本地目录把同步工作流跑通
-- 原生 sync engine / shell integration 作为第二阶段增强
+- 原生 sync engine / shell integration 明确放到当前项目范围外
 
 否则会过早把产品定义绑定到平台专有模型。
 
@@ -176,9 +176,9 @@ Section 主线是 `source/path + sync state`，但这不等于第一版就必须
 5. agent 与人类都在同一份本地 path 工作
 6. execution 通过明确 runtime 路线承接，而不是依赖“天然 POSIX 等价”
 
-## Future Tracks
+## 当前项目范围外
 
-下面这些都保留，但不再作为主线前提：
+下面这些都保留，但不属于当前项目范围：
 
 - Linux `FUSE` / macOS `macFUSE` / Windows `WinFsp`
 - macOS File Provider

@@ -11,7 +11,7 @@ Section is pivoting away from a mount-first product model toward a source/path-f
 - CLI/API remain the control plane
 - execution semantics are treated as a separate runtime problem, not something the filesystem layer can magically unify
 
-The next architectural center is `sectiond`: a long-lived local core that will own source registry, local sync bindings, path state, local-presence detail, refresh, conflicts, and health semantics for both control-plane clients and future adapters.
+The next architectural center is `sectiond`: a long-lived local core that will own source registry, local sync bindings, path state, local-presence detail, refresh, conflicts, and health semantics for the current project.
 
 ## Project Truth
 
@@ -26,7 +26,8 @@ What is true today:
 What is changing now:
 
 - the repo is moving away from a "CLI + FUSE feature bundle" story
-- the new route map is `source/path sync state -> sectiond sync core -> execution contract -> future adapters`
+- the current project route map is `source/path sync state -> sectiond sync core -> execution contract`
+- adapter/native integration work is explicitly outside the current project scope
 
 For the current roadmap, see:
 
@@ -120,11 +121,8 @@ Section is moving toward this runtime model:
              sectiond
  route / cache / sync / local state / conflicts / health
                 |
-      +---------+---------+
-      |                   |
- Control Plane      Future Adapters
- (CLI / API / GUI) (FUSE / File Provider /
-                    CFAPI / SMB export)
+         Control Plane
+      (CLI / API / GUI)
                 |
            Apache OpenDAL
        S3 / WebDAV / fs / ...
@@ -135,6 +133,7 @@ Current repo truth:
 - `sectiond` is the target center, not a finished component yet
 - today's crates still reflect a pre-sectiond and pre-source-path-sync structure
 - old Linux mount validation exists already, but is no longer the default product path
+- adapters remain later separate tracks, not current project scope
 
 ### Current Crates
 

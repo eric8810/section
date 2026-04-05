@@ -158,7 +158,7 @@ The product must be honest about:
 
 ## Future Extensions
 
-These may be layered later on top of the same contract:
+These may be layered later on top of the same contract, but they are outside the current project scope:
 
 - FUSE-based advanced mode
 - macOS File Provider

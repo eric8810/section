@@ -61,11 +61,8 @@ execution contract 由 runtime 层承接。
  source registry / sync state / local detail
  local change ingest / remote change ingest / conflicts
                 |
-       +--------+--------+
-       |                 |
-   Control Plane     Future Adapters
- (CLI / GUI / API)  (FUSE / File Provider /
-                     CFAPI / SMB export)
+          Control Plane
+       (CLI / GUI / API)
                 |
              OpenDAL
       S3 / WebDAV / fs / ...
@@ -120,9 +117,9 @@ CLI 不再是“产品本体”，而是 control plane client。
 - 任意复杂文件类型完整支持
 - 平台原生 mount 语义
 
-### Future Adapters
+### Later Separate Tracks
 
-这些都不删，但全部降级为后续 adapter：
+这些都不删，但明确不属于当前项目范围：
 
 - Linux `FUSE`
 - macOS `macFUSE`
@@ -131,7 +128,7 @@ CLI 不再是“产品本体”，而是 control plane client。
 - Windows CFAPI
 - SMB export
 
-它们应该消费 `sectiond` 的 source/path contract，而不是定义主产品。
+它们以后应该消费 `sectiond` 的 source/path contract，而不是定义主产品。
 
 ## 核心状态模型
 
@@ -194,7 +191,7 @@ CLI 不再是“产品本体”，而是 control plane client。
 - agent 和人类能共享本地目录
 - 跨平台可交付
 
-而把下面这些留到第二阶段：
+而把下面这些明确放到当前项目范围外：
 
 - mount fidelity
 - native shell integration
