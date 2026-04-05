@@ -2,191 +2,218 @@
 
 ## 目标
 
-Section 的最终目标不是“再做一个多存储 CLI”，而是提供一个**共享文件系统协作介质**：
+Section 的主目标从“挂载统一命名空间”调整为：
 
-- 人类通过 Finder / shell / editor / 普通程序访问
-- Agent 通过相同的路径、相同的文件操作、相同的 shell 工具访问
-- 双方在**同一棵命名空间**上协作，而不是一边走挂载，一边走专有 API
+> 提供一个跨平台、可靠、可物化的 sync workspace，让人类和 agent 在同一份本地工作区上协作。
 
-因此，Section 的核心不是 CLI，也不是某个单独的 FUSE 进程，而是：
+这意味着：
 
-1. 一个统一的本地数据平面
-2. 一套稳定的挂载语义
-3. 一个为挂载、CLI、API 同时服务的本地控制平面
+- `workspace` 是主工作面
+- `sectiond` 是真实状态机
+- `runtime` 单独负责执行一致性
+- mount / native integration 变成后续 adapter，而不是主线前提
 
-## 设计原则
+## 顶层原则
 
-### 1. FS 是主交互面，不是附属功能
+### 1. Workspace first
 
-对最终用户心智来说，Section 应该首先表现为：
+最终用户首先应该看到的是：
 
-- 一棵可挂载的统一命名空间
-- 一组普通文件 / 目录
-- 一种 shell / editor / script 可直接操作的工作介质
+- 一个本地目录
+- 文件确实落在本地时可直接使用
+- 可以知道哪些内容已物化、哪些待同步、哪些冲突
 
-CLI / API 依然重要，但它们是：
+而不是：
 
-- source 管理
-- 认证与配置
-- health / status / diagnostics
-- refresh / cache control
-- 非挂载 fallback
+- 一组专有 CLI 命令
+- 一套必须先装驱动才能用的 mount 路径
 
-而不是主要协作面。
+### 2. sectiond 是唯一真实状态机
 
-### 2. CLI / API 属于 control plane
-
-如果最终模型是“所有 agent 和人类都在同一个 FS 介质上协作”，那么 CLI / API 的职责应该收敛到控制面：
-
-- `section source add/remove/list`
-- `section status`
-- `section refresh`
-- 配置、认证、诊断
-- 在未挂载平台上的临时 fallback
-
-`ls/cat/cp/write/exec` 这些 CLI 能力可以保留，但它们不应该定义产品的终局形态。
-
-### 3. 共享语义必须在一个长期驻留的本地核心里实现
-
-缓存、refresh、权限、路由、连接状态、冲突处理，不应该散落在：
+缓存、同步、refresh、冲突、materialization、source 生命周期，不应散落在：
 
 - `section-cli`
-- `section-fuse`
-- 将来的 GUI / API backend
+- 未来 GUI
+- 未来 adapter
 
-里各写一份。
+而应统一放进 `sectiond`。
 
-正确的方向是引入一个长期驻留的本地核心进程，例如 `sectiond`，作为唯一真实状态机。
+### 3. Execution 不是 FS 层承诺
 
-`sectiond` 的第一版边界定义见 [SECTIOND.md](./SECTIOND.md)。
+Section 不尝试用文件系统方案统一：
+
+- POSIX shell 行为
+- Windows 原生执行行为
+- 所有平台的权限与 metadata 语义
+
+Section 统一 workspace contract；
+execution contract 由 runtime 层承接。
 
 ## 目标运行时模型
 
 ```text
-            Humans / Agents / Shell / Editors
-                         |
-          +--------------+--------------+
-          |                             |
-      Control Plane                 Data Plane
-  (CLI / API / GUI backend)    (mounted shared namespace)
-          |                             |
-          +-------------+---------------+
-                        |
-                     sectiond
-      source registry / routing / cache / refresh
-      permissions / health / sessions / diagnostics
-                        |
-        +---------------+------------------+
-        |                                  |
-   Linux mount adapter                macOS mount adapter
-      (FUSE today)                 (macFUSE first, native later)
-                        |
-                     OpenDAL
-              S3 / WebDAV / fs / ...
+ Humans / Agents / Shell / Editors
+                |
+         Local Sync Workspace
+                |
+            sectiond core
+ source registry / sync state / materialization
+ local change ingest / remote change ingest / conflicts
+                |
+       +--------+--------+
+       |                 |
+   Control Plane     Future Adapters
+ (CLI / GUI / API)  (FUSE / File Provider /
+                     CFAPI / SMB export)
+                |
+             OpenDAL
+      S3 / WebDAV / fs / ...
 ```
 
 ## 模块职责
 
 ### sectiond
 
-目标中的 `sectiond` 负责：
+`sectiond` 目标职责：
 
-- 维护 source registry
-- 管理后端 operator 生命周期
-- 管理 metadata/content cache
-- 实现 refresh / invalidation
-- 统一 permission / conflict / health 语义
-- 为 CLI / mount adapter / GUI backend 提供统一本地接口
+- source registry
+- workspace registry
+- remote operator 生命周期
+- local materialization 状态
+- sync scheduler
+- metadata/content cache
+- local change detection ingestion
+- remote change reconciliation
+- conflict detection and surfacing
+- health / diagnostics
 
-这是未来真正的产品内核。
+它是产品的核心，不再只是 mount 支撑组件。
 
 ### section-cli
 
-`section-cli` 在目标架构中的职责是 control plane client：
+CLI 的目标职责：
 
-- 管理 source
-- 显示状态 / 健康 / 诊断
-- 触发 refresh / repair
-- 在未挂载平台上提供有限但诚实的 fallback
+- source / workspace 管理
+- status / health / diagnostics
+- sync / materialize / pin / repair
+- conflict inspection
+- 在无 GUI 时充当控制面入口
 
-它不再承担“产品的主要工作面”这个角色。
+CLI 不再是“产品本体”，而是 control plane client。
 
-### Linux mount adapter
+### Local Workspace
 
-Linux 路径继续沿用 FUSE，并且是最先做实的正式 data-plane adapter。
+本地 workspace 是主工作面。
 
-Linux adapter 的职责：
+它应该支持：
 
-- 把 `sectiond` 暴露成 POSIX 文件系统
-- 保证 shell / editor / agent 的工作路径是真正的 mount path
-- 为跨平台语义提供第一条已验证的参考实现
+- 普通文件/目录读写
+- 部分内容未物化时的诚实状态
+- 本地修改可被检测和同步
+- agent 与人类共享同一目录
 
-### macOS mount adapter
+第一阶段不要求：
 
-macOS 的长期要求不是“最好也能 mount”，而是**最终也要给出同一类 FS 协作心智**。
+- 完整 POSIX metadata round-trip
+- 任意复杂文件类型完整支持
+- 平台原生 mount 语义
 
-短期路线：
+### Future Adapters
 
-- 先用 macFUSE 把语义跑通
-- 把它视为 macOS 上的过渡 adapter
+这些都不删，但全部降级为后续 adapter：
 
-长期路线：
+- Linux `FUSE`
+- macOS `macFUSE`
+- Windows `WinFsp`
+- macOS File Provider
+- Windows CFAPI
+- SMB export
 
-- 如果 macFUSE 安装摩擦不可接受，再评估是否需要原生 adapter
-- 但那时也应该只是“替换 adapter”，而不是推翻上层语义
+它们应该消费 `sectiond` 的 workspace contract，而不是定义主产品。
 
-## 执行与脚本模型
+## 核心状态模型
 
-既然目标是“人类与 agent 在相同 FS 介质上协作”，那么：
+### Object State
 
-- bash / python / node / editor macro 等执行模式，都应该主要针对挂载路径工作
-- `section exec` 最多是辅助能力，不该成为核心工作流
+每个 workspace object 至少要区分：
 
-正确的协作模式应该是：
+- present and materialized
+- present but not materialized
+- local dirty
+- remote newer
+- in conflict
+- failed / needs repair
 
-- 人类在 `/mnt/section/...` 或平台等价挂载点里工作
-- Agent 在相同路径上读写
-- 普通 shell 脚本直接运行在这棵树上
-- `sectiond` 负责缓存、一致性与 refresh 语义
+### Workspace State
 
-## 平台策略
+每个 workspace 至少要区分：
 
-### Linux
+- healthy
+- syncing
+- offline
+- degraded
+- conflict present
 
-- 正式 data-plane 平台
-- 挂载路径应持续保持可验证、可诊断、可脚本化
-- Linux FUSE 语义是第一参考实现
+## 核心数据流
 
-### macOS
+### Remote to Local
 
-- non-mount CLI / core / provider 路径要保持可用
-- mount 路径短期通过 macFUSE 做实
-- 如果用户强需求是“零额外依赖 + 文件系统体验”，应评估 native adapter，而不是让 CLI/API 变成终局替代品
+1. remote source emits or is polled for change
+2. `sectiond` updates object state
+3. object is materialized or marked stale
+4. workspace exposes the current truthful local state
 
-## 当前仓库与目标架构的关系
+### Local to Remote
 
-当前 repo 仍处于**pre-sectiond** 阶段。
+1. user/agent edits local file
+2. local change is observed
+3. `sectiond` stages sync work
+4. remote write succeeds or conflict is surfaced
 
-已经完成的部分：
+### Execution
 
-- OpenDAL 多后端接入
+1. runtime points at local workspace
+2. Section guarantees readiness/materialization contract only
+3. runtime owns interpreter/container/OS-specific execution behavior
+
+## 为什么这样比 FUSE-first 更合理
+
+因为它先解决：
+
+- 普通用户真的能用
+- agent 和人类能共享本地目录
+- 跨平台可交付
+
+而把下面这些留到第二阶段：
+
+- mount fidelity
+- native shell integration
+- deeper OS-specific file presentation
+
+## 当前 repo 与目标架构的关系
+
+已经可复用的 groundwork：
+
+- OpenDAL backend 接入
 - provider store / credential encryption
-- Linux FUSE happy-path validation
+- cache / refresh 基础能力
+- `sectiond` 初始边界
+- Linux `FUSE` 验证经验
 - 双平台 non-FUSE CI
-- 基础 CLI 与缓存/refresh 机制
 
-还没有完成的关键变化：
+仍缺的主线能力：
 
-- 将 `section-cli` / `section-fuse` 的核心状态与逻辑从“各自直接持有”迁移到 `sectiond`
-- 让控制面与数据面都消费同一套本地状态机
-- 明确 macOS adapter 的短期与长期策略
+- workspace registry
+- materialization state model
+- local change ingestion
+- bidirectional sync loop
+- conflict surfacing
+- workspace-oriented CLI
 
 ## 非目标
 
-下面这些都不应成为当前阶段的主路线：
+当前 pivot 后，不再把下面这些当主线目标：
 
-- 把 CLI/API-only 当成最终产品模型
-- 为了追求 macOS 零依赖，一开始就重做整套产品
-- 让 Linux 和 macOS 在不同的交互心智下“都算支持”
-
-如果支持不是同一套 FS 协作模式，那只是多入口访问，而不是 Section 想要的共享介质。
+- “所有平台都先 mount 再说”
+- “先统一 POSIX，再统一产品”
+- “靠一个 FS 方案同时统一工作区和执行语义”

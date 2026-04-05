@@ -2,144 +2,164 @@
 
 ## 一句话定义
 
-Section 是一个**共享文件系统协作层**：让 agent、人类和普通 shell / editor / script 在同一棵挂载命名空间上协作，而不是分别走不同的访问模型。
+Section 是一个**跨平台 sync workspace 协作层**：
+
+- 把任意后端介质同步/物化到本地工作区
+- 让人类、agent、shell、editor 对着同一份本地 workspace 工作
+- 不把“统一宿主机 POSIX 执行语义”当成主产品承诺
+
+## 核心产品判断
+
+这次 pivot 的关键不是“哪种文件系统技术更纯粹”，而是：
+
+- 普通用户很难可靠使用 `FUSE` 作为默认入口
+- 但是人类和 agent 仍然需要在同一份本地工作区里协作
+
+所以主线改成：
+
+1. **sync workspace 是主线**
+2. **execution contract 单独定义**
+3. **FUSE 只保留为 future / advanced mode**
 
 ## 产品承诺
 
-Section 最终想提供的不是“很多访问方式”，而是**同一种工作方式**：
+Section 主线应该承诺的是：
 
-- 人类看到的是文件和目录
-- Agent 看到的也是文件和目录
-- bash / python / node / editor 插件操作的仍然是同一棵树
-- 底层可以是 S3 / WebDAV / 本地磁盘 / 其他 OpenDAL backend
+- 用户得到一个可工作的本地 workspace
+- workspace 背后可以连接不同介质和协议
+- 文件内容、目录结构、materialization 状态、同步状态、冲突状态是可见和可控的
+- 人类和 agent 都在同一份本地 workspace 上工作
 
-### 这意味着什么
+Section 主线不承诺的是：
 
-1. `FS` 是主交互面
-2. `CLI / API` 是控制面
-3. 平台差异只能存在于挂载 adapter，而不能改变上层协作心智
+- macOS / Linux / Windows 的原生执行语义完全一致
+- 完整 POSIX metadata 在跨平台间严格 round-trip
+- 第一版就提供任意挂载点、原生 mount、零差异文件系统体验
 
 ## 用户与交互面
 
 | 用户 / 进程 | 主访问方式 | 说明 |
 |-------------|------------|------|
-| AI Agent | 挂载路径 | 与人类共用同一棵 namespace |
-| 人类开发者 / 运维 | Finder / shell / editor / 挂载路径 | 主心智模型是普通文件系统 |
-| bash / python / node / 普通程序 | 挂载路径 | `execute / scripting` 应主要发生在共享工作树上 |
-| CLI / GUI / API | 控制面 | 管理 source、查看状态、诊断、refresh |
+| 人类用户 | 本地 workspace 目录 | Finder / Explorer / shell / editor |
+| AI Agent | 同一份本地 workspace | 不走专有 API 作为主路径 |
+| CLI / GUI / API | 控制面 | 管 workspace、状态、同步、冲突、pin/materialize |
+| Runtime | 执行面 | 解释器 / 容器 / WSL / remote runner |
 
-## 交互面分层
+## 产品分层
 
-### Data Plane
+### Workspace Plane
 
-这是产品真正的工作面：
+这是主工作面：
 
-- mount path
-- 普通文件系统语义
-- 读 / 写 / 列目录 / rename / delete / exec
-- shell / script / editor / agent 全部在这一层工作
+- 本地目录
+- 普通文件 / 目录工作流
+- agent 与人类共享
+- sync / materialize / conflict 都围绕它发生
 
 ### Control Plane
 
-这是产品的管理面：
+这是管理面：
 
-- source add/remove/list
-- status / diagnostics
-- refresh / health
+- source / workspace 管理
+- status / health / diagnostics
+- sync / materialize / pin / repair
 - 配置、认证、安装引导
-- 未挂载平台上的 fallback
 
-CLI / API 仍然重要，但不应成为最终协作模式的替代品。
+### Execution Plane
 
-## 目标架构
+这是单独的一层，不应和 workspace 混成一个承诺：
 
-### sectiond
+- Python / Node / Java 等显式 runtime
+- POSIX shell runtime
+- Windows 原生 runtime
+- 容器 / WSL / remote runner
 
-产品目标中的核心不是当前的 `section-cli` 或 `section-fuse`，而是一个长期驻留的本地核心，例如 `sectiond`。
+Section 统一 workspace，不直接承诺统一宿主机执行语义。
 
-它应该统一持有：
+## Workspace Contract
 
-- source registry
-- OpenDAL operator 生命周期
-- metadata/content cache
-- refresh / invalidation
-- permission / conflict semantics
-- health / diagnostics
+主线 MVP 应先定义清楚：
 
-这样：
+### 保证的对象
 
-- Linux mount adapter 消费它
-- macOS mount adapter 消费它
-- CLI / API / GUI backend 也消费它
+- regular files
+- directories
+- 内容同步
+- 基础状态可见：
+  - synced / pending / materialized / conflict
 
-### 挂载 adapter
+### 暂不保证的对象
 
-Section 的平台差异应该被限制在 adapter 层。
+- 完整权限 / owner / ACL 跨平台同步
+- 完整 `xattr`
+- 完整 `symlink / hardlink`
+- 设备文件、socket、FIFO 等复杂对象
 
-#### Linux
+### 核心产品动作
 
-- FUSE 作为正式 data-plane adapter
-- Linux 是第一参考实现
+- attach source
+- create workspace
+- materialize / pin
+- observe local changes
+- sync remote changes
+- surface conflicts honestly
 
-#### macOS
+## 为什么不是 sync engine API 先行
 
-短期：
+Section 主线是 `sync workspace`，但这不等于第一版就必须绑定：
 
-- 用 macFUSE adapter 跑通与 Linux 同类的挂载协作语义
+- macOS File Provider
+- Windows CFAPI
 
-长期：
+第一阶段更合理的是：
 
-- 如果 macFUSE 的安装摩擦不可接受，再评估 native adapter
+- 先把 Section 自己的 workspace contract 做出来
+- 用普通本地目录把同步工作流跑通
+- 原生 sync engine / shell integration 作为第二阶段增强
 
-关键点是：不管 adapter 怎么变，上层都必须还是“同一 FS 协作模式”。
+否则会过早把产品定义绑定到平台专有模型。
 
-## 执行与脚本
+## 为什么不是 FUSE 主线
 
-如果目标是“agent 和人类共用同一个 FS 介质”，那 `execute / scripting` 不应该主要依赖专门的 CLI 命令。
+原因非常现实：
 
-正确的方向是：
+- 普通用户安装和批准复杂度过高
+- 跨平台支持成本高
+- 即使统一了文件系统入口，也不能统一 Windows 的原生执行语义
 
-- 普通 bash / python / node 脚本直接运行在 mounted workspace 上
-- `section exec` 保留，但只作为补充工具
-- 产品语义围绕“共享工作树”而不是“专有命令集”
+因此 `FUSE` 不是主产品入口，而是：
+
+- Linux / advanced mode
+- future enhancement
+- power user path
 
 ## 平台策略
 
-| 能力 | Linux | macOS | 说明 |
-|------|-------|-------|------|
-| `core/provider/CLI` | 正式支持 | 正式支持 | non-mount 路径应持续保持 green |
-| 挂载协作模型 | 正式实现 | 短期通过 macFUSE，长期再评估 | 上层协作语义必须一致 |
-| shell / script 工作流 | 以挂载树为主 | 以挂载树为目标 | CLI fallback 不是终局 |
+| 能力 | Linux | macOS | Windows | 主线判断 |
+|------|-------|-------|---------|----------|
+| core/provider/CLI | 支持 | 支持 | 目标支持 | 必须持续 green |
+| sync workspace | 主线 | 主线 | 主线 | 产品默认入口 |
+| 原生 mount / adapter | advanced | advanced / future | advanced / future | 不是 MVP 前提 |
+| execution | runtime 负责 | runtime 负责 | runtime 负责 | 不由 FS 层硬统一 |
 
-## 当前 repo truth
+## MVP 定义（pivot 后）
 
-当前仓库仍是 pre-sectiond 状态。
+新的 MVP 应该是：
 
-已经证明的部分：
+1. 能连接一个或多个 source
+2. 能把 regular files / directories 同步或 materialize 到本地 workspace
+3. 本地修改与远端修改都能被收敛
+4. conflict / pending / offline 状态可见
+5. agent 与人类都在同一份本地 workspace 工作
+6. execution 通过明确 runtime 路线承接，而不是依赖“天然 POSIX 等价”
 
-- Linux FUSE happy path 可行
-- S3 / WebDAV / fs 验证路径已建立
-- 双平台 non-FUSE CI 已稳定
+## Future Tracks
 
-还没完成的关键变化：
+下面这些都保留，但不再作为主线前提：
 
-- 共享语义尚未收拢到 `sectiond`
-- CLI 和 mount adapter 还没有共同消费一个统一内核
-- macOS mount adapter 仍未做实
+- Linux `FUSE` / macOS `macFUSE` / Windows `WinFsp`
+- macOS File Provider
+- Windows Cloud Files API
+- SMB 导出 / shared workspace server mode
 
-## MVP 定义（更新后）
-
-新的 MVP 不再定义为“若干命令都能跑”，而是：
-
-1. Linux 上已经有真实可用的共享 FS 协作路径
-2. `sectiond` 作为统一本地核心开始成形
-3. CLI 明确转向 control plane
-4. macOS 路径有诚实的短期策略，而不是口头等价
-
-## 明确不做
-
-下面这些不应当被当成当前主路线：
-
-- 把 CLI/API-only 当成最终产品
-- 用“多入口访问”替代“共享 FS 协作介质”
-- 为了零依赖包装，提前重写整个 macOS 平台实现
+它们应该建立在稳定的 workspace contract 之上，而不是反过来定义产品。

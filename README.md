@@ -1,14 +1,15 @@
 # Section
 
-Shared filesystem collaboration layer for humans and agents, built on [Apache OpenDAL](https://github.com/apache/opendal).
+Cross-platform sync workspace collaboration layer for humans and agents, built on [Apache OpenDAL](https://github.com/apache/opendal).
 
-Section is being reorganized around a filesystem-first model:
+Section is pivoting away from a mount-first product model toward a sync-workspace-first model:
 
-- the mounted workspace is the main working surface
-- humans, agents, shell tools, editors, and scripts should operate on the same namespace
-- CLI/API remain important, but as the control plane rather than the final collaboration surface
+- the main working surface is a local materialized workspace
+- humans, agents, shell tools, and editors should operate on the same local directory
+- CLI/API remain the control plane
+- execution semantics are treated as a separate runtime problem, not something the filesystem layer can magically unify
 
-The next architectural center is `sectiond`: a long-lived local core that will own routing, cache, refresh, permissions, and health semantics for both mount adapters and control-plane clients.
+The next architectural center is `sectiond`: a long-lived local core that will own routing, cache, sync state, materialization, refresh, conflicts, and health semantics for both workspace clients and future adapters.
 
 ## Project Truth
 
@@ -18,58 +19,54 @@ What is true today:
 - macOS and Linux non-mount flows are covered by CI
 - S3, WebDAV, and local filesystem backends have real validation coverage
 - the current repo is still **pre-sectiond**
-- macOS mount validation still depends on the external macFUSE runtime
+- the repo still reflects the older mount-first route map more than the new sync-workspace route
 
 What is changing now:
 
 - the repo is moving away from a "CLI + FUSE feature bundle" story
-- the route map is now `FS-first -> sectiond -> Linux reference adapter -> macOS adapter`
+- the new route map is `sync workspace -> sectiond sync core -> execution contract -> future adapters`
 
 For the current roadmap, see:
 
 - [docs/PRODUCT.md](docs/PRODUCT.md)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/SYNC_WORKSPACE.md](docs/SYNC_WORKSPACE.md)
 - [docs/SECTIOND.md](docs/SECTIOND.md)
 - [docs/PLAN.md](docs/PLAN.md)
 - [docs/BACKEND_VALIDATION.md](docs/BACKEND_VALIDATION.md)
 
 ## Features
 
-- **Unified mounted namespace** — the target product model is a shared filesystem workspace
+- **Unified local workspace** — the new target product model is a materialized sync workspace shared by humans and agents
 - **60+ storage backends** via OpenDAL (S3, WebDAV, Google Drive, Azure Blob, etc.)
 - **Control-plane CLI** — source management, status, refresh, and fallback file operations
 - **Credential encryption** — AES-256-GCM encrypted storage in SQLite
 - **JSON output** — `--json` flag for machine-readable output (agent-friendly)
-- **POSIX permissions** — uid/gid/mode enforced at the FUSE layer
+- **Mount groundwork** — Linux FUSE and macOS/macFUSE groundwork remain available as future/advanced tracks
 - **Metadata cache** — TTL-based caching to reduce backend calls
 - **Content cache** — LRU eviction cache for file content
 
 ## Platform Support
 
-Section is targeting macOS and Linux together, but the truthful maturity level is still different across paths.
+Section is targeting macOS, Linux, and Windows as a sync-workspace product, but the current repo maturity still reflects earlier mount-focused work.
 
-| Capability | Linux | macOS | Notes |
-|------------|-------|-------|-------|
-| `section-core` / `section-provider` / non-mount CLI | Target platform | Target platform | Covered by the dual-platform CI workflow for non-FUSE paths |
-| Mounted shared workspace | Validated reference path | Target path, not fully validated yet | macOS still requires macFUSE plus explicit adapter validation |
-| Permission model | Primary reference implementation | Target path with runtime differences | Current semantics are still Linux-first |
+| Capability | Linux | macOS | Windows | Notes |
+|------------|-------|-------|---------|-------|
+| `section-core` / `section-provider` / non-mount CLI | Target platform | Target platform | Target platform | current CI covers Linux/macOS non-FUSE paths |
+| Sync workspace mainline | Pivot target | Pivot target | Pivot target | not implemented end-to-end yet |
+| Mount / adapter path | Advanced track | Advanced track | Advanced track | no longer the main product path |
 
 Current repo truth:
 - cross-platform core/provider/control-plane support is real
-- Linux remains the current reference path for mounted-workspace behavior
-- macOS mount support is still an explicit adapter track, not a solved parity claim
-- macOS prerequisite/install/support details are documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md)
+- Linux remains the place where the old mounted-workspace path is most validated
+- sync workspace is now the product mainline, but still needs dedicated implementation work
+- macOS mount details remain documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md) as a future/advanced path, not the default user journey
 
 ## Quick Start
 
 ```bash
 # Build
 cargo build --release
-
-# On macOS, install macFUSE before validating mount/unmount.
-# On Linux, install a FUSE runtime such as fuse3.
-# During development, make sure the built section-fuse binary is in PATH.
-# On a real macOS host, run scripts/validate-macos-mounted-workspace.sh after macFUSE install.
 
 # Interactive setup
 section init
@@ -99,17 +96,13 @@ section rm work-s3/old-file.txt
 # Supplementary exec helper
 section exec my-files/scripts/deploy.sh -- --env prod
 
-# Mounted workspace (the intended primary working surface)
-section mount /mnt/section
-ls /mnt/section/my-files/
-cat /mnt/section/work-s3/report.csv
-
 # Check status
 section status
 ```
 
-Mounted-workspace execute/scripting semantics are documented in [docs/EXECUTION_MODEL.md](docs/EXECUTION_MODEL.md).
-macOS prerequisite / preflight / fallback policy is documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md).
+Current and target workspace semantics are documented in [docs/SYNC_WORKSPACE.md](docs/SYNC_WORKSPACE.md).
+Old mounted-workspace execute/scripting semantics remain documented in [docs/EXECUTION_MODEL.md](docs/EXECUTION_MODEL.md) as groundwork/history.
+macOS mount prerequisite / preflight / fallback policy remains documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md) for the advanced path.
 
 ## Architecture
 
@@ -118,20 +111,17 @@ Section is moving toward this runtime model:
 ```
  Humans / Agents / Shell / Editors
                 |
-      +---------+---------+
-      |                   |
-  Control Plane       Data Plane
- (CLI / API / GUI)   (mounted namespace)
-      |                   |
-      +---------+---------+
+       Local Sync Workspace
                 |
              sectiond
- route / cache / refresh / permissions / health
+ route / cache / sync / materialize / conflicts / health
                 |
-    +-----------+------------+
-    |                        |
- Linux mount adapter    macOS mount adapter
-    |                        |
+      +---------+---------+
+      |                   |
+ Control Plane      Future Adapters
+ (CLI / API / GUI) (FUSE / File Provider /
+                    CFAPI / SMB export)
+                |
            Apache OpenDAL
        S3 / WebDAV / fs / ...
 ```
@@ -139,8 +129,8 @@ Section is moving toward this runtime model:
 Current repo truth:
 
 - `sectiond` is the target center, not a finished component yet
-- today's crates still reflect a pre-sectiond structure
-- Linux mount validation exists already and becomes the reference data-plane path
+- today's crates still reflect a pre-sectiond and pre-sync-workspace structure
+- old Linux mount validation exists already, but is no longer the default product path
 
 ### Current Crates
 
@@ -152,7 +142,7 @@ Current repo truth:
 | `section-provider` | SQLite source store, credential encryption |
 | `sectiond` | Initial shared runtime boundary and future daemon skeleton |
 
-For the target architecture and the migration plan, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SECTIOND.md](docs/SECTIOND.md), and [docs/PLAN.md](docs/PLAN.md).
+For the target architecture and the migration plan, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SYNC_WORKSPACE.md](docs/SYNC_WORKSPACE.md), [docs/SECTIOND.md](docs/SECTIOND.md), and [docs/PLAN.md](docs/PLAN.md).
 
 ## Supported Providers
 
@@ -200,9 +190,7 @@ cargo check -p section-core -p section-provider -p section-cli -p sectiond
 cargo test -p section-core -p section-provider -p sectiond
 cargo test -p section-cli
 
-# Full mounted-workspace validation is tracked separately and is not yet the truthful green path on every platform.
-
-# Linux reference validation for script-driven mounted workflows
+# Old mounted-workspace validation remains available as groundwork/history
 scripts/validate-mounted-workspace-exec.sh
 
 # Run with debug logging

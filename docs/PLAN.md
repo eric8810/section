@@ -1,177 +1,164 @@
 # Section Route Map
 
-## 方向结论
+## 新方向结论
 
-Section 现在不再按“多后端 CLI + FUSE 功能集合”来规划，而是按下面这个目标统一：
+Section 现在从 `FS-first mount product` pivot 到：
 
-> agent 和人类应该在同一个 FS 介质上协作，路径语义一致，shell / editor / script 的心理模型一致。
+> `sync workspace first` 产品主线
 
-这意味着：
+更直接地说：
 
-- **FS 是主交互面**
-- **CLI / API 是 control plane**
-- **本地长期驻留核心 (`sectiond`) 是下一阶段的真正中心**
+- **主线**：本地 workspace + sync/materialize/conflict
+- **执行**：靠 runtime contract
+- **高级模式**：FUSE / native integration / SMB export
 
-详细设计见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+`FUSE` 不再是普通用户默认入口。
 
-## 当前已完成的基础工作
+## 为什么 pivot
 
-这些工作不废，属于新路线的 groundwork：
+原因已经足够明确：
 
-- 多 backend 接入：
-  - fs
-  - S3
-  - WebDAV
-- provider store / 凭证加密
-- 基础 CLI：
-  - source add/remove/list
-  - ls/cp/cat/rm/write/exec
-  - status / refresh
+1. 普通用户使用 `FUSE` 成本过高
+2. mount 路线并不能顺便统一 Windows 的原生执行语义
+3. 真正需要统一的是 workspace，不是宿主机 POSIX
+
+## 当前已完成的 groundwork
+
+这些工作仍然保留：
+
+- OpenDAL 多 backend 接入
+- provider store / credential encryption
+- cache / refresh 基础能力
+- 基础 CLI
 - 双平台 non-FUSE CI
-- Linux FUSE happy path 已验证并文档化
+- Linux FUSE happy path 验证
+- `sectiond` 初始边界
 
-对应的已关闭 issues：
+不再作为主线的内容：
 
-- `#1` repo / docs / support matrix truth alignment
-- `#2` cache TTL 语义
-- `#3` metadata/content cache 接入 section-fuse
-- `#4` refresh / invalidation 路径
-- `#5` Linux FUSE mount happy path
-- `#6` S3 real backend validation
-- `#7` WebDAV real backend validation
-- `#8` CLI usability gap
-- `#9` router / permission / provider-store coverage
-- `#10` platform-aware mount/unmount behavior
-- `#12` dual-platform non-FUSE CI
+- macOS mount adapter 验证
+- FUSE-first 路线图
+- 以挂载路径作为默认工作面
 
-当前唯一延续到新路线中的旧编号 issue：
+## 新主路线
 
-- `#11` macOS mount adapter shared-workspace validation（当前仍受 macFUSE 依赖阻塞）
-
-## 新路线图
-
-### Phase 1: 明确 sectiond 边界
+### Phase 1: 定义 sync workspace contract
 
 目标：
 
-- 定义 `sectiond` 与 mount adapter / CLI client 的清晰边界
-- 把“共享协作语义”从当前散落的实现中抽出来
+- 定清楚 workspace 是什么
+- 定清楚保什么、不保什么
+- 定清楚 agent / 人类如何共享同一份本地目录
 
 产出：
 
-- `sectiond` 职责边界
-- control plane / data plane 接口契约
-- 状态与缓存归属关系
-- 生命周期与健康模型
+- workspace object model
+- metadata scope / non-goals
+- readiness / materialize / pin model
+- conflict model
 
-当前落地物：
-
-- [SECTIOND.md](./SECTIOND.md)
-- `crates/sectiond`
-
-### Phase 2: 把共享语义真正沉到 sectiond
+### Phase 2: sectiond 变成 sync core
 
 目标：
 
-- source registry
-- routing
-- cache
-- refresh
-- permissions
-- diagnostics
-
-都由 `sectiond` 持有，而不是让 CLI / FUSE 各自拥有一套
+- 让 `sectiond` 从 mount-centric boundary 变成 workspace sync core
 
 产出：
 
-- `sectiond` 成为唯一真实本地状态机
-- CLI 与 mount adapter 都改为消费它
+- workspace registry
+- sync state store
+- materialization state machine
+- sync scheduler
 
-### Phase 3: Linux 作为正式 data-plane 参考实现
+### Phase 3: 打通双向同步
 
 目标：
 
-- Linux FUSE adapter 全量走 `sectiond`
-- 保住当前已经验证过的 shell / mount / refresh / write-through 语义
+- remote -> local
+- local -> remote
+- 本地修改、远端修改、冲突、修复都可见
 
 产出：
 
-- Linux 成为“共享 FS 协作模式”的正式参考平台
+- local change ingest
+- remote change ingest
+- bidirectional reconciliation
+- conflict surfacing
 
-### Phase 4: 明确执行 / 脚本工作流
+### Phase 4: 重写 control plane
 
 目标：
 
-- 让 bash / python / node / editor / agent 都面向同一棵挂载树工作
-- 明确 `section exec` 的定位只是辅助，不再当成主路径
+- CLI/GUI/API 不再围绕 mount，而围绕 workspace
 
 产出：
 
-- 统一的执行与 scripting 语义
-- 对 mounted workspace 的正式支持边界
+- workspace create/list/status
+- sync / pin / materialize / repair
+- conflict inspection
 
-### Phase 5: macOS mount adapter
+### Phase 5: 定义 execution contract
 
 目标：
 
-- 在不改变上层协作模型的前提下，让 macOS 也能进入同一类 FS 心智模型
-
-短期：
-
-- macFUSE adapter
-
-长期：
-
-- 如果 macFUSE 的安装摩擦不可接受，再评估 native adapter
+- 承认 workspace 与 execution 分层
+- 明确 agent/script 如何在 workspace 上工作
 
 产出：
 
-- macOS 上的真实 mount 验证
-- 清晰的 installer / support matrix / fallback 策略
+- runtime assumptions
+- POSIX-only workloads 的边界
+- Windows 的执行策略
 
-## 新 issue map
+### Phase 6: 评估后续 adapter / native integration
 
-下面这些 issue 表示新路线下的主工作流：
+目标：
+
+- 在 workspace contract 稳定后，再评估：
+  - FUSE advanced mode
+  - macOS File Provider
+  - Windows CFAPI
+  - SMB export
+
+产出：
+
+- secondary tracks，而不是主线前提
+
+## 建议 issue map
+
+下面这些是 pivot 后应该优先开的主 issue：
 
 | 阶段 | 主题 | GitHub issue |
 |------|------|--------------|
-| Phase 1 | 定义 `sectiond` 边界与 FS-first 协作契约 | `#13` |
-| Phase 2 | 把 routing / cache / refresh / permissions / health 沉到 `sectiond` | `#14` |
-| Phase 2 | 把 CLI 重构成 control-plane client | `#15` |
-| Phase 3 | 让 Linux mount adapter 通过 `sectiond` 提供正式 data plane | `#16` |
-| Phase 4 | 定义共享 mounted workspace 上的 execute / scripting 模式 | `#17` |
-| Phase 5 | macOS adapter 的 prerequisite / preflight / installer 策略 | `#18` |
-| Phase 5 | macOS mount adapter 的 shared-workspace 真验证 | `#11` |
+| Phase 1 | 定义 sync workspace product contract 与非目标 | `TBD` |
+| Phase 2 | 将 `sectiond` 重定义为 workspace sync core | `TBD` |
+| Phase 3 | 实现 local materialization / sync state / readiness model | `TBD` |
+| Phase 3 | 实现本地变更检测、远端变更收敛与 conflict surfacing | `TBD` |
+| Phase 4 | 将 CLI 重构为 workspace control plane | `TBD` |
+| Phase 5 | 定义 execution contract（runtime、materialize、Windows 边界） | `TBD` |
+| Phase 6 | 评估 future adapters：FUSE / File Provider / CFAPI / SMB | `TBD` |
 
 ## 建议执行顺序
 
-建议不要并行乱推，而是按下面顺序推进：
-
-1. `#13` 先把边界和契约定死
-2. `#14` 把共享语义沉到 `sectiond`
-3. `#15` 让 CLI 明确退到 control plane
-4. `#16` 让 Linux data plane 通过 `sectiond` 重新站稳
-5. `#17` 在 mounted workspace 上定义真正的脚本 / execute 模式
-6. `#18` 产品化 macOS prerequisite / preflight / installer 路径
-7. `#11` 在真实 macOS host 上完成 shared-workspace 验证
+1. 先定 `workspace contract`
+2. 再定 `sectiond sync core`
+3. 再做双向同步与冲突
+4. 再做 workspace-oriented CLI
+5. 再定 execution contract
+6. 最后才讨论 mount / native integration / SMB
 
 ## 当前 repo truth
 
 截至当前：
 
-- Linux 的真实挂载链路已经证明可行
-- macOS 的 non-FUSE 路径是 green 的
-- 但 repo 结构本身仍然是 pre-sectiond
-
-所以“下一步”不是继续补零散命令，而是完成一次**架构重心迁移**：
-
-- 从“CLI / FUSE 各自持有逻辑”
-- 到“sectiond 统一持有语义，CLI / adapter 只做接口层”
+- repo 已有不少可复用基础能力
+- 但 repo 的主叙事仍是 pre-pivot
+- 真正缺的是：把现有能力收拢成一个 `sync workspace` 产品，而不是继续在 mount 路线上打磨
 
 ## 不再建议的路线
 
-以下路线现在明确不推荐作为主线：
+下面这些不再建议作为主战场：
 
-1. 把 CLI/API-only 当成最终产品形态
-2. 在 macOS 还没统一协作心智前就宣称双平台等价
-3. 为了回避 macFUSE 安装摩擦，直接把文件系统协作目标降级成“只是多入口访问”
+1. 继续把 `FUSE` 当普通用户默认入口
+2. 继续把 macOS mount 验证当当前最重要 blocker
+3. 继续试图用一个文件系统方案直接统一跨平台执行语义
