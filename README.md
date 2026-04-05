@@ -58,6 +58,7 @@ Current repo truth:
 - cross-platform core/provider/control-plane support is real
 - Linux remains the current reference path for mounted-workspace behavior
 - macOS mount support is still an explicit adapter track, not a solved parity claim
+- macOS prerequisite/install/support details are documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md)
 
 ## Quick Start
 
@@ -67,6 +68,7 @@ cargo build --release
 
 # On macOS, install macFUSE before validating mount/unmount.
 # On Linux, install a FUSE runtime such as fuse3.
+# During development, make sure the built section-fuse binary is in PATH.
 
 # Interactive setup
 section init
@@ -106,6 +108,7 @@ section status
 ```
 
 Mounted-workspace execute/scripting semantics are documented in [docs/EXECUTION_MODEL.md](docs/EXECUTION_MODEL.md).
+macOS prerequisite / preflight / fallback policy is documented in [docs/MACOS_ADAPTER.md](docs/MACOS_ADAPTER.md).
 
 ## Architecture
 

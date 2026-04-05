@@ -1,7 +1,8 @@
 use anyhow::Result;
 use section_core::SectionConfig;
+use std::env;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -31,6 +32,7 @@ impl CommandSpec {
 
 pub fn mount(config: &SectionConfig, config_path: Option<&Path>, mount_point: &Path) -> Result<()> {
     std::fs::create_dir_all(mount_point)?;
+    run_mount_preflight(mount_point)?;
 
     let spec = mount_command(config_path, mount_point);
     let mut cmd = Command::new(spec.program);
@@ -88,7 +90,7 @@ fn mount_command(config_path: Option<&Path>, mount_point: &Path) -> CommandSpec 
 fn mount_hint() -> &'static str {
     #[cfg(target_os = "macos")]
     {
-        "Make sure section-fuse is installed and macFUSE is available on this machine."
+        "Make sure section-fuse is installed, macFUSE is installed, and read docs/MACOS_ADAPTER.md for the supported setup path."
     }
 
     #[cfg(target_os = "linux")]
@@ -100,6 +102,50 @@ fn mount_hint() -> &'static str {
     {
         "Make sure section-fuse is installed and the current platform has a supported FUSE runtime."
     }
+}
+
+fn run_mount_preflight(mount_point: &Path) -> Result<()> {
+    let mut issues = Vec::new();
+
+    if !mount_point.is_absolute() {
+        issues.push(format!("{} is not an absolute path", mount_point.display()));
+    }
+
+    if find_executable("section-fuse").is_none() {
+        issues.push(
+            "section-fuse is not available in PATH; install it (for example `cargo install --path crates/section-fuse`) or add the built binary directory to PATH"
+                .to_string(),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if !Path::new("/Library/Filesystems/macfuse.fs").exists() {
+            issues.push(
+                "macFUSE is not installed at /Library/Filesystems/macfuse.fs; install macFUSE, allow the system extension if prompted, and re-login/reboot before validating mount".to_string(),
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if !Path::new("/dev/fuse").exists() {
+            issues.push(
+                "/dev/fuse is missing; install/enable a FUSE runtime such as fuse3 before validating mount"
+                    .to_string(),
+            );
+        }
+    }
+
+    if issues.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Mount preflight failed for {}:\n- {}",
+        mount_point.display(),
+        issues.join("\n- ")
+    )
 }
 
 pub(crate) fn is_mount_active(mount_point: &Path) -> bool {
@@ -219,10 +265,32 @@ fn mount_output_contains_target(output: &str, mount_point: &Path) -> bool {
     })
 }
 
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    find_executable_in_paths(name, env::split_paths(&path))
+}
+
+fn find_executable_in_paths<I>(name: &str, paths: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    for dir in paths {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{mount_command, mount_output_contains_target, unmount_commands};
+    use super::{
+        find_executable_in_paths, mount_command, mount_output_contains_target, unmount_commands,
+    };
     use std::path::Path;
+    use tempfile::TempDir;
 
     #[test]
     fn mount_command_forwards_explicit_config_path() {
@@ -274,5 +342,21 @@ mod tests {
             output,
             Path::new("/Volumes/section")
         ));
+    }
+
+    #[test]
+    fn executable_lookup_finds_binary_in_paths() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let bin = temp_dir.path().join("section-fuse");
+        std::fs::write(&bin, "#!/bin/sh\n").expect("write file");
+
+        let found = find_executable_in_paths(
+            "section-fuse",
+            vec![
+                temp_dir.path().to_path_buf(),
+                Path::new("/nope").to_path_buf(),
+            ],
+        );
+        assert_eq!(found.as_deref(), Some(bin.as_path()));
     }
 }

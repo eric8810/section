@@ -26,6 +26,10 @@ pub fn run(store: &ProviderStore) -> Result<()> {
     store.add_source(&name, &source)?;
     println!("\nSource '{}' added (provider: {}).", name, provider);
     println!("Run 'section mount' to mount the filesystem.");
+    #[cfg(target_os = "macos")]
+    println!(
+        "On macOS, install macFUSE first and read docs/MACOS_ADAPTER.md before validating mount."
+    );
     Ok(())
 }
 
