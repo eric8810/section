@@ -2,7 +2,9 @@ use anyhow::Result;
 use section_core::SectionConfig;
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommandSpec {
@@ -34,16 +36,13 @@ pub fn mount(config: &SectionConfig, config_path: Option<&Path>, mount_point: &P
     let mut cmd = Command::new(spec.program);
     cmd.args(&spec.args);
 
-    let child = cmd.spawn();
-    match child {
-        Ok(_) => {
-            println!("Section filesystem mounted at {}", mount_point.display());
-            let _ = config;
-        }
-        Err(e) => {
-            anyhow::bail!("Failed to launch {}: {e}. {}", spec.display(), mount_hint(),);
-        }
-    }
+    let child = cmd.spawn().map_err(|e| {
+        anyhow::anyhow!("Failed to launch {}: {e}. {}", spec.display(), mount_hint(),)
+    })?;
+
+    wait_for_mount_ready(child, mount_point)?;
+    println!("Section filesystem mounted at {}", mount_point.display());
+    let _ = config;
 
     Ok(())
 }
@@ -103,6 +102,10 @@ fn mount_hint() -> &'static str {
     }
 }
 
+pub(crate) fn is_mount_active(mount_point: &Path) -> bool {
+    check_proc_mounts(mount_point) || check_mount_command(mount_point)
+}
+
 fn unmount_commands(mount_point: &Path) -> Vec<CommandSpec> {
     #[cfg(target_os = "linux")]
     {
@@ -143,9 +146,82 @@ fn unmount_commands(mount_point: &Path) -> Vec<CommandSpec> {
     }
 }
 
+fn wait_for_mount_ready(mut child: Child, mount_point: &Path) -> Result<()> {
+    const READY_TIMEOUT: Duration = Duration::from_secs(5);
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    let deadline = Instant::now() + READY_TIMEOUT;
+
+    loop {
+        if is_mount_active(mount_point) {
+            return Ok(());
+        }
+
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!(
+                "section-fuse exited before {} became an active mount (status: {}). {}",
+                mount_point.display(),
+                status,
+                mount_hint(),
+            );
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "Timed out waiting for {} to become an active mount. {}",
+                mount_point.display(),
+                mount_hint(),
+            );
+        }
+
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn check_proc_mounts(mount_point: &Path) -> bool {
+    let mount_str = mount_point.to_string_lossy();
+
+    if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+        for line in mounts.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts[1] == mount_str.as_ref() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn check_mount_command(mount_point: &Path) -> bool {
+    let output = match Command::new("mount").output() {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    mount_output_contains_target(&stdout, mount_point)
+}
+
+fn mount_output_contains_target(output: &str, mount_point: &Path) -> bool {
+    let mount_str = mount_point.to_string_lossy();
+
+    output.lines().any(|line| {
+        let Some((_, rest)) = line.split_once(" on ") else {
+            return false;
+        };
+
+        rest == mount_str.as_ref()
+            || rest.starts_with(&format!("{mount_str} "))
+            || rest.starts_with(&format!("{mount_str} ("))
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{mount_command, unmount_commands};
+    use super::{mount_command, mount_output_contains_target, unmount_commands};
     use std::path::Path;
 
     #[test]
@@ -180,5 +256,23 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         assert_eq!(specs[0].program, "umount");
+    }
+
+    #[test]
+    fn mount_output_parser_handles_linux_format() {
+        let output = "section on /mnt/section type fuse.section (rw,nosuid,nodev,relatime)";
+        assert!(mount_output_contains_target(
+            output,
+            Path::new("/mnt/section")
+        ));
+    }
+
+    #[test]
+    fn mount_output_parser_handles_macos_format() {
+        let output = "osxfuse@macfuse0 on /Volumes/section (osxfuse, nodev, nosuid, synchronous)";
+        assert!(mount_output_contains_target(
+            output,
+            Path::new("/Volumes/section")
+        ));
     }
 }

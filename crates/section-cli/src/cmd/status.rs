@@ -2,12 +2,13 @@ use anyhow::Result;
 use section_core::{Router, SectionConfig};
 use section_provider::ProviderStore;
 use serde_json::json;
-use std::path::Path;
+
+use super::mount::is_mount_active;
 
 pub fn run(config: &SectionConfig, store: &ProviderStore, json_mode: bool) -> Result<()> {
     // 1. Check mount status
     let mount_point = &config.mount_point;
-    let is_mounted = check_mounted(mount_point);
+    let is_mounted = is_mount_active(mount_point);
 
     // 2. Merge file-based and DB-based sources
     let mut full_config = config.clone();
@@ -81,17 +82,13 @@ pub fn run(config: &SectionConfig, store: &ProviderStore, json_mode: bool) -> Re
 
             let status = match &router {
                 Some(r) => match r.get_operator(name) {
-                    Ok(op) => {
-                        match rt.block_on(op.stat("/")) {
+                    Ok(op) => match rt.block_on(op.stat("/")) {
+                        Ok(_) => "\u{2713} connected".to_string(),
+                        Err(_) => match rt.block_on(op.list("/")) {
                             Ok(_) => "\u{2713} connected".to_string(),
-                            Err(_) => {
-                                match rt.block_on(op.list("/")) {
-                                    Ok(_) => "\u{2713} connected".to_string(),
-                                    Err(_) => "\u{2717} unreachable".to_string(),
-                                }
-                            }
-                        }
-                    }
+                            Err(_) => "\u{2717} unreachable".to_string(),
+                        },
+                    },
                     Err(_) => "\u{2717} unreachable".to_string(),
                 },
                 None => "\u{2717} unreachable".to_string(),
@@ -102,17 +99,4 @@ pub fn run(config: &SectionConfig, store: &ProviderStore, json_mode: bool) -> Re
     }
 
     Ok(())
-}
-
-fn check_mounted(mount_point: &Path) -> bool {
-    if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
-        let mount_str = mount_point.to_string_lossy();
-        for line in mounts.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 && parts[1] == mount_str.as_ref() {
-                return true;
-            }
-        }
-    }
-    false
 }

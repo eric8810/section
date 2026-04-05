@@ -135,8 +135,8 @@ Agent 进程以某个系统用户身份运行，自然继承该用户的文件�
 
 | 平台 | 权限实现 | 优先级 |
 |------|---------|--------|
-| Linux | 原生 FUSE + POSIX 权限 | Phase 1 (MVP) |
-| macOS | macFUSE + POSIX 风格权限语义 | Phase 1 (MVP) |
+| Linux | 原生 FUSE + POSIX 权限 | Phase 1 (validated first) |
+| macOS | macFUSE + POSIX 风格权限语义 | Phase 1 target (mount validation ongoing) |
 | Windows | WinFSP + ACL 映射 | Phase 3 |
 
 ## 缓存与一致性策略
@@ -203,7 +203,7 @@ Apache License 2.0 — 商业友好，与 OpenDAL 一致。
 
 ## MVP 范围 (Phase 1)
 
-目标: 单机可用的 Agent 数据层 (macOS + Linux)。
+目标: 单机可用的 Agent 数据层。Phase 1 先把 macOS + Linux 的 non-FUSE 路径一起做实，再分别验证挂载路径。
 
 包含:
 - [ ] section-core: OpenDAL 多后端管理 + 路径路由
@@ -212,7 +212,7 @@ Apache License 2.0 — 商业友好，与 OpenDAL 一致。
 - [ ] section-provider: 本地 SQLite 存储, 手动凭证配置
 - [ ] 权限: 基础 POSIX mode 执行
 - [ ] Provider 支持: fs, s3, webdav
-- [ ] 双平台支持: macOS + Linux 的非挂载路径保持可用，挂载路径分别验证
+- [ ] 双平台支持: macOS + Linux 的 non-FUSE 路径保持可用，挂载路径分别验证并逐步收敛
 
 不包含:
 - GUI
