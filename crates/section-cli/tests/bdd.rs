@@ -16,7 +16,10 @@ pub struct SectionWorld {
 
 impl SectionWorld {
     fn data_dir_path(&self) -> &std::path::Path {
-        self.data_dir.as_ref().expect("data_dir not initialized").path()
+        self.data_dir
+            .as_ref()
+            .expect("data_dir not initialized")
+            .path()
     }
 
     /// Build a `section` CLI command with the correct config pointing to our temp data dir.

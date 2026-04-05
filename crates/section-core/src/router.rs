@@ -1,8 +1,8 @@
+use crate::config::SourceConfig;
+use crate::{Result, SectionConfig, SectionError};
 use opendal::Operator;
 use std::collections::HashMap;
 use std::str::FromStr;
-use crate::{SectionConfig, SectionError, Result};
-use crate::config::SourceConfig;
 
 /// Routes paths like "{source}/{sub_path}" to the correct OpenDAL Operator.
 pub struct Router {
@@ -59,8 +59,8 @@ impl Router {
 
     /// Resolve a full path to (Operator, sub_path).
     pub fn resolve(&self, path: &str) -> Result<(&Operator, String)> {
-        let parsed = Self::parse_path(path)
-            .ok_or_else(|| SectionError::InvalidPath(path.to_string()))?;
+        let parsed =
+            Self::parse_path(path).ok_or_else(|| SectionError::InvalidPath(path.to_string()))?;
 
         let op = self.get_operator(&parsed.source)?;
         Ok((op, parsed.sub_path))
@@ -82,10 +82,97 @@ impl Router {
         let op = Operator::via_iter(
             opendal::Scheme::from_str(&source_cfg.provider)
                 .map_err(|e| anyhow::anyhow!("unknown provider '{}': {e}", source_cfg.provider))?,
-            source_cfg.options.iter().map(|(k, v)| (k.clone(), v.clone())),
+            source_cfg
+                .options
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
         )
-        .map_err(|e| anyhow::anyhow!("failed to build operator for '{}': {e}", source_cfg.provider))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to build operator for '{}': {e}",
+                source_cfg.provider
+            )
+        })?;
 
         Ok(op)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CacheConfig;
+    use std::path::PathBuf;
+
+    fn fs_source(root: &str) -> SourceConfig {
+        let mut options = HashMap::new();
+        options.insert("root".to_string(), root.to_string());
+        SourceConfig {
+            provider: "fs".to_string(),
+            options,
+            cache: CacheConfig::default(),
+        }
+    }
+
+    fn config_with_sources() -> SectionConfig {
+        let mut sources = HashMap::new();
+        sources.insert("b-src".to_string(), fs_source("/tmp/b"));
+        sources.insert("a-src".to_string(), fs_source("/tmp/a"));
+
+        SectionConfig {
+            mount_point: PathBuf::from("/mnt/section"),
+            data_dir: PathBuf::from("/tmp/section-data"),
+            sources,
+        }
+    }
+
+    #[test]
+    fn parse_path_handles_root_source_and_nested_paths() {
+        assert!(Router::parse_path("").is_none());
+        assert_eq!(
+            Router::parse_path("a-src").map(|path| (path.source, path.sub_path)),
+            Some(("a-src".to_string(), "".to_string()))
+        );
+        assert_eq!(
+            Router::parse_path("/a-src/docs/readme.md/").map(|path| (path.source, path.sub_path)),
+            Some(("a-src".to_string(), "docs/readme.md".to_string()))
+        );
+    }
+
+    #[test]
+    fn sources_are_sorted() {
+        let router = Router::from_config(&config_with_sources()).expect("router");
+        assert_eq!(
+            router.sources(),
+            vec!["a-src".to_string(), "b-src".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_or_empty_paths() {
+        let router = Router::from_config(&config_with_sources()).expect("router");
+
+        assert!(matches!(
+            router.resolve(""),
+            Err(SectionError::InvalidPath(path)) if path.is_empty()
+        ));
+        assert!(matches!(
+            router.resolve("missing/file.txt"),
+            Err(SectionError::SourceNotFound(source)) if source == "missing"
+        ));
+    }
+
+    #[test]
+    fn add_operator_replaces_existing_source() {
+        let mut router = Router::from_config(&config_with_sources()).expect("router");
+        let replacement = Operator::via_iter(
+            opendal::Scheme::Fs,
+            [("root".to_string(), "/tmp/replaced".to_string())],
+        )
+        .expect("replacement operator");
+
+        router.add_operator("a-src", replacement);
+
+        assert!(router.get_operator("a-src").is_ok());
     }
 }

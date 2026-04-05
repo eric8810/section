@@ -4,9 +4,7 @@ use cucumber::when;
 /// 当 我执行管道 "{input}" 到 "{command}"
 #[when(expr = "我执行管道 {string} 到 {string}")]
 fn execute_pipe_command(world: &mut SectionWorld, input_cmd: String, section_cmd: String) {
-    let section_cmd = section_cmd
-        .strip_prefix("section ")
-        .unwrap_or(&section_cmd);
+    let section_cmd = section_cmd.strip_prefix("section ").unwrap_or(&section_cmd);
     let args = crate::shell_words(section_cmd);
 
     let bin = env!("CARGO_BIN_EXE_section");

@@ -37,7 +37,9 @@ impl SectionError {
     pub fn from_opendal(err: opendal::Error, path: &str) -> Self {
         match err.kind() {
             opendal::ErrorKind::NotFound => SectionError::FileNotFound(path.to_string()),
-            opendal::ErrorKind::PermissionDenied => SectionError::PermissionDenied(path.to_string()),
+            opendal::ErrorKind::PermissionDenied => {
+                SectionError::PermissionDenied(path.to_string())
+            }
             _ => SectionError::OpenDal(err),
         }
     }

@@ -59,10 +59,7 @@ fn create_copy_src_dir(world: &mut SectionWorld, path: String) {
     let base = Path::new(&path);
     setup_test_dir(
         base,
-        &[
-            ("report.pdf", "PDF_CONTENT"),
-            ("data/a.csv", "col1,col2"),
-        ],
+        &[("report.pdf", "PDF_CONTENT"), ("data/a.csv", "col1,col2")],
     );
 }
 

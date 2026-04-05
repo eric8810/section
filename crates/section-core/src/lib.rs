@@ -7,5 +7,5 @@ pub mod router;
 pub use cache::ContentCache;
 pub use cache::MetadataCache;
 pub use config::SectionConfig;
-pub use error::{SectionError, Result};
+pub use error::{Result, SectionError};
 pub use router::Router;

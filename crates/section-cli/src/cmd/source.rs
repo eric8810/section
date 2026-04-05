@@ -15,7 +15,11 @@ use std::collections::HashMap;
 /// - All other keys are shown in plain text.
 fn mask_value(key: &str, value: &str) -> String {
     let lower = key.to_lowercase();
-    if lower.contains("secret") || lower.contains("password") || lower.contains("token") || lower == "private_key" {
+    if lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("token")
+        || lower == "private_key"
+    {
         return "***".to_string();
     }
     if lower.contains("key_id") || lower.contains("access_key") {
@@ -42,7 +46,10 @@ pub fn run(action: SourceAction, store: &ProviderStore, json_mode: bool) -> Resu
             };
             store.add_source(&name, &source)?;
             if json_mode {
-                println!("{}", json!({"ok": true, "message": format!("Source '{name}' added (provider: {provider}).")}));
+                println!(
+                    "{}",
+                    json!({"ok": true, "message": format!("Source '{name}' added (provider: {provider}).")})
+                );
             } else {
                 println!("Source '{name}' added (provider: {provider}).");
             }
@@ -50,7 +57,10 @@ pub fn run(action: SourceAction, store: &ProviderStore, json_mode: bool) -> Resu
         SourceAction::Remove { name } => {
             store.remove_source(&name)?;
             if json_mode {
-                println!("{}", json!({"ok": true, "message": format!("Source '{name}' removed.")}));
+                println!(
+                    "{}",
+                    json!({"ok": true, "message": format!("Source '{name}' removed.")})
+                );
             } else {
                 println!("Source '{name}' removed.");
             }

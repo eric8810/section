@@ -17,14 +17,18 @@ impl ProviderStore {
         std::fs::create_dir_all(data_dir)?;
 
         let key_path = data_dir.join("section.key");
-        let encryption_key = crypto::load_or_generate_key(&key_path)
-            .with_context(|| format!("failed to load encryption key from {}", key_path.display()))?;
+        let encryption_key = crypto::load_or_generate_key(&key_path).with_context(|| {
+            format!("failed to load encryption key from {}", key_path.display())
+        })?;
 
         let db_path = data_dir.join("section.db");
         let conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open database at {}", db_path.display()))?;
 
-        let store = Self { conn, encryption_key };
+        let store = Self {
+            conn,
+            encryption_key,
+        };
         store.init_tables()?;
         store.migrate_encrypt_existing()?;
         Ok(store)
@@ -55,7 +59,9 @@ impl ProviderStore {
         column: &str,
         column_def: &str,
     ) -> anyhow::Result<()> {
-        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({})", table))?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({})", table))?;
         let has_column = stmt
             .query_map([], |row| row.get::<_, String>(1))?
             .filter_map(|r| r.ok())
@@ -113,14 +119,15 @@ impl ProviderStore {
     }
 
     pub fn remove_source(&self, name: &str) -> anyhow::Result<()> {
-        self.conn.execute("DELETE FROM sources WHERE name = ?1", [name])?;
+        self.conn
+            .execute("DELETE FROM sources WHERE name = ?1", [name])?;
         Ok(())
     }
 
     pub fn list_sources(&self) -> anyhow::Result<Vec<(String, String, HashMap<String, String>)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, provider, options_json, encrypted FROM sources ORDER BY name",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, provider, options_json, encrypted FROM sources ORDER BY name")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -161,14 +168,17 @@ impl ProviderStore {
             let (name, provider, raw_options, metadata_ttl, content_ttl, encrypted) = row?;
             let options_json = self.decrypt_options(&raw_options, encrypted)?;
             let options: HashMap<String, String> = serde_json::from_str(&options_json)?;
-            result.insert(name, SourceConfig {
-                provider,
-                options,
-                cache: CacheConfig {
-                    metadata_ttl_secs: metadata_ttl,
-                    content_ttl_secs: content_ttl,
+            result.insert(
+                name,
+                SourceConfig {
+                    provider,
+                    options,
+                    cache: CacheConfig {
+                        metadata_ttl_secs: metadata_ttl,
+                        content_ttl_secs: content_ttl,
+                    },
                 },
-            });
+            );
         }
 
         Ok(result)
@@ -183,5 +193,107 @@ impl ProviderStore {
         } else {
             Ok(raw.to_owned())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn sample_source(root: &str) -> SourceConfig {
+        let mut options = HashMap::new();
+        options.insert("root".to_string(), root.to_string());
+
+        SourceConfig {
+            provider: "fs".to_string(),
+            options,
+            cache: CacheConfig {
+                metadata_ttl_secs: 12,
+                content_ttl_secs: 34,
+            },
+        }
+    }
+
+    #[test]
+    fn source_crud_round_trips_through_encrypted_store() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+
+        store
+            .add_source("local", &sample_source("/tmp/local"))
+            .expect("add source");
+
+        let listed = store.list_sources().expect("list sources");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0, "local");
+        assert_eq!(listed[0].1, "fs");
+        assert_eq!(
+            listed[0].2.get("root").map(String::as_str),
+            Some("/tmp/local")
+        );
+
+        let loaded = store.load_all().expect("load all");
+        let loaded_source = loaded.get("local").expect("loaded source");
+        assert_eq!(loaded_source.cache.metadata_ttl_secs, 12);
+        assert_eq!(loaded_source.cache.content_ttl_secs, 34);
+
+        store.remove_source("local").expect("remove source");
+        assert!(store.list_sources().expect("list after remove").is_empty());
+    }
+
+    #[test]
+    fn open_migrates_plaintext_rows_to_encrypted_rows() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let key_path = temp_dir.path().join("section.key");
+        let _ = crypto::load_or_generate_key(&key_path).expect("key");
+
+        let db_path = temp_dir.path().join("section.db");
+        let conn = Connection::open(&db_path).expect("db");
+        conn.execute_batch(
+            "CREATE TABLE sources (
+                name TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                options_json TEXT NOT NULL DEFAULT '{}',
+                metadata_ttl_secs INTEGER NOT NULL DEFAULT 60,
+                content_ttl_secs INTEGER NOT NULL DEFAULT 300,
+                encrypted INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .expect("create legacy table");
+        conn.execute(
+            "INSERT INTO sources (name, provider, options_json, metadata_ttl_secs, content_ttl_secs, encrypted)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            rusqlite::params![
+                "legacy",
+                "fs",
+                r#"{"root":"/tmp/legacy"}"#,
+                7_u64,
+                8_u64,
+            ],
+        )
+        .expect("insert legacy row");
+        drop(conn);
+
+        let store = ProviderStore::open(temp_dir.path()).expect("store with migration");
+        let loaded = store.load_all().expect("load migrated row");
+        let migrated = loaded.get("legacy").expect("legacy source");
+        assert_eq!(
+            migrated.options.get("root").map(String::as_str),
+            Some("/tmp/legacy")
+        );
+        assert_eq!(migrated.cache.metadata_ttl_secs, 7);
+        assert_eq!(migrated.cache.content_ttl_secs, 8);
+
+        let conn = Connection::open(&db_path).expect("db reopen");
+        let (raw_options, encrypted): (String, i64) = conn
+            .query_row(
+                "SELECT options_json, encrypted FROM sources WHERE name = ?1",
+                ["legacy"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("migrated row");
+        assert_eq!(encrypted, 1);
+        assert_ne!(raw_options, r#"{"root":"/tmp/legacy"}"#);
     }
 }
