@@ -1,187 +1,172 @@
-# Section MVP 落地计划
+# Section Route Map
 
-## 当前状态
+## 方向结论
 
-当前仓库更接近“跨平台目标下的工程原型”，还不是已经做实的双平台 MVP。
-已验证的事实：
-- `section-cli` BDD 测试 32/32 场景通过
-- `section-core` / `section-provider` 当前单元测试共 36/36 通过
-- `docs/BACKEND_VALIDATION.md` 已记录 S3 与 WebDAV 的可重复本地验证流程
-- 当前 macOS 环境下，整仓 FUSE 路径还不能被视为已验证完成
+Section 现在不再按“多后端 CLI + FUSE 功能集合”来规划，而是按下面这个目标统一：
 
-### 各模块完成度
+> agent 和人类应该在同一个 FS 介质上协作，路径语义一致，shell / editor / script 的心理模型一致。
 
-| 模块 | 状态 | 说明 |
-|------|------|------|
-| **section-core/config** | 90% | 配置加载/序列化可用，缺少配置校验 |
-| **section-core/router** | 100% | 路径解析、Operator 构建、排序与错误路径单元测试已补齐 |
-| **section-core/permission** | 85% | 数据结构和检查逻辑完整，已接入 FUSE，未持久化到 SQLite，关键权限单元测试已补齐 |
-| **section-core/cache** | 90% | MetadataCache + ContentCache 已接入 FUSE，并支持 refresh/xattr 失效 |
-| **section-provider/store** | 95% | SQLite CRUD、AES-256-GCM 加密存储、脱敏显示、明文迁移测试已就位 |
-| **section-provider/crypto** | 100% | AES-256-GCM 加解密，密钥自动生成/加载，3 个单元测试 |
-| **section-provider/oauth** | 0% | 未实现（Phase 2） |
-| **section-fuse/fs** | 90% | 完整 FUSE 实现（读写删改名权限），metadata/content cache 与 refresh 已接入，缺真实挂载验证 |
-| **section-fuse/inode** | 100% | 动态 inode 分配、lookup 缓存、父子关系追踪 |
-| **section-cli/source** | 100% | add/remove/list + 脱敏 + JSON |
-| **section-cli/file** | 95% | ls/cp/cat/rm/write/exec 可用，已补齐 `ls -l`、本地/remote copy、递归 copy、cat 流式输出 |
-| **section-cli/mount** | 35% | 调用 section-fuse 子进程，已开始补平台差异处理，但双平台挂载尚未验证 |
-| **section-cli/init** | 100% | 交互式引导创建 source |
-| **section-cli/status** | 100% | 挂载状态 + 连通性探测 + JSON |
-| **测试** | 85% | BDD 32 场景 + 40 单元测试，仍缺真实后端与真实挂载路径验证 |
-| **文档** | 80% | PRODUCT.md + README.md 完成，缺 config.example.toml |
+这意味着：
 
----
+- **FS 是主交互面**
+- **CLI / API 是 control plane**
+- **本地长期驻留核心 (`sectiond`) 是下一阶段的真正中心**
 
-## 落地计划
+详细设计见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
-### Phase 1A: 核心链路打通（CLI 可用）
+## 当前已完成的基础工作
 
-目标：`section source add` + `section ls/cp/cat` 能跑通真实存储。
+这些工作不废，属于新路线的 groundwork：
 
-#### 1. 验证 OpenDAL 对接 [P0]
-- [x] 用本地文件系统 (provider: fs) 跑通完整 CRUD
-- [x] 用 S3 兼容存储 (Moto 本地端点) 跑通完整 CRUD
-- [x] 用 WebDAV (WsgiDAV + Cheroot) 跑通完整 CRUD
-- [x] 确认 OpenDAL API 在实际使用中的坑（via_iter 类型、write 空 Vec 歧义等）
+- 多 backend 接入：
+  - fs
+  - S3
+  - WebDAV
+- provider store / 凭证加密
+- 基础 CLI：
+  - source add/remove/list
+  - ls/cp/cat/rm/write/exec
+  - status / refresh
+- 双平台 non-FUSE CI
+- Linux FUSE happy path 已验证并文档化
 
-#### 2. CLI 文件操作补全 [P0]
-- [x] `section ls` 输出优化（大小、时间、权限的格式化显示）— 已支持 `ls -l`
-- [x] `section cp` 支持递归复制目录
-- [x] `section cp` 支持本地路径 ↔ source 路径互拷
-- [x] `section cat` 支持大文件流式输出
-- [x] `section exec` 实现（下载到临时文件 → chmod +x → 执行 → 清理）
-- [x] `section write` 或管道写入支持（`echo "data" | section write work-s3/file.txt`）
+对应的已关闭 issues：
 
-#### 3. 凭证安全 [P1]
-- [x] 凭证加密存储（ring AES-256-GCM 加密后写入 SQLite）
-- [x] 敏感字段在 `section source list` 中脱敏显示
+- `#1` repo / docs / support matrix truth alignment
+- `#2` cache TTL 语义
+- `#3` metadata/content cache 接入 section-fuse
+- `#4` refresh / invalidation 路径
+- `#5` Linux FUSE mount happy path
+- `#6` S3 real backend validation
+- `#7` WebDAV real backend validation
+- `#8` CLI usability gap
+- `#9` router / permission / provider-store coverage
+- `#10` platform-aware mount/unmount behavior
+- `#12` dual-platform non-FUSE CI
 
-#### 4. 基础测试 [P1]
-- [x] section-core: Router 路径解析单元测试
-- [x] section-core: Permission 权限检查单元测试
-- [x] section-provider: ProviderStore CRUD / 迁移 单元测试
-- [x] section-cli: 集成测试（用 fs provider 做端到端，32 个 BDD 场景）
+当前唯一延续到新路线中的旧编号 issue：
 
-**交付物：一个可用的 CLI 工具，能管理多 source 并执行文件操作。** ✅ 基本达成
+- `#11` macOS mount adapter shared-workspace validation（当前仍受 macFUSE 依赖阻塞）
 
----
+## 新路线图
 
-### Phase 1B: FUSE 挂载可用（Linux + macOS 分别验证）
+### Phase 1: 明确 sectiond 边界
 
-目标：`section mount` 后，agent 和人类能通过文件系统路径直接访问。
+目标：
 
-#### 5. FUSE 完整实现 [P0]
-- [x] inode 管理系统（InodeTable 动态分配）
-- [x] 递归目录浏览（root → source → 子目录 → 文件，逐层代理到 OpenDAL）
-- [x] 文件读取 (open → 全量读入缓冲 → offset/size 服务 read)
-- [x] 文件写入 (write → 缓冲 → flush/release 时写回 OpenDAL)
-- [x] 创建文件/目录 (create/mkdir → OpenDAL write/create_dir)
-- [x] 删除文件/目录 (unlink/rmdir → OpenDAL delete)
-- [x] 文件属性 (getattr → inode 缓存，setattr 支持 size/mode/uid/gid)
-- [x] 重命名 (rename → OpenDAL copy + delete，跨 source 返回 EXDEV)
+- 定义 `sectiond` 与 mount adapter / CLI client 的清晰边界
+- 把“共享协作语义”从当前散落的实现中抽出来
 
-#### 6. 缓存层 [P0]
-- [x] 元数据缓存（MetadataCache：stat + listing 结果，TTL 过期，11 个单元测试）
-- [x] 内容缓存（ContentCache：LRU 淘汰，12 个单元测试）
-- [x] **缓存接入 FUSE**：`lookup` / `readdir` / `open` 已接入 metadata/content cache
-- [x] write-through：Section 写入回刷后同步更新内容缓存并失效元数据缓存
-- [x] `section refresh` 接入缓存失效：挂载路径通过 xattr 触发 FUSE 侧缓存清理，CLI 未挂载时返回明确 no-op 提示
+产出：
 
-#### 7. 权限接入 FUSE [P1]
-- [ ] 权限元数据持久化到 SQLite — 当前仅内存中
-- [x] FUSE getattr 返回正确的 uid/gid/mode
-- [x] FUSE 操作前检查请求者的 uid/gid 权限（open/create/mkdir/unlink/rmdir/rename）
-- [x] 默认权限策略（dirs: 0o755, files: 0o644, owner: 进程 uid/gid）
+- `sectiond` 职责边界
+- control plane / data plane 接口契约
+- 状态与缓存归属关系
+- 生命周期与健康模型
 
-#### 8. 错误处理 [P1]
-- [x] FUSE 操作的错误码映射（opendal_to_errno: NotFound→ENOENT 等）
-- [ ] 后端不可达时的优雅降级（缓存可用则返回缓存）— 缓存未接入
-- [x] 日志框架（tracing + EnvFilter，RUST_LOG 控制）
+### Phase 2: 把共享语义真正沉到 sectiond
 
-**交付物：一个可挂载的文件系统，agent 可通过标准文件操作访问所有 source。** ⚠️ 基本达成，缓存未接入是主要缺口
+目标：
 
----
+- source registry
+- routing
+- cache
+- refresh
+- permissions
+- diagnostics
 
-### Phase 1C: 打磨发布
+都由 `sectiond` 持有，而不是让 CLI / FUSE 各自拥有一套
 
-目标：可以给别人用。
+产出：
 
-#### 9. 配置与用户体验 [P1]
-- [ ] 示例配置文件（config.example.toml）
-- [x] `section init` 命令（交互式引导创建首个 source，支持 fs/s3/webdav）
-- [x] `section status` 命令（挂载状态 + source 连通性探测）
-- [x] 友好的错误提示（from_opendal 包装，不暴露堆栈）
-- [x] `--json` 输出模式（全命令覆盖，方便 agent 解析）
+- `sectiond` 成为唯一真实本地状态机
+- CLI 与 mount adapter 都改为消费它
 
-#### 10. 文档 [P1]
-- [x] README.md（项目介绍、快速开始、架构图）
-- [x] 支持的 Provider 列表及配置示例（在 README 中）
-- [x] 安装说明（cargo build，基础可用）
+### Phase 3: Linux 作为正式 data-plane 参考实现
 
-#### 11. 打包 [P2]
-- [ ] cargo install 支持
-- [ ] GitHub Release 二进制
-- [ ] AUR / Homebrew / Nix 包（按需）
-- [ ] systemd service 文件（section-fuse 开机自启）
+目标：
 
-**交付物：可安装、有文档、别人能用的 0.1.0 版本。** ⚠️ 功能基本齐全，打包未做
+- Linux FUSE adapter 全量走 `sectiond`
+- 保住当前已经验证过的 shell / mount / refresh / write-through 语义
 
----
+产出：
 
-### Phase 2: 扩展（MVP 之后）
+- Linux 成为“共享 FS 协作模式”的正式参考平台
 
-| 功能 | 说明 |
-|------|------|
-| OAuth 自动流程 | Google/Microsoft/Dropbox 一键授权 |
-| MCP Server | Agent 通过 MCP 协议访问（不依赖 FUSE） |
-| macOS 支持 | macFUSE 路径验证与命令差异收敛 |
-| 同步引擎 | 本地 ↔ 远端双向同步 |
-| GUI 后端 | REST API 供桌面/Web 客户端调用 |
-| 更多 Provider | FTP, OneDrive, 阿里云 OSS, 百度网盘... |
-| 插件系统 | 可扩展的 Provider 插件 |
+### Phase 4: 明确执行 / 脚本工作流
 
----
+目标：
 
-## 未完成事项清单
+- 让 bash / python / node / editor / agent 都面向同一棵挂载树工作
+- 明确 `section exec` 的定位只是辅助，不再当成主路径
 
-以下是 MVP 阶段尚未完成的工作，按优先级排列：
+产出：
 
-### 高优先 — 影响核心功能
-1. **缓存接入 FUSE**：MetadataCache/ContentCache 类已就绪，需在 SectionFs 的 lookup/readdir/open 中实际使用
-2. **refresh 命令接入**：调用 MetadataCache::invalidate() 使缓存失效
-3. **S3 实际验证**：用 MinIO 或 AWS S3 端到端测试
-4. **WebDAV 实际验证**：用 WebDAV 服务端到端测试
+- 统一的执行与 scripting 语义
+- 对 mounted workspace 的正式支持边界
 
-### 中优先 — 改善体验
-5. **cp 递归复制**：遍历目录 + 逐文件拷贝
-6. **cp 本地路径支持**：检测非 source 路径时直接读写本地文件
-7. **cat 流式输出**：使用 OpenDAL reader + 分块写入 stdout
-8. **ls 输出增强**：显示 mtime、mode 列
-9. **config.example.toml**：带注释的示例配置
+### Phase 5: macOS mount adapter
 
-### 低优先 — 补充测试
-10. **Router 单元测试**：parse_path、resolve 等
-11. **Permission 单元测试**：can_read/can_write/can_execute 各场景
-12. **ProviderStore 单元测试**：add/remove/list/load_all
-13. **权限持久化**：权限元数据写入 SQLite 在重启后保留
+目标：
 
-### Phase 2 范围
-14. 打包分发（cargo install、GitHub Release、systemd service）
-15. 后端不可达时的缓存降级
-16. OAuth 自动授权流程
-17. MCP Server
+- 在不改变上层协作模型的前提下，让 macOS 也能进入同一类 FS 心智模型
 
----
+短期：
 
-## 提交历史
+- macFUSE adapter
 
-```
-4e35ade Add README with quick start, architecture, and usage docs
-ccc9422 Add content cache, section init, and --json output mode
-fa0b514 Add metadata cache, FUSE permissions, and section status command
-dd965e4 Implement full FUSE filesystem with dynamic inodes
-5372b66 Add credential masking and AES-256-GCM encrypted storage
-e196f83 Add .gitignore, remove target/ from tracking
-795671a Phase 1A: exec, write, error handling - 27/27 BDD green
-8501c2e Initial project skeleton
-```
+长期：
+
+- 如果 macFUSE 的安装摩擦不可接受，再评估 native adapter
+
+产出：
+
+- macOS 上的真实 mount 验证
+- 清晰的 installer / support matrix / fallback 策略
+
+## 新 issue map
+
+下面这些 issue 表示新路线下的主工作流：
+
+| 阶段 | 主题 | GitHub issue |
+|------|------|--------------|
+| Phase 1 | 定义 `sectiond` 边界与 FS-first 协作契约 | `#13` |
+| Phase 2 | 把 routing / cache / refresh / permissions / health 沉到 `sectiond` | `#14` |
+| Phase 2 | 把 CLI 重构成 control-plane client | `#15` |
+| Phase 3 | 让 Linux mount adapter 通过 `sectiond` 提供正式 data plane | `#16` |
+| Phase 4 | 定义共享 mounted workspace 上的 execute / scripting 模式 | `#17` |
+| Phase 5 | macOS adapter 的 prerequisite / preflight / installer 策略 | `#18` |
+| Phase 5 | macOS mount adapter 的 shared-workspace 真验证 | `#11` |
+
+## 建议执行顺序
+
+建议不要并行乱推，而是按下面顺序推进：
+
+1. `#13` 先把边界和契约定死
+2. `#14` 把共享语义沉到 `sectiond`
+3. `#15` 让 CLI 明确退到 control plane
+4. `#16` 让 Linux data plane 通过 `sectiond` 重新站稳
+5. `#17` 在 mounted workspace 上定义真正的脚本 / execute 模式
+6. `#18` 产品化 macOS prerequisite / preflight / installer 路径
+7. `#11` 在真实 macOS host 上完成 shared-workspace 验证
+
+## 当前 repo truth
+
+截至当前：
+
+- Linux 的真实挂载链路已经证明可行
+- macOS 的 non-FUSE 路径是 green 的
+- 但 repo 结构本身仍然是 pre-sectiond
+
+所以“下一步”不是继续补零散命令，而是完成一次**架构重心迁移**：
+
+- 从“CLI / FUSE 各自持有逻辑”
+- 到“sectiond 统一持有语义，CLI / adapter 只做接口层”
+
+## 不再建议的路线
+
+以下路线现在明确不推荐作为主线：
+
+1. 把 CLI/API-only 当成最终产品形态
+2. 在 macOS 还没统一协作心智前就宣称双平台等价
+3. 为了回避 macFUSE 安装摩擦，直接把文件系统协作目标降级成“只是多入口访问”

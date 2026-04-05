@@ -1,225 +1,145 @@
-# Section - Agent-First Unified Data Layer
+# Section Product Model
 
 ## 一句话定义
 
-Section 是一个面向 AI Agent 优先的统一数据访问层，将多个存储源以标准文件系统的形式暴露给本地环境，目标同时支持 macOS 和 Linux，并通过 CLI 和 GUI 后端供人类管理。
+Section 是一个**共享文件系统协作层**：让 agent、人类和普通 shell / editor / script 在同一棵挂载命名空间上协作，而不是分别走不同的访问模型。
 
-## 核心理念
+## 产品承诺
 
-Agent 和人类通过同一套文件系统语义访问任意数据源，无需关心底层存储是 S3、Google Drive、NAS 还是本地磁盘。
+Section 最终想提供的不是“很多访问方式”，而是**同一种工作方式**：
 
-## 数据模型
+- 人类看到的是文件和目录
+- Agent 看到的也是文件和目录
+- bash / python / node / editor 插件操作的仍然是同一棵树
+- 底层可以是 S3 / WebDAV / 本地磁盘 / 其他 OpenDAL backend
 
-```
-Provider (类型定义)                      Source (实例)
-  ├── aws-s3                            ├── work-s3         (provider: aws-s3)
-  │     认证: access_key + secret_key   │     bucket=work-files, region=us-east-1
-  ├── google-drive                      ├── my-gdrive       (provider: google-drive)
-  │     认证: OAuth token               │     OAuth token bound
-  ├── webdav                            ├── office-nas      (provider: webdav)
-  │     认证: url + username + password  │     url=https://nas.local/dav
-  └── local-fs                          └── local-workspace (provider: fs)
-        认证: root path                       root=/home/user/workspace
-```
+### 这意味着什么
 
-Provider 定义平台类型和认证方式。Source 是 Provider 的实例，绑定了用户提供的具体凭证。
-Source 的权限由凭证本身决定——凭证能做什么，Source 就能做什么。Section 只透传。
+1. `FS` 是主交互面
+2. `CLI / API` 是控制面
+3. 平台差异只能存在于挂载 adapter，而不能改变上层协作心智
 
-### 挂载结构
+## 用户与交互面
 
-```
-/mnt/section/                           ← 统一挂载点
-├── work-s3/                            ← source: work-s3 (provider: aws-s3)
-│   ├── projects/
-│   └── backups/
-├── my-gdrive/                          ← source: my-gdrive (provider: google-drive)
-│   └── documents/
-├── office-nas/                         ← source: office-nas (provider: webdav)
-│   └── shared/
-└── local-workspace/                    ← source: local-workspace (provider: fs)
-    └── code/
-```
+| 用户 / 进程 | 主访问方式 | 说明 |
+|-------------|------------|------|
+| AI Agent | 挂载路径 | 与人类共用同一棵 namespace |
+| 人类开发者 / 运维 | Finder / shell / editor / 挂载路径 | 主心智模型是普通文件系统 |
+| bash / python / node / 普通程序 | 挂载路径 | `execute / scripting` 应主要发生在共享工作树上 |
+| CLI / GUI / API | 控制面 | 管理 source、查看状态、诊断、refresh |
 
-## 目标用户
+## 交互面分层
 
-| 优先级 | 用户 | 访问方式 |
-|--------|------|---------|
-| P0 | AI Agent | 直接读写挂载路径 (`open("/mnt/section/work-s3/data.csv")`) |
-| P1 | 开发者/运维 | CLI (`section ls work-s3/projects/`) |
-| P2 | 普通用户 | GUI (桌面/Web，通过后端 API) |
+### Data Plane
 
-## 核心模块
+这是产品真正的工作面：
 
-### 1. section-fuse (挂载守护进程)
+- mount path
+- 普通文件系统语义
+- 读 / 写 / 列目录 / rename / delete / exec
+- shell / script / editor / agent 全部在这一层工作
 
-将多数据源聚合为一个 FUSE 文件系统。
+### Control Plane
 
-职责：
-- 挂载统一命名空间到 `/mnt/section/`
-- 路径路由: 解析路径 → 确定 (source, sub-path) → 调用 OpenDAL
-- 权限执行: 基于 POSIX 风格权限模型 (当前实现更偏 Linux) 做访问控制
-- 文件缓存: 热文件本地缓存，减少远端请求
-- 执行支持: 允许执行挂载路径上的文件 (有 x 权限即可执行)
+这是产品的管理面：
 
-### 2. section-cli (命令行工具)
+- source add/remove/list
+- status / diagnostics
+- refresh / health
+- 配置、认证、安装引导
+- 未挂载平台上的 fallback
 
-人类管理入口。
+CLI / API 仍然重要，但不应成为最终协作模式的替代品。
 
-```bash
-# 数据源管理
-section source add work-s3 --provider s3 \
-    --opt bucket=my-bucket --opt region=us-east-1 \
-    --opt access_key_id=xxx --opt secret_access_key=xxx
-section source add my-gdrive --provider gdrive --opt ...
-section source add office-nas --provider webdav \
-    --opt endpoint=https://nas.local/dav --opt username=admin --opt password=xxx
-section source list
-section source remove work-s3
+## 目标架构
 
-# 文件操作
-section ls                              # 列出所有 source
-section ls work-s3/projects/
-section cp work-s3/report.pdf office-nas/shared/
-section cat work-s3/config.yaml
-section rm work-s3/tmp/ -r
+### sectiond
 
-# 挂载管理
-section mount                           # 挂载到 /mnt/section/
-section mount --path /custom/mount
-section unmount
+产品目标中的核心不是当前的 `section-cli` 或 `section-fuse`，而是一个长期驻留的本地核心，例如 `sectiond`。
 
-# 缓存
-section refresh work-s3/data/
-```
+它应该统一持有：
 
-### 3. section-provider (数据源管理服务)
+- source registry
+- OpenDAL operator 生命周期
+- metadata/content cache
+- refresh / invalidation
+- permission / conflict semantics
+- health / diagnostics
 
-管理 Provider 定义和 Source 实例。
+这样：
 
-职责：
-- Source 实例管理: 创建/删除/列出
-- 凭证存储: 加密存储 API Key、OAuth Token 等
-- OAuth 流程: 处理 Google/Microsoft/Dropbox 等 OAuth 授权
-- Token 刷新: 自动刷新过期的 OAuth Token
-- 未来扩展: SSO 对接 (OIDC/SAML)
+- Linux mount adapter 消费它
+- macOS mount adapter 消费它
+- CLI / API / GUI backend 也消费它
 
-存储: 本地 SQLite (单机)
+### 挂载 adapter
 
-### 4. section-core (核心库)
+Section 的平台差异应该被限制在 adapter 层。
 
-底层逻辑，被以上所有模块依赖。
+#### Linux
 
-职责：
-- OpenDAL 集成: 管理多个 Operator 实例，按 source name 索引
-- 路径路由器: 解析路径 `{source}/{sub_path}`，分发到对应的 Operator
-- 权限模型: POSIX 风格权限语义的实现与持久化（当前实现更偏 Linux）
-- 缓存管理: LRU 缓存策略，缓存元数据与文件内容
+- FUSE 作为正式 data-plane adapter
+- Linux 是第一参考实现
 
-## 权限模型
+#### macOS
 
-基于 POSIX 风格权限体系，在 FUSE 层执行；当前实现和验证深度仍明显偏 Linux。
+短期：
 
-### 设计原则
+- 用 macFUSE adapter 跑通与 Linux 同类的挂载协作语义
 
-- 每个文件/目录有 owner (uid), group (gid), mode (rwx)
-- 权限信息存储在 section 自身的元数据库中 (非底层存储)
-- FUSE 进程以 root 运行，根据访问者的 uid/gid 做权限检查
-- 执行远端文件: 有 x 权限即可执行，安全由文件系统权限管控
+长期：
 
-### Agent 访问
+- 如果 macFUSE 的安装摩擦不可接受，再评估 native adapter
 
-Agent 进程以某个系统用户身份运行，自然继承该用户的文件系统权限。
-无需特殊 Agent 鉴权——标准 Unix 权限即是鉴权。
+关键点是：不管 adapter 怎么变，上层都必须还是“同一 FS 协作模式”。
 
-### 跨平台适配
+## 执行与脚本
 
-| 平台 | 权限实现 | 优先级 |
-|------|---------|--------|
-| Linux | 原生 FUSE + POSIX 权限 | Phase 1 (validated first) |
-| macOS | macFUSE + POSIX 风格权限语义 | Phase 1 target (mount validation ongoing) |
-| Windows | WinFSP + ACL 映射 | Phase 3 |
+如果目标是“agent 和人类共用同一个 FS 介质”，那 `execute / scripting` 不应该主要依赖专门的 CLI 命令。
 
-## 缓存与一致性策略
+正确的方向是：
 
-### 原则
+- 普通 bash / python / node 脚本直接运行在 mounted workspace 上
+- `section exec` 保留，但只作为补充工具
+- 产品语义围绕“共享工作树”而不是“专有命令集”
 
-- Section 自身读写 → 强一致 (write-through)
-- 外部变更 → 可配置 TTL，按数据源设定
-- 提供 `section refresh` 命令兜底
-- MVP 不做实时监听 (S3 Event / webhook 留后续版本)
+## 平台策略
 
-### 默认 TTL
+| 能力 | Linux | macOS | 说明 |
+|------|-------|-------|------|
+| `core/provider/CLI` | 正式支持 | 正式支持 | non-mount 路径应持续保持 green |
+| 挂载协作模型 | 正式实现 | 短期通过 macFUSE，长期再评估 | 上层协作语义必须一致 |
+| shell / script 工作流 | 以挂载树为主 | 以挂载树为目标 | CLI fallback 不是终局 |
 
-```yaml
-sources:
-  work-s3:
-    cache:
-      metadata_ttl: 60s       # 目录列表缓存 60 秒
-      content_ttl: 300s        # 文件内容缓存 5 分钟
+## 当前 repo truth
 
-  my-gdrive:
-    cache:
-      metadata_ttl: 30s
-      content_ttl: 120s
+当前仓库仍是 pre-sectiond 状态。
 
-  local-workspace:
-    cache:
-      metadata_ttl: 0          # 本地磁盘不缓存
-      content_ttl: 0
-```
+已经证明的部分：
 
-### 强制刷新
+- Linux FUSE happy path 可行
+- S3 / WebDAV / fs 验证路径已建立
+- 双平台 non-FUSE CI 已稳定
 
-```bash
-section refresh work-s3/data/
-# FUSE 层通过 xattr 支持强制失效
-# macOS:
-xattr -p section.refresh /mnt/section/work-s3/important.csv
-# Linux:
-getfattr -n user.section.refresh /mnt/section/work-s3/important.csv
-```
+还没完成的关键变化：
 
-## 技术选型
+- 共享语义尚未收拢到 `sectiond`
+- CLI 和 mount adapter 还没有共同消费一个统一内核
+- macOS mount adapter 仍未做实
 
-| 组件 | 选型 | 理由 |
-|------|------|------|
-| 存储抽象 | Apache OpenDAL | Rust 原生, Apache 2.0, 60+ 后端 |
-| FUSE | fuser | 统一 Rust 接口，但运行时前提仍受平台影响 |
-| 元数据库 | SQLite (rusqlite, bundled) | 嵌入式, 零运维 |
-| 凭证加密 | ring | 本地加密存储敏感凭证 |
-| CLI 框架 | clap | Rust 生态标准 |
-| 异步运行时 | tokio | OpenDAL 依赖 tokio |
+## MVP 定义（更新后）
 
-## 许可证
+新的 MVP 不再定义为“若干命令都能跑”，而是：
 
-Apache License 2.0 — 商业友好，与 OpenDAL 一致。
+1. Linux 上已经有真实可用的共享 FS 协作路径
+2. `sectiond` 作为统一本地核心开始成形
+3. CLI 明确转向 control plane
+4. macOS 路径有诚实的短期策略，而不是口头等价
 
-## 与现有项目的关系
+## 明确不做
 
-| 项目 | 关系 |
-|------|------|
-| OpenDAL | 核心依赖 — 存储抽象层 |
-| ofs | 参考但不直接使用 — ofs 只支持单后端, section-fuse 需要多后端路由 |
-| rclone | 非竞品 — rclone 是工具, section 是数据层 |
-| Spacedrive | 理念有交集 (VDFS), 但 section 面向 Agent, 更轻量, 更聚焦 |
-| AList/OpenList | 都做多存储聚合，但 section 提供文件系统挂载，不只是 Web 浏览 |
+下面这些不应当被当成当前主路线：
 
-## MVP 范围 (Phase 1)
-
-目标: 单机可用的 Agent 数据层。Phase 1 先把 macOS + Linux 的 non-FUSE 路径一起做实，再分别验证挂载路径。
-
-包含:
-- [ ] section-core: OpenDAL 多后端管理 + 路径路由
-- [ ] section-fuse: FUSE 挂载, 支持 read/write/readdir/stat/exec
-- [x] section-cli: source/ls/cp/cat/rm/mount/unmount/refresh 命令
-- [ ] section-provider: 本地 SQLite 存储, 手动凭证配置
-- [ ] 权限: 基础 POSIX mode 执行
-- [x] Provider 支持: fs, s3, webdav（本地验证路径见 `docs/BACKEND_VALIDATION.md`）
-- [ ] 双平台支持: macOS + Linux 的 non-FUSE 路径保持可用，挂载路径分别验证并逐步收敛
-
-不包含:
-- GUI
-- 团队/多机同步
-- SSO / OAuth 自动流程
-- MCP Server
-- Windows 支持
+- 把 CLI/API-only 当成最终产品
+- 用“多入口访问”替代“共享 FS 协作介质”
+- 为了零依赖包装，提前重写整个 macOS 平台实现

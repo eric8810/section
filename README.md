@@ -1,14 +1,42 @@
 # Section
 
-Agent-first unified data layer built on [Apache OpenDAL](https://github.com/apache/opendal).
+Shared filesystem collaboration layer for humans and agents, built on [Apache OpenDAL](https://github.com/apache/opendal).
 
-Section targets macOS and Linux together. It mounts multiple storage backends (S3, WebDAV, local filesystem, etc.) as a unified FUSE filesystem where the platform runtime allows it, and exposes the same sources through a CLI for non-mount workflows.
+Section is being reorganized around a filesystem-first model:
+
+- the mounted workspace is the main working surface
+- humans, agents, shell tools, editors, and scripts should operate on the same namespace
+- CLI/API remain important, but as the control plane rather than the final collaboration surface
+
+The next architectural center is `sectiond`: a long-lived local core that will own routing, cache, refresh, permissions, and health semantics for both mount adapters and control-plane clients.
+
+## Project Truth
+
+What is true today:
+
+- Linux has a validated FUSE happy path
+- macOS and Linux non-mount flows are covered by CI
+- S3, WebDAV, and local filesystem backends have real validation coverage
+- the current repo is still **pre-sectiond**
+- macOS mount validation still depends on the external macFUSE runtime
+
+What is changing now:
+
+- the repo is moving away from a "CLI + FUSE feature bundle" story
+- the route map is now `FS-first -> sectiond -> Linux reference adapter -> macOS adapter`
+
+For the current roadmap, see:
+
+- [docs/PRODUCT.md](docs/PRODUCT.md)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/PLAN.md](docs/PLAN.md)
+- [docs/BACKEND_VALIDATION.md](docs/BACKEND_VALIDATION.md)
 
 ## Features
 
-- **FUSE filesystem** — mount all sources under `/mnt/section/{source_name}/`
+- **Unified mounted namespace** — the target product model is a shared filesystem workspace
 - **60+ storage backends** via OpenDAL (S3, WebDAV, Google Drive, Azure Blob, etc.)
-- **CLI** — `section ls`, `cat`, `cp`, `rm`, `write`, `exec` across any source
+- **Control-plane CLI** — source management, status, refresh, and fallback file operations
 - **Credential encryption** — AES-256-GCM encrypted storage in SQLite
 - **JSON output** — `--json` flag for machine-readable output (agent-friendly)
 - **POSIX permissions** — uid/gid/mode enforced at the FUSE layer
@@ -17,18 +45,18 @@ Section targets macOS and Linux together. It mounts multiple storage backends (S
 
 ## Platform Support
 
-Section is aiming for macOS and Linux together, but the maturity level is not identical across every path yet.
+Section is targeting macOS and Linux together, but the truthful maturity level is still different across paths.
 
 | Capability | Linux | macOS | Notes |
 |------------|-------|-------|-------|
 | `section-core` / `section-provider` / non-mount CLI | Target platform | Target platform | Covered by the dual-platform CI workflow for non-FUSE paths |
-| FUSE mount lifecycle | Primary validation path | Separate validation path | macOS requires macFUSE and platform-specific validation |
-| Permission model | POSIX-first implementation | POSIX-like target with runtime differences | Current permission model is still Linux-centric |
+| Mounted shared workspace | Validated reference path | Target path, not fully validated yet | macOS still requires macFUSE plus explicit adapter validation |
+| Permission model | Primary reference implementation | Target path with runtime differences | Current semantics are still Linux-first |
 
 Current repo truth:
-- cross-platform CLI/core/provider support is an active MVP target
-- Linux remains the primary reference path for FUSE behavior
-- macOS mount support is being hardened separately instead of being hand-waved as already done
+- cross-platform core/provider/control-plane support is real
+- Linux remains the current reference path for mounted-workspace behavior
+- macOS mount support is still an explicit adapter track, not a solved parity claim
 
 ## Quick Start
 
@@ -53,7 +81,7 @@ section source add work-s3 --provider s3 \
 # List sources
 section source list
 
-# File operations
+# Control-plane and fallback file operations
 section ls my-files/
 section ls -l my-files/
 section cat my-files/hello.txt
@@ -64,10 +92,10 @@ section cp -r my-files/docs/ work-s3/docs/
 echo "hello" | section write my-files/greeting.txt
 section rm work-s3/old-file.txt
 
-# Execute a script from a source
+# Supplementary exec helper
 section exec my-files/scripts/deploy.sh -- --env prod
 
-# Mount as filesystem
+# Mounted workspace (the intended primary working surface)
 section mount /mnt/section
 ls /mnt/section/my-files/
 cat /mnt/section/work-s3/report.csv
@@ -78,26 +106,36 @@ section status
 
 ## Architecture
 
+Section is moving toward this runtime model:
+
 ```
-┌──────────────┐  ┌──────────────┐
-│  AI Agent    │  │  Human/CLI   │
-└──────┬───────┘  └──────┬───────┘
-       │ POSIX fs ops     │ section <cmd>
-       ▼                  ▼
-┌─────────────────────────────────┐
-│         section-fuse            │
-│   FUSE filesystem (fuser)       │
-│   inode mgmt, permissions       │
-├─────────────────────────────────┤
-│         section-core            │
-│   Router, Cache, Permissions    │
-├─────────────────────────────────┤
-│       Apache OpenDAL            │
-│   S3 │ WebDAV │ fs │ ...       │
-└─────────────────────────────────┘
+ Humans / Agents / Shell / Editors
+                |
+      +---------+---------+
+      |                   |
+  Control Plane       Data Plane
+ (CLI / API / GUI)   (mounted namespace)
+      |                   |
+      +---------+---------+
+                |
+             sectiond
+ route / cache / refresh / permissions / health
+                |
+    +-----------+------------+
+    |                        |
+ Linux mount adapter    macOS mount adapter
+    |                        |
+           Apache OpenDAL
+       S3 / WebDAV / fs / ...
 ```
 
-### Crate Structure
+Current repo truth:
+
+- `sectiond` is the target center, not a finished component yet
+- today's crates still reflect a pre-sectiond structure
+- Linux mount validation exists already and becomes the reference data-plane path
+
+### Current Crates
 
 | Crate | Description |
 |-------|-------------|
@@ -105,6 +143,8 @@ section status
 | `section-cli` | CLI binary (`section` command) |
 | `section-fuse` | FUSE filesystem daemon |
 | `section-provider` | SQLite source store, credential encryption |
+
+For the target architecture and the migration plan, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PLAN.md](docs/PLAN.md).
 
 ## Supported Providers
 
@@ -152,7 +192,7 @@ cargo check -p section-core -p section-provider -p section-cli
 cargo test -p section-core -p section-provider
 cargo test -p section-cli
 
-# Full workspace / FUSE validation is tracked separately and is not yet the truthful green path on every platform.
+# Full mounted-workspace validation is tracked separately and is not yet the truthful green path on every platform.
 
 # Run with debug logging
 RUST_LOG=debug section ls my-files/
