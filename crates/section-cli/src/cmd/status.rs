@@ -1,19 +1,10 @@
 use anyhow::Result;
-use section_core::SectionConfig;
-use section_provider::ProviderStore;
-use sectiond::SectiondRuntime;
+use sectiond::SectiondControlPlane;
 use serde_json::json;
+use std::path::Path;
 
-use super::mount::is_mount_active;
-
-pub fn run(config: &SectionConfig, store: &ProviderStore, json_mode: bool) -> Result<()> {
-    // 1. Check mount status
-    let mount_point = &config.mount_point;
-    let is_mounted = is_mount_active(mount_point);
-
-    // 2. Let the shared runtime boundary materialize and probe the merged source view.
-    let runtime = SectiondRuntime::from_config_and_store(config, store)?;
-    let status = runtime.status_snapshot(mount_point, is_mounted)?;
+pub fn run(config_path: Option<&Path>, json_mode: bool) -> Result<()> {
+    let status = SectiondControlPlane::load(config_path)?.status_snapshot()?;
 
     if json_mode {
         let output = json!({

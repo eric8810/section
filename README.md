@@ -162,11 +162,11 @@ See [OpenDAL services](https://docs.rs/opendal/latest/opendal/services/index.htm
 
 ## JSON Mode
 
-Add `--json` to any command for machine-readable output:
+Add `--json` to any command for machine-readable output. Control-plane commands (`source`, `status`, `refresh`) now report the `sectiond` view of the world rather than a raw CLI-local snapshot:
 
 ```bash
 section source list --json
-# [{"name":"my-files","provider":"fs","options":{"root":"/home/user/docs"}}]
+# [{"name":"my-files","provider":"fs","origin":"provider_store","metadata_ttl_secs":60,"content_ttl_secs":300,"options":{"root":"/home/user/docs"}}]
 
 section ls --json my-files/
 # [{"name":"hello.txt","type":"file","size":13},{"name":"docs/","type":"directory"}]

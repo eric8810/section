@@ -56,7 +56,7 @@ These are client-facing management actions:
 - config/bootstrap/preflight
 - explicit fallback flows when mount is unavailable
 
-Today these mainly live in `section-cli`. Over time, `section-cli` should become a client of `sectiond`, not a parallel runtime center.
+Today these still surface through `section-cli`, but the route-map direction is explicit: those commands should enter through `sectiond`, not keep accumulating parallel runtime logic in the CLI process.
 
 ### Data plane
 

@@ -1,18 +1,13 @@
-use super::mount::is_mount_active;
 use anyhow::{anyhow, bail, Result};
 use futures::TryStreamExt;
 use opendal::{Entry, Metadata, Operator};
 use section_core::{Router, SectionConfig, SectionError};
 use section_provider::ProviderStore;
-use sectiond::SectiondRuntime;
+use sectiond::{SectiondControlPlane, SectiondRuntime};
 use serde_json::json;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-
-const REFRESH_XATTR_NAME: &str = "section.refresh";
-#[cfg(target_os = "linux")]
-const REFRESH_XATTR_NAME_LINUX: &str = "user.section.refresh";
 
 fn build_router(config: &SectionConfig, store: &ProviderStore) -> Result<Router> {
     let (_, router) = SectiondRuntime::from_config_and_store(config, store)?.into_parts();
@@ -792,73 +787,8 @@ fn ls_entry_metadata(
     source_stat(rt, op, entry.path(), entry.path()).unwrap_or_else(|_| entry.metadata().clone())
 }
 
-fn refresh_attr_names() -> &'static [&'static str] {
-    #[cfg(target_os = "linux")]
-    {
-        &[REFRESH_XATTR_NAME_LINUX, REFRESH_XATTR_NAME]
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        &[REFRESH_XATTR_NAME]
-    }
-}
-
-fn refresh_mount_target(mount_point: &Path, path: &str) -> PathBuf {
-    let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() {
-        mount_point.to_path_buf()
-    } else {
-        mount_point.join(trimmed)
-    }
-}
-
-fn trigger_refresh_xattr(path: &Path) -> Result<Vec<u8>> {
-    let mut last_error = None;
-
-    for attr_name in refresh_attr_names() {
-        match xattr::get(path, attr_name) {
-            Ok(Some(data)) => return Ok(data),
-            Ok(None) => {
-                last_error = Some(anyhow::anyhow!(
-                    "refresh xattr {attr_name} returned no data for {}",
-                    path.display()
-                ));
-            }
-            Err(err) => {
-                last_error = Some(anyhow::anyhow!(
-                    "failed to read refresh xattr {attr_name} on {}: {err}",
-                    path.display()
-                ));
-            }
-        }
-    }
-
-    Err(last_error
-        .unwrap_or_else(|| anyhow::anyhow!("refresh xattr not available for {}", path.display())))
-}
-
-pub fn refresh(
-    config: &SectionConfig,
-    _store: &ProviderStore,
-    path: &str,
-    json_mode: bool,
-) -> Result<()> {
-    let mount_active = is_mount_active(&config.mount_point);
-    let message = if mount_active {
-        let mount_target = refresh_mount_target(&config.mount_point, path);
-        let data = trigger_refresh_xattr(&mount_target)?;
-        let response = String::from_utf8_lossy(&data);
-        if response.trim().is_empty() || response.trim() == "ok" {
-            format!("Cache refreshed for {path}")
-        } else {
-            format!("Cache refreshed for {path}: {}", response.trim())
-        }
-    } else {
-        format!(
-            "No active mount at {}; CLI has no persistent cache to invalidate for {path}",
-            config.mount_point.display()
-        )
-    };
+pub fn refresh(config_path: Option<&Path>, path: &str, json_mode: bool) -> Result<()> {
+    let result = SectiondControlPlane::load(config_path)?.refresh_path(path)?;
 
     if json_mode {
         println!(
@@ -866,12 +796,12 @@ pub fn refresh(
             json!({
                 "ok": true,
                 "path": path,
-                "mount_active": mount_active,
-                "message": message,
+                "mount_active": result.mount_active,
+                "message": result.message,
             })
         );
     } else {
-        println!("{message}");
+        println!("{}", result.message);
     }
 
     Ok(())

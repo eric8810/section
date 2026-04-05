@@ -1,9 +1,9 @@
 use crate::SourceAction;
 use anyhow::Result;
-use section_core::config::{CacheConfig, SourceConfig};
-use section_provider::ProviderStore;
+use sectiond::SectiondControlPlane;
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Mask sensitive option values for display.
 ///
@@ -31,7 +31,9 @@ fn mask_value(key: &str, value: &str) -> String {
     value.to_string()
 }
 
-pub fn run(action: SourceAction, store: &ProviderStore, json_mode: bool) -> Result<()> {
+pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) -> Result<()> {
+    let control_plane = SectiondControlPlane::load(config_path)?;
+
     match action {
         SourceAction::Add {
             name,
@@ -39,23 +41,22 @@ pub fn run(action: SourceAction, store: &ProviderStore, json_mode: bool) -> Resu
             opt,
         } => {
             let options: HashMap<String, String> = opt.into_iter().collect();
-            let source = SourceConfig {
-                provider: provider.clone(),
-                options,
-                cache: CacheConfig::default(),
-            };
-            store.add_source(&name, &source)?;
+            let entry = control_plane.source_add(&name, &provider, options)?;
             if json_mode {
                 println!(
                     "{}",
-                    json!({"ok": true, "message": format!("Source '{name}' added (provider: {provider}).")})
+                    json!({
+                        "ok": true,
+                        "message": format!("Source '{name}' added (provider: {provider})."),
+                        "source": entry,
+                    })
                 );
             } else {
                 println!("Source '{name}' added (provider: {provider}).");
             }
         }
         SourceAction::Remove { name } => {
-            store.remove_source(&name)?;
+            control_plane.source_remove(&name)?;
             if json_mode {
                 println!(
                     "{}",
@@ -66,18 +67,22 @@ pub fn run(action: SourceAction, store: &ProviderStore, json_mode: bool) -> Resu
             }
         }
         SourceAction::List => {
-            let sources = store.list_sources()?;
+            let sources = control_plane.list_sources()?;
             if json_mode {
                 let arr: Vec<serde_json::Value> = sources
                     .iter()
-                    .map(|(name, provider, options)| {
-                        let masked_options: serde_json::Map<String, serde_json::Value> = options
+                    .map(|source| {
+                        let masked_options: serde_json::Map<String, serde_json::Value> = source
+                            .options
                             .iter()
                             .map(|(k, v)| (k.clone(), json!(mask_value(k, v))))
                             .collect();
                         json!({
-                            "name": name,
-                            "provider": provider,
+                            "name": source.name,
+                            "provider": source.provider,
+                            "origin": source.origin,
+                            "metadata_ttl_secs": source.metadata_ttl_secs,
+                            "content_ttl_secs": source.content_ttl_secs,
                             "options": masked_options,
                         })
                     })
@@ -86,12 +91,19 @@ pub fn run(action: SourceAction, store: &ProviderStore, json_mode: bool) -> Resu
             } else if sources.is_empty() {
                 println!("No sources configured.");
             } else {
-                for (name, provider, options) in &sources {
-                    println!("  {name}  (provider: {provider})");
-                    let mut keys: Vec<&String> = options.keys().collect();
+                for source in &sources {
+                    println!(
+                        "  {}  (provider: {}, origin: {}, metadata_ttl_secs: {}, content_ttl_secs: {})",
+                        source.name,
+                        source.provider,
+                        source.origin.as_str(),
+                        source.metadata_ttl_secs,
+                        source.content_ttl_secs,
+                    );
+                    let mut keys: Vec<&String> = source.options.keys().collect();
                     keys.sort();
                     for key in keys {
-                        let value = &options[key];
+                        let value = &source.options[key];
                         let display_value = mask_value(key, value);
                         println!("    {key} = {display_value}");
                     }

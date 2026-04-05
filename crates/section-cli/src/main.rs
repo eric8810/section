@@ -1,5 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use section_core::SectionConfig;
+use section_provider::ProviderStore;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -130,29 +132,63 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config = section_core::SectionConfig::load(cli.config.as_deref())?;
-    config.ensure_dirs()?;
-
-    let store = section_provider::ProviderStore::open(&config.data_dir)?;
-
     let json = cli.json;
 
     match cli.command {
-        Commands::Source { action } => cmd::source::run(action, &store, json),
-        Commands::Ls { path, long } => cmd::file::ls(&config, &store, path.as_deref(), json, long),
+        Commands::Source { action } => cmd::source::run(cli.config.as_deref(), action, json),
+        Commands::Ls { path, long } => {
+            let (config, store) = load_config_and_store(cli.config.as_deref())?;
+            cmd::file::ls(&config, &store, path.as_deref(), json, long)
+        }
         Commands::Cp {
             recursive,
             src,
             dst,
-        } => cmd::file::cp(&config, &store, &src, &dst, recursive, json),
-        Commands::Cat { path } => cmd::file::cat(&config, &store, &path, json),
-        Commands::Rm { path, recursive } => cmd::file::rm(&config, &store, &path, recursive, json),
-        Commands::Mount { path } => cmd::mount::mount(&config, cli.config.as_deref(), &path),
+        } => {
+            let (config, store) = load_config_and_store(cli.config.as_deref())?;
+            cmd::file::cp(&config, &store, &src, &dst, recursive, json)
+        }
+        Commands::Cat { path } => {
+            let (config, store) = load_config_and_store(cli.config.as_deref())?;
+            cmd::file::cat(&config, &store, &path, json)
+        }
+        Commands::Rm { path, recursive } => {
+            let (config, store) = load_config_and_store(cli.config.as_deref())?;
+            cmd::file::rm(&config, &store, &path, recursive, json)
+        }
+        Commands::Mount { path } => {
+            let config = load_config(cli.config.as_deref())?;
+            cmd::mount::mount(&config, cli.config.as_deref(), &path)
+        }
         Commands::Unmount { path } => cmd::mount::unmount(&path),
-        Commands::Refresh { path } => cmd::file::refresh(&config, &store, &path, json),
-        Commands::Exec { path, args } => cmd::file::exec(&config, &store, &path, &args, json),
-        Commands::Write { path } => cmd::file::write_stdin(&config, &store, &path, json),
-        Commands::Status => cmd::status::run(&config, &store, json),
-        Commands::Init => cmd::init::run(&store),
+        Commands::Refresh { path } => cmd::file::refresh(cli.config.as_deref(), &path, json),
+        Commands::Exec { path, args } => {
+            let (config, store) = load_config_and_store(cli.config.as_deref())?;
+            cmd::file::exec(&config, &store, &path, &args, json)
+        }
+        Commands::Write { path } => {
+            let (config, store) = load_config_and_store(cli.config.as_deref())?;
+            cmd::file::write_stdin(&config, &store, &path, json)
+        }
+        Commands::Status => cmd::status::run(cli.config.as_deref(), json),
+        Commands::Init => {
+            let (config, store) = load_config_and_store(cli.config.as_deref())?;
+            let _ = config;
+            cmd::init::run(&store)
+        }
     }
+}
+
+fn load_config(config_path: Option<&std::path::Path>) -> Result<SectionConfig> {
+    let config = SectionConfig::load(config_path)?;
+    config.ensure_dirs()?;
+    Ok(config)
+}
+
+fn load_config_and_store(
+    config_path: Option<&std::path::Path>,
+) -> Result<(SectionConfig, ProviderStore)> {
+    let config = load_config(config_path)?;
+    let store = ProviderStore::open(&config.data_dir)?;
+    Ok((config, store))
 }
