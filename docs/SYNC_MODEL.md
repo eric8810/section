@@ -150,6 +150,42 @@ If a user wants to merge manually in an editor, that still ends as `use-local` a
 
 After an explicit resolution, the path can return to normal sync.
 
+## Observation and Resolution Surface
+
+The local file tree is the data plane. It is not the full sync-control surface.
+
+A normal editor or shell only sees:
+
+- local file content
+- normal filesystem metadata
+
+It does not reliably know:
+
+- current sync state
+- current remote version
+- whether the local file is based on stale remote state
+- how to choose `use-local` or `use-remote`
+
+That information must come from the control plane.
+
+At minimum, the control plane should expose:
+
+- `path inspect`
+  - public state
+  - detail fields
+  - `base_remote_version`
+  - `current_remote_version`
+- `path compare`
+  - whether local is based on current remote
+  - local/remote compare references or snapshot information
+- `path resolve --strategy use-local|use-remote`
+  - explicit stale-overwrite resolution
+
+So the contract is:
+
+- ordinary apps work against local files
+- Section-aware clients query and control sync state through the control plane
+
 ## Execution Boundary
 
 Execution is outside the current project scope.

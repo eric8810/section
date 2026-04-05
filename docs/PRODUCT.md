@@ -69,6 +69,10 @@ Section 主线不承诺的是：
 - sync / pull / pin / repair
 - 配置、认证、安装引导
 
+这里还必须承担一件事：
+
+- 提供普通文件系统本体无法表达的 sync / version / compare / resolve 能力
+
 ### Execution Non-Goal
 
 当前项目只需要把边界说清楚：
@@ -146,6 +150,37 @@ MVP 不做自动 merge，也不做版本分叉模型。
 如果用户想手工 merge，也是在本地编辑完成后，最终再执行一次 `use-local`。
 
 只有显式 resolve 后，这个 path 才恢复正常同步。
+
+### 应用如何得知状态与版本
+
+结论很直接：
+
+- 普通应用只会看到“文件已经在本地”
+- 普通 POSIX 文件本体不能可靠表达 sync state / remote version / resolve action
+- 这些信息必须通过 Section control plane 获取
+
+所以当前产品应明确区分两层：
+
+- data plane：本地文件树，供 editor / shell / agent 正常读写
+- control plane：供 Section-aware CLI / GUI / API 查询状态、版本、对比和 resolve
+
+最小 control-plane 能力应是：
+
+- `path inspect`
+  - 返回 `ready / syncing / conflict / error`
+  - 返回 detail fields
+  - 返回 `base_remote_version`
+  - 返回 `current_remote_version`
+- `path compare`
+  - 告诉调用方本地内容是否基于当前 remote
+  - 暴露 local / remote 的可对比引用或快照信息
+- `path resolve --strategy use-local|use-remote`
+  - 显式完成冲突取舍
+
+也就是说：
+
+- 应用本身不会“自动知道”
+- Section-aware 客户端必须主动调用 control plane
 
 ## 平台策略
 

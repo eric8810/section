@@ -56,7 +56,7 @@ These are client-facing management actions:
 - source add/remove/list
 - source bind-local-root / unbind-local-root
 - source sync / source status
-- path pull / pin / inspect / repair
+- path pull / pin / inspect / compare / resolve / repair
 - status / diagnostics
 - refresh / repair / health checks
 - config/bootstrap/preflight
