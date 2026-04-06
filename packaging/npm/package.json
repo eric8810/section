@@ -1,0 +1,50 @@
+{
+  "name": "@eric8810/section",
+  "version": "0.1.0-alpha.1",
+  "description": "CLI distribution package for Section",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/eric8810/section",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eric8810/section.git"
+  },
+  "bugs": {
+    "url": "https://github.com/eric8810/section/issues"
+  },
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "bin": {
+    "section": "bin/section.js",
+    "sectiond": "bin/sectiond.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "scripts",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "section",
+    "cli",
+    "sync",
+    "agent",
+    "opendal"
+  ]
+}

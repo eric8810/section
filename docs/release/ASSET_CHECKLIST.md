@@ -38,6 +38,20 @@ For the next execution tasks, those surfaces are:
 - npm (`npm install -g` / `npx`)
 - official agent skill
 
+## Expected binary archives for npm / release install surfaces
+
+For the first honest binary-backed release, attach:
+
+- `section-<version>-darwin-arm64.tar.gz`
+- `section-<version>-darwin-x64.tar.gz`
+- `section-<version>-linux-arm64.tar.gz`
+- `section-<version>-linux-x64.tar.gz`
+
+Each archive should unpack to:
+
+- `bin/section`
+- `bin/sectiond`
+
 ## Release-page media order
 
 Use this order:

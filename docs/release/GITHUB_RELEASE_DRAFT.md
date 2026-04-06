@@ -44,6 +44,12 @@ This first public alpha establishes the current mainline:
 - User Manual
 - Promo / launch copy package
 
+### Install surfaces for this release
+
+- GitHub Release binary archives
+- Homebrew tap package
+- npm install surface for `npm install -g` and `npx`
+
 ## Quick example
 
 ```bash

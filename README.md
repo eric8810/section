@@ -30,6 +30,7 @@ Section's active product model is:
 - [docs/PROMO.md](docs/PROMO.md)
 - [docs/release/README.md](docs/release/README.md)
 - [docs/distribution/homebrew/README.md](docs/distribution/homebrew/README.md)
+- [docs/distribution/npm/README.md](docs/distribution/npm/README.md)
 
 ## Current Implementation
 
