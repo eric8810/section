@@ -1,0 +1,25 @@
+class Section < Formula
+  desc "Source/path sync collaboration layer for humans and agents"
+  homepage "https://github.com/eric8810/section"
+  url "https://github.com/eric8810/section/archive/refs/tags/v__VERSION__.tar.gz"
+  sha256 "__SHA256__"
+  license "Apache-2.0"
+
+  depends_on "rust" => :build
+
+  def install
+    system "cargo", "build", "--release", "--locked", "-p", "section-cli", "-p", "sectiond"
+    bin.install "target/release/section"
+    bin.install "target/release/sectiond"
+  end
+
+  test do
+    (testpath/"config.toml").write <<~EOS
+      data_dir = "#{testpath}/data"
+      mount_point = "#{testpath}/mount"
+    EOS
+
+    assert_match "No sources configured.", shell_output("#{bin}/section --config #{testpath}/config.toml source list")
+    assert_match "sectiond runtime snapshot", shell_output("#{bin}/sectiond --config #{testpath}/config.toml inspect")
+  end
+end
