@@ -92,9 +92,6 @@ section cp -r my-files/docs/ work-s3/docs/
 echo "hello" | section write my-files/greeting.txt
 section rm work-s3/old-file.txt
 
-# Supplementary exec helper
-section exec my-files/scripts/deploy.sh -- --env prod
-
 # Check status
 section status
 ```
@@ -151,7 +148,14 @@ See [OpenDAL services](https://docs.rs/opendal/latest/opendal/services/index.htm
 
 ## JSON Mode
 
-Add `--json` to any command for machine-readable output. Control-plane commands (`source`, `status`, `refresh`) now report the `sectiond` view of the world rather than a raw CLI-local snapshot:
+Add `--json` to any command for machine-readable output. Control-plane commands (`source`, `status`, `refresh`) now report the `sectiond` view of the world rather than a raw CLI-local snapshot.
+
+Current repo truth:
+
+- `section status --json` still carries some legacy mount-oriented structure from the pre-pivot CLI
+- issue `#24` is where the CLI output will be fully reshaped around source/path sync state
+
+Examples:
 
 ```bash
 section source list --json
@@ -170,6 +174,7 @@ Config file location: `~/.config/section/config.toml` (or `$XDG_CONFIG_HOME/sect
 
 ```toml
 data_dir = "~/.local/share/section"
+# legacy current-repo field; not part of the new source/path sync mainline
 mount_point = "/mnt/section"
 ```
 

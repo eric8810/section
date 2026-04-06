@@ -1,5 +1,10 @@
 # Section MVP 详细任务拆分
 
+> Archived note:
+> this document is a pre-pivot, mount/FUSE-first detailed breakdown.
+> It is kept as implementation history, not as the active roadmap.
+> The active route is now `README.md`, `docs/PRODUCT.md`, `docs/SYNC_MODEL.md`, `docs/SECTIOND.md`, and `docs/PLAN.md`.
+
 基于 PLAN.md 的状态分析和代码审查，将所有未完成工作拆分为最小独立功能单元。
 每个任务可独立实现、独立测试、独立提交。
 
