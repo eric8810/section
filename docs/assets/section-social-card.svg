@@ -1,0 +1,48 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1600" height="900" fill="#F3EBDD"/>
+  <rect x="48" y="48" width="1504" height="804" rx="28" fill="#FFF9F0" stroke="#111111" stroke-width="2"/>
+  <rect x="86" y="92" width="180" height="36" rx="18" fill="#111111"/>
+  <text x="176" y="116" fill="#FFF9F0" font-size="18" text-anchor="middle" font-family="Georgia, Times New Roman, serif">SECTION</text>
+  <text x="88" y="176" fill="#111111" font-size="74" font-family="Georgia, Times New Roman, serif">One local tree</text>
+  <text x="88" y="252" fill="#111111" font-size="74" font-family="Georgia, Times New Roman, serif">for humans</text>
+  <text x="88" y="328" fill="#111111" font-size="74" font-family="Georgia, Times New Roman, serif">and agents.</text>
+  <text x="90" y="386" fill="#3A3A3A" font-size="28" font-family="Helvetica, Arial, sans-serif">Turn remote sources into a truthful local work surface.</text>
+  <text x="90" y="428" fill="#3A3A3A" font-size="28" font-family="Helvetica, Arial, sans-serif">Watch state changes. Compare by local path. Resolve conflicts explicitly.</text>
+
+  <rect x="88" y="494" width="228" height="64" rx="16" fill="#D84C2F"/>
+  <text x="202" y="534" fill="#FFF9F0" font-size="24" text-anchor="middle" font-family="Helvetica, Arial, sans-serif">source/path model</text>
+  <rect x="336" y="494" width="188" height="64" rx="16" fill="#0E6B66"/>
+  <text x="430" y="534" fill="#FFF9F0" font-size="24" text-anchor="middle" font-family="Helvetica, Arial, sans-serif">watch events</text>
+  <rect x="544" y="494" width="228" height="64" rx="16" fill="#111111"/>
+  <text x="658" y="534" fill="#FFF9F0" font-size="24" text-anchor="middle" font-family="Helvetica, Arial, sans-serif">explicit resolve</text>
+
+  <rect x="864" y="110" width="614" height="680" rx="24" fill="#111111"/>
+  <rect x="904" y="154" width="534" height="112" rx="18" fill="#FFF9F0"/>
+  <text x="938" y="200" fill="#111111" font-size="28" font-family="Helvetica, Arial, sans-serif">Sources</text>
+  <text x="938" y="238" fill="#555555" font-size="24" font-family="SFMono-Regular, Menlo, monospace">fs   /   s3   /   webdav   /   ...</text>
+
+  <path d="M1172 266V334" stroke="#FFF9F0" stroke-width="4"/>
+  <path d="M1172 334L1154 316" stroke="#FFF9F0" stroke-width="4"/>
+  <path d="M1172 334L1190 316" stroke="#FFF9F0" stroke-width="4"/>
+
+  <rect x="964" y="350" width="416" height="116" rx="18" fill="#D84C2F"/>
+  <text x="1000" y="398" fill="#FFF9F0" font-size="30" font-family="Helvetica, Arial, sans-serif">sectiond</text>
+  <text x="1000" y="438" fill="#FFF9F0" font-size="22" font-family="SFMono-Regular, Menlo, monospace">sync / events / compare / resolve</text>
+
+  <path d="M1172 466V534" stroke="#FFF9F0" stroke-width="4"/>
+  <path d="M1172 534L1154 516" stroke="#FFF9F0" stroke-width="4"/>
+  <path d="M1172 534L1190 516" stroke="#FFF9F0" stroke-width="4"/>
+
+  <rect x="904" y="548" width="534" height="108" rx="18" fill="#FFF9F0"/>
+  <text x="938" y="592" fill="#111111" font-size="28" font-family="Helvetica, Arial, sans-serif">Local tree</text>
+  <text x="938" y="630" fill="#555555" font-size="22" font-family="SFMono-Regular, Menlo, monospace">~/section-demo/docs/readme.txt</text>
+
+  <rect x="904" y="688" width="168" height="54" rx="27" fill="#111111"/>
+  <text x="988" y="722" fill="#FFF9F0" font-size="22" text-anchor="middle" font-family="Helvetica, Arial, sans-serif">READY</text>
+  <rect x="1090" y="688" width="180" height="54" rx="27" fill="#0E6B66"/>
+  <text x="1180" y="722" fill="#FFF9F0" font-size="22" text-anchor="middle" font-family="Helvetica, Arial, sans-serif">SYNCING</text>
+  <rect x="1288" y="688" width="150" height="54" rx="27" fill="#D84C2F"/>
+  <text x="1363" y="722" fill="#FFF9F0" font-size="22" text-anchor="middle" font-family="Helvetica, Arial, sans-serif">CONFLICT</text>
+
+  <text x="88" y="760" fill="#5F5A54" font-size="22" font-family="SFMono-Regular, Menlo, monospace">bind a source → sync once → watch events → compare by local path → resolve explicitly</text>
+</svg>

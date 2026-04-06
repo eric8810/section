@@ -1,0 +1,42 @@
+<svg width="1200" height="1200" viewBox="0 0 1200 1200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="1200" fill="#F3EBDD"/>
+  <rect x="42" y="42" width="1116" height="1116" rx="30" fill="#FFF9F0" stroke="#111111" stroke-width="2"/>
+  <rect x="82" y="86" width="176" height="38" rx="19" fill="#111111"/>
+  <text x="170" y="111" fill="#FFF9F0" font-size="18" text-anchor="middle" font-family="Georgia, Times New Roman, serif">SECTION</text>
+
+  <text x="84" y="198" fill="#111111" font-size="78" font-family="Georgia, Times New Roman, serif">One local tree</text>
+  <text x="84" y="278" fill="#111111" font-size="78" font-family="Georgia, Times New Roman, serif">for humans</text>
+  <text x="84" y="358" fill="#111111" font-size="78" font-family="Georgia, Times New Roman, serif">and agents.</text>
+
+  <text x="86" y="424" fill="#3A3A3A" font-size="28" font-family="Helvetica, Arial, sans-serif">Bind a source. Sync into a local directory.</text>
+  <text x="86" y="466" fill="#3A3A3A" font-size="28" font-family="Helvetica, Arial, sans-serif">Watch state changes. Compare by local path. Resolve conflicts deliberately.</text>
+
+  <rect x="84" y="526" width="238" height="62" rx="16" fill="#D84C2F"/>
+  <text x="203" y="565" fill="#FFF9F0" font-size="24" text-anchor="middle" font-family="Helvetica, Arial, sans-serif">source/path model</text>
+  <rect x="340" y="526" width="190" height="62" rx="16" fill="#0E6B66"/>
+  <text x="435" y="565" fill="#FFF9F0" font-size="24" text-anchor="middle" font-family="Helvetica, Arial, sans-serif">watch events</text>
+  <rect x="548" y="526" width="236" height="62" rx="16" fill="#111111"/>
+  <text x="666" y="565" fill="#FFF9F0" font-size="24" text-anchor="middle" font-family="Helvetica, Arial, sans-serif">explicit resolve</text>
+
+  <rect x="84" y="652" width="1032" height="340" rx="24" fill="#111111"/>
+  <rect x="124" y="696" width="292" height="86" rx="16" fill="#FFF9F0"/>
+  <text x="146" y="731" fill="#111111" font-size="24" font-family="Helvetica, Arial, sans-serif">Sources</text>
+  <text x="146" y="763" fill="#4F4F4F" font-size="21" font-family="SFMono-Regular, Menlo, monospace">fs / s3 / webdav / ...</text>
+
+  <rect x="454" y="696" width="250" height="86" rx="16" fill="#D84C2F"/>
+  <text x="478" y="731" fill="#FFF9F0" font-size="24" font-family="Helvetica, Arial, sans-serif">sectiond</text>
+  <text x="478" y="763" fill="#FFF9F0" font-size="19" font-family="SFMono-Regular, Menlo, monospace">sync / events / resolve</text>
+
+  <rect x="742" y="696" width="334" height="86" rx="16" fill="#FFF9F0"/>
+  <text x="766" y="731" fill="#111111" font-size="24" font-family="Helvetica, Arial, sans-serif">Local tree</text>
+  <text x="766" y="763" fill="#4F4F4F" font-size="18" font-family="SFMono-Regular, Menlo, monospace">~/section-demo/docs/...</text>
+
+  <path d="M416 739H454" stroke="#FFF9F0" stroke-width="4"/>
+  <path d="M704 739H742" stroke="#FFF9F0" stroke-width="4"/>
+
+  <text x="126" y="844" fill="#F3EBDD" font-size="22" font-family="Helvetica, Arial, sans-serif">What makes this different:</text>
+  <text x="126" y="888" fill="#F3EBDD" font-size="20" font-family="Helvetica, Arial, sans-serif">• the local tree is the work surface</text>
+  <text x="126" y="924" fill="#F3EBDD" font-size="20" font-family="Helvetica, Arial, sans-serif">• sync truth stays explicit</text>
+  <text x="126" y="960" fill="#F3EBDD" font-size="20" font-family="Helvetica, Arial, sans-serif">• agents subscribe once instead of polling every path</text>
+  <text x="84" y="1082" fill="#6A645D" font-size="22" font-family="SFMono-Regular, Menlo, monospace">section → source sync → watch → inspect / compare / resolve</text>
+</svg>
