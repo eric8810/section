@@ -2097,6 +2097,7 @@ dependencies = [
  "clap",
  "libc",
  "opendal",
+ "ring",
  "section-core",
  "section-provider",
  "serde",

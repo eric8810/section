@@ -89,8 +89,6 @@ Section tracks:
 
 - source local-root binding
 - local file presence
-- pinned content
-- evictable content
 - stale local content
 
 These remain detail fields, not primary state names.

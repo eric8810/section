@@ -78,7 +78,6 @@ Humans / Agents / Shell / Editors
 - source/path public state
 - source/path detail state
 - event stream
-- sync scheduler
 - metadata/content cache
 - conflict detection and resolution state
 - health and diagnostics
@@ -88,10 +87,10 @@ Humans / Agents / Shell / Editors
 CLI acts as a control-plane client for:
 
 - source management
+- source sync
 - status / diagnostics
 - watch
 - inspect / compare / resolve
-- sync / pull / pin / repair
 
 ### Local Source Tree
 

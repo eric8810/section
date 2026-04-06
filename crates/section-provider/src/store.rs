@@ -2,6 +2,7 @@ use crate::crypto;
 use anyhow::Context;
 use rusqlite::Connection;
 use section_core::config::{CacheConfig, SourceConfig};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -15,14 +16,26 @@ pub struct SourceLocalRootBinding {
 pub struct PathSyncStateRecord {
     pub source_name: String,
     pub path: String,
+    pub entry_kind: String,
     pub public_state: String,
     pub local_present: bool,
     pub dirty_local: bool,
     pub dirty_remote: bool,
     pub pinned: bool,
     pub stale: bool,
+    pub last_local_version: Option<String>,
     pub base_remote_version: Option<String>,
     pub current_remote_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncEventRecord {
+    pub id: i64,
+    pub source_name: String,
+    pub path: String,
+    pub kind: String,
+    pub state: String,
+    pub created_at_ms: i64,
 }
 
 /// Persistent store for sources and their credentials.
@@ -71,20 +84,36 @@ impl ProviderStore {
             CREATE TABLE IF NOT EXISTS path_sync_state (
                 source_name TEXT NOT NULL,
                 path TEXT NOT NULL,
+                entry_kind TEXT NOT NULL DEFAULT 'file',
                 public_state TEXT NOT NULL DEFAULT 'ready',
                 local_present INTEGER NOT NULL DEFAULT 0,
                 dirty_local INTEGER NOT NULL DEFAULT 0,
                 dirty_remote INTEGER NOT NULL DEFAULT 0,
                 pinned INTEGER NOT NULL DEFAULT 0,
                 stale INTEGER NOT NULL DEFAULT 0,
+                last_local_version TEXT,
                 base_remote_version TEXT,
                 current_remote_version TEXT,
                 PRIMARY KEY (source_name, path)
+            );
+            CREATE TABLE IF NOT EXISTS sync_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
             );",
         )?;
 
         // Add `encrypted` column to existing tables that lack it.
         self.add_column_if_missing("sources", "encrypted", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing(
+            "path_sync_state",
+            "entry_kind",
+            "TEXT NOT NULL DEFAULT 'file'",
+        )?;
+        self.add_column_if_missing("path_sync_state", "last_local_version", "TEXT")?;
 
         Ok(())
     }
@@ -220,33 +249,39 @@ impl ProviderStore {
             "INSERT INTO path_sync_state (
                 source_name,
                 path,
+                entry_kind,
                 public_state,
                 local_present,
                 dirty_local,
                 dirty_remote,
                 pinned,
                 stale,
+                last_local_version,
                 base_remote_version,
                 current_remote_version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(source_name, path) DO UPDATE SET
+                entry_kind = excluded.entry_kind,
                 public_state = excluded.public_state,
                 local_present = excluded.local_present,
                 dirty_local = excluded.dirty_local,
                 dirty_remote = excluded.dirty_remote,
                 pinned = excluded.pinned,
                 stale = excluded.stale,
+                last_local_version = excluded.last_local_version,
                 base_remote_version = excluded.base_remote_version,
                 current_remote_version = excluded.current_remote_version",
             rusqlite::params![
                 record.source_name,
                 record.path,
+                record.entry_kind,
                 record.public_state,
                 i64::from(record.local_present),
                 i64::from(record.dirty_local),
                 i64::from(record.dirty_remote),
                 i64::from(record.pinned),
                 i64::from(record.stale),
+                record.last_local_version,
                 record.base_remote_version,
                 record.current_remote_version,
             ],
@@ -263,12 +298,14 @@ impl ProviderStore {
             "SELECT
                 source_name,
                 path,
+                entry_kind,
                 public_state,
                 local_present,
                 dirty_local,
                 dirty_remote,
                 pinned,
                 stale,
+                last_local_version,
                 base_remote_version,
                 current_remote_version
              FROM path_sync_state
@@ -278,14 +315,16 @@ impl ProviderStore {
             Ok(PathSyncStateRecord {
                 source_name: row.get(0)?,
                 path: row.get(1)?,
-                public_state: row.get(2)?,
-                local_present: row.get::<_, i64>(3)? != 0,
-                dirty_local: row.get::<_, i64>(4)? != 0,
-                dirty_remote: row.get::<_, i64>(5)? != 0,
-                pinned: row.get::<_, i64>(6)? != 0,
-                stale: row.get::<_, i64>(7)? != 0,
-                base_remote_version: row.get(8)?,
-                current_remote_version: row.get(9)?,
+                entry_kind: row.get(2)?,
+                public_state: row.get(3)?,
+                local_present: row.get::<_, i64>(4)? != 0,
+                dirty_local: row.get::<_, i64>(5)? != 0,
+                dirty_remote: row.get::<_, i64>(6)? != 0,
+                pinned: row.get::<_, i64>(7)? != 0,
+                stale: row.get::<_, i64>(8)? != 0,
+                last_local_version: row.get(9)?,
+                base_remote_version: row.get(10)?,
+                current_remote_version: row.get(11)?,
             })
         });
 
@@ -294,6 +333,97 @@ impl ProviderStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(err) => Err(err.into()),
         }
+    }
+
+    pub fn remove_path_sync_state(&self, source_name: &str, path: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "DELETE FROM path_sync_state WHERE source_name = ?1 AND path = ?2",
+            rusqlite::params![source_name, path],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_path_sync_states(
+        &self,
+        source_name: &str,
+    ) -> anyhow::Result<Vec<PathSyncStateRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                source_name,
+                path,
+                entry_kind,
+                public_state,
+                local_present,
+                dirty_local,
+                dirty_remote,
+                pinned,
+                stale,
+                last_local_version,
+                base_remote_version,
+                current_remote_version
+             FROM path_sync_state
+             WHERE source_name = ?1
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map([source_name], |row| {
+            Ok(PathSyncStateRecord {
+                source_name: row.get(0)?,
+                path: row.get(1)?,
+                entry_kind: row.get(2)?,
+                public_state: row.get(3)?,
+                local_present: row.get::<_, i64>(4)? != 0,
+                dirty_local: row.get::<_, i64>(5)? != 0,
+                dirty_remote: row.get::<_, i64>(6)? != 0,
+                pinned: row.get::<_, i64>(7)? != 0,
+                stale: row.get::<_, i64>(8)? != 0,
+                last_local_version: row.get(9)?,
+                base_remote_version: row.get(10)?,
+                current_remote_version: row.get(11)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn append_sync_event(
+        &self,
+        source_name: &str,
+        path: &str,
+        kind: &str,
+        state: &str,
+        created_at_ms: i64,
+    ) -> anyhow::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO sync_events (source_name, path, kind, state, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![source_name, path, kind, state, created_at_ms],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_sync_events_after(
+        &self,
+        source_name: &str,
+        after_id: i64,
+    ) -> anyhow::Result<Vec<SyncEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_name, path, kind, state, created_at_ms
+             FROM sync_events
+             WHERE source_name = ?1 AND id > ?2
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![source_name, after_id], |row| {
+            Ok(SyncEventRecord {
+                id: row.get(0)?,
+                source_name: row.get(1)?,
+                path: row.get(2)?,
+                kind: row.get(3)?,
+                state: row.get(4)?,
+                created_at_ms: row.get(5)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn list_sources(&self) -> anyhow::Result<Vec<(String, String, HashMap<String, String>)>> {
@@ -511,12 +641,14 @@ mod tests {
         let record = PathSyncStateRecord {
             source_name: "local".to_string(),
             path: "nested/file.txt".to_string(),
+            entry_kind: "file".to_string(),
             public_state: "conflict".to_string(),
             local_present: true,
             dirty_local: true,
             dirty_remote: false,
             pinned: false,
             stale: true,
+            last_local_version: Some("l1".to_string()),
             base_remote_version: Some("v1".to_string()),
             current_remote_version: Some("v2".to_string()),
         };
@@ -530,5 +662,28 @@ mod tests {
             .expect("get path sync state")
             .expect("path sync state should exist");
         assert_eq!(loaded, record);
+    }
+
+    #[test]
+    fn sync_events_round_trip_in_order() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+
+        let first_id = store
+            .append_sync_event("local", "a.txt", "state_changed", "syncing", 1000)
+            .expect("append first event");
+        let second_id = store
+            .append_sync_event("local", "a.txt", "state_changed", "ready", 1001)
+            .expect("append second event");
+
+        let events = store
+            .list_sync_events_after("local", first_id - 1)
+            .expect("list events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, first_id);
+        assert_eq!(events[1].id, second_id);
+        assert_eq!(events[0].path, "a.txt");
+        assert_eq!(events[0].state, "syncing");
+        assert_eq!(events[1].state, "ready");
     }
 }

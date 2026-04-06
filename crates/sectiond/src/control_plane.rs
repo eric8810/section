@@ -1,8 +1,13 @@
+use crate::sync::{
+    compare_path as sync_compare_path, list_watch_events, resolve_path as sync_resolve_path,
+    sync_source as run_source_sync, PathCompareSnapshot, PathResolveResult, PathResolveStrategy,
+    SourceSyncResult,
+};
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
 use section_core::config::{CacheConfig, SourceConfig};
 use section_core::SectionConfig;
-use section_provider::{PathSyncStateRecord, ProviderStore};
+use section_provider::{PathSyncStateRecord, ProviderStore, SyncEventRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -150,7 +155,11 @@ impl SectiondControlPlane {
         Ok(entries)
     }
 
-    pub fn source_bind_local_root(&self, name: &str, local_root: &Path) -> Result<SourceRegistryEntry> {
+    pub fn source_bind_local_root(
+        &self,
+        name: &str,
+        local_root: &Path,
+    ) -> Result<SourceRegistryEntry> {
         self.ensure_source_exists(name)?;
 
         let local_root = absolutize_path(local_root)?;
@@ -185,7 +194,9 @@ impl SectiondControlPlane {
         let authoritative_root = self
             .store
             .get_source_local_root(&marker.source_id)?
-            .ok_or_else(|| anyhow::anyhow!("source {} has no bound local root", marker.source_id))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("source {} has no bound local root", marker.source_id)
+            })?;
 
         let source_path = relative_source_path(&authoritative_root, &local_path)?;
         let state = self
@@ -209,6 +220,55 @@ impl SectiondControlPlane {
             base_remote_version: state.base_remote_version,
             current_remote_version: state.current_remote_version,
         })
+    }
+
+    pub fn source_sync(&self, name: &str) -> Result<SourceSyncResult> {
+        self.ensure_source_exists(name)?;
+        let local_root = self
+            .store
+            .get_source_local_root(name)?
+            .ok_or_else(|| anyhow::anyhow!("source {name} has no bound local root"))?;
+        let runtime = self.runtime()?;
+        run_source_sync(&runtime, &self.store, name, &local_root)
+    }
+
+    pub fn path_compare(&self, input_path: &Path) -> Result<PathCompareSnapshot> {
+        let (source_id, local_root, local_path, source_path) =
+            self.resolve_local_path(input_path)?;
+        let runtime = self.runtime()?;
+        sync_compare_path(
+            &runtime,
+            &self.store,
+            &source_id,
+            &local_root,
+            &local_path,
+            &source_path,
+        )
+    }
+
+    pub fn path_resolve(
+        &self,
+        input_path: &Path,
+        strategy: PathResolveStrategy,
+    ) -> Result<PathResolveResult> {
+        let (source_id, local_root, local_path, source_path) =
+            self.resolve_local_path(input_path)?;
+        let runtime = self.runtime()?;
+        sync_resolve_path(
+            &runtime,
+            &self.store,
+            &source_id,
+            &local_root,
+            &local_path,
+            &source_path,
+            strategy,
+        )
+    }
+
+    pub fn watch_path(&self, input_path: &Path, after_id: i64) -> Result<Vec<SyncEventRecord>> {
+        let (source_id, _local_root, _local_path, source_path) =
+            self.resolve_local_path(input_path)?;
+        list_watch_events(&self.store, &source_id, &source_path, after_id)
     }
 
     pub fn status_snapshot(&self) -> Result<StatusSnapshot> {
@@ -257,6 +317,19 @@ impl SectiondControlPlane {
             bail!("source {name} is not registered");
         }
         Ok(())
+    }
+
+    fn resolve_local_path(&self, input_path: &Path) -> Result<(String, PathBuf, PathBuf, String)> {
+        let local_path = absolutize_path(input_path)?;
+        let marker = discover_root_marker(&local_path)?;
+        let local_root = self
+            .store
+            .get_source_local_root(&marker.source_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("source {} has no bound local root", marker.source_id)
+            })?;
+        let source_path = relative_source_path(&local_root, &local_path)?;
+        Ok((marker.source_id, local_root, local_path, source_path))
     }
 
     fn ensure_name_is_not_config_owned(&self, name: &str, action: &str) -> Result<()> {
@@ -363,12 +436,18 @@ fn default_path_state(source_id: &str, path: &str, local_path: &Path) -> PathSyn
     PathSyncStateRecord {
         source_name: source_id.to_string(),
         path: path.to_string(),
+        entry_kind: if local_path.is_dir() {
+            "dir".to_string()
+        } else {
+            "file".to_string()
+        },
         public_state: "ready".to_string(),
         local_present: local_path.exists(),
         dirty_local: false,
         dirty_remote: false,
         pinned: false,
         stale: false,
+        last_local_version: None,
         base_remote_version: None,
         current_remote_version: None,
     }
@@ -539,8 +618,8 @@ mod tests {
 
         assert_eq!(entry.local_root, Some(local_root.clone()));
 
-        let marker = std::fs::read(local_root.join(".section").join("root.json"))
-            .expect("read root marker");
+        let marker =
+            std::fs::read(local_root.join(".section").join("root.json")).expect("read root marker");
         let marker: RootDiscoveryMarker =
             serde_json::from_slice(&marker).expect("parse root marker");
         assert_eq!(marker.source_id, "store-only");
@@ -576,12 +655,14 @@ mod tests {
             .upsert_path_sync_state(&PathSyncStateRecord {
                 source_name: "store-only".to_string(),
                 path: "notes/todo.txt".to_string(),
+                entry_kind: "file".to_string(),
                 public_state: "conflict".to_string(),
                 local_present: true,
                 dirty_local: true,
                 dirty_remote: true,
                 pinned: false,
                 stale: true,
+                last_local_version: Some("l1".to_string()),
                 base_remote_version: Some("v1".to_string()),
                 current_remote_version: Some("v2".to_string()),
             })

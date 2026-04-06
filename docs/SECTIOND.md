@@ -40,11 +40,10 @@ Control-plane clients should expose:
 
 - source add / remove / list
 - source bind-local-root / unbind-local-root
-- source sync / source status
+- source sync
 - watch / event subscribe
-- path pull / pin / inspect / compare / resolve / repair
+- path inspect / compare / resolve
 - status / diagnostics
-- refresh / repair / health checks
 - config / bootstrap / preflight
 
 Common control-plane entry points should accept local paths directly and perform `.section/root.json` discovery internally.
@@ -66,16 +65,3 @@ The runtime boundary is:
 3. build routing and runtime state
 4. expose that state to control-plane clients
 5. emit state-change events
-
-## Active Mapping
-
-- `#19`
-  - source/path sync contract and non-goals
-- `#22`
-  - sectiond as the source/path sync core
-- `#21`
-  - local-root binding and path detail state
-- `#20`
-  - bidirectional sync and conflict resolution
-- `#24`
-  - source/path control plane

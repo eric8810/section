@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use section_core::SectionConfig;
 use section_provider::ProviderStore;
 use std::path::PathBuf;
@@ -34,6 +34,17 @@ enum Commands {
     Path {
         #[command(subcommand)]
         action: PathAction,
+    },
+    /// Subscribe to source/path state-change events from a local path
+    Watch {
+        /// Local filesystem path or bound root
+        path: PathBuf,
+        /// Exit after printing currently available events
+        #[arg(long)]
+        once: bool,
+        /// Poll interval while following
+        #[arg(long, default_value_t = 250)]
+        interval_ms: u64,
     },
     /// List files
     Ls {
@@ -127,6 +138,17 @@ pub enum SourceAction {
         /// Source name
         name: String,
     },
+    /// Run source/path sync for a bound source
+    Sync {
+        /// Source name
+        name: String,
+        /// Keep syncing in a loop
+        #[arg(long)]
+        watch: bool,
+        /// Poll interval in seconds while watching
+        #[arg(long, default_value_t = 2)]
+        interval_secs: u64,
+    },
     /// Remove a data source
     Remove {
         /// Source name
@@ -143,6 +165,25 @@ pub enum PathAction {
         /// Local filesystem path
         path: PathBuf,
     },
+    /// Compare local truth against remote truth for a local path
+    Compare {
+        /// Local filesystem path
+        path: PathBuf,
+    },
+    /// Resolve a conflicted path
+    Resolve {
+        /// Local filesystem path
+        path: PathBuf,
+        /// Resolution strategy
+        #[arg(long, value_enum)]
+        strategy: ResolveStrategyArg,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ResolveStrategyArg {
+    UseLocal,
+    UseRemote,
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {
@@ -163,6 +204,11 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Source { action } => cmd::source::run(cli.config.as_deref(), action, json),
         Commands::Path { action } => cmd::path::run(cli.config.as_deref(), action, json),
+        Commands::Watch {
+            path,
+            once,
+            interval_ms,
+        } => cmd::watch::run(cli.config.as_deref(), &path, once, interval_ms, json),
         Commands::Ls { path, long } => {
             let (config, store) = load_config_and_store(cli.config.as_deref())?;
             cmd::file::ls(&config, &store, path.as_deref(), json, long)

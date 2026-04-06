@@ -4,6 +4,8 @@ use sectiond::SectiondControlPlane;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 /// Mask sensitive option values for display.
 ///
@@ -98,6 +100,31 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
                 println!("Source '{name}' local root removed.");
             }
         }
+        SourceAction::Sync {
+            name,
+            watch,
+            interval_secs,
+        } => loop {
+            let result = control_plane.source_sync(&name)?;
+            if json_mode {
+                println!("{}", serde_json::to_string(&result)?);
+            } else {
+                println!(
+                    "Source '{name}' synced. local_root={}, pulled={}, pushed={}, conflicts={}, events={}",
+                    result.local_root.display(),
+                    result.pulled,
+                    result.pushed,
+                    result.conflicts,
+                    result.events_emitted,
+                );
+            }
+
+            if !watch {
+                break;
+            }
+
+            thread::sleep(Duration::from_secs(interval_secs));
+        },
         SourceAction::Remove { name } => {
             control_plane.source_remove(&name)?;
             if json_mode {

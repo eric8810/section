@@ -22,13 +22,24 @@ Section's active product model is:
 - [docs/SECTIOND.md](docs/SECTIOND.md)
 - [docs/PLAN.md](docs/PLAN.md)
 
-## Active Workstreams
+## Current Implementation
 
-- `#19` source/path sync contract and MVP non-goals
-- `#22` sectiond as the source/path sync core
-- `#21` source local-root binding and path detail state
-- `#20` bidirectional sync and conflict resolution
-- `#24` source/path control plane
+The current repo already includes:
+
+- source registry persisted in the provider store
+- source to local-root binding
+- `.section/root.json` local discovery markers
+- source/path sync state persistence
+- source/path event persistence
+- bidirectional source sync with stale-overwrite conflict detection
+- local-path-first control-plane commands:
+  - `section source bind`
+  - `section source unbind`
+  - `section source sync`
+  - `section path inspect`
+  - `section path compare`
+  - `section path resolve`
+  - `section watch`
 
 ## Repository Focus
 

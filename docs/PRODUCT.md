@@ -141,10 +141,10 @@ The preferred agent flow is:
 
 Common control-plane entry points should accept local paths directly:
 
-- `section watch ./ --jsonl`
-- `section path inspect ./some/local/file --json`
-- `section path compare ./some/local/file --json`
-- `section path resolve ./some/local/file --strategy use-local`
+- `section --json watch ./`
+- `section --json path inspect ./some/local/file`
+- `section --json path compare ./some/local/file`
+- `section --json path resolve ./some/local/file --strategy use-local`
 
 ## MVP
 
