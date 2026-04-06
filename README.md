@@ -2,6 +2,9 @@
 
 Cross-platform source/path sync collaboration layer for humans and agents, built on [Apache OpenDAL](https://github.com/apache/opendal).
 
+![Uploading Gemini_Generated_Image_4x0b3z4x0b3z4x0b.png…]()
+
+
 ## Active Model
 
 Section's active product model is:
