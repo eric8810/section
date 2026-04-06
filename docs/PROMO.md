@@ -4,11 +4,11 @@
 
 ### One-line definition
 
-Section turns remote sources into a shared local working tree for humans and agents.
+Section gives you and your agents one shared local folder backed by remote storage.
 
 ### Short version
 
-Bind a source. Sync it into a local directory. Work there normally. Use the control plane only for sync truth.
+Connect remote storage, work in one local folder, and surface sync truth only when it matters.
 
 ### Who it is for
 
@@ -24,21 +24,21 @@ Most tools make you choose between:
 - mount-first complexity
 - or sync tools that hide state until something goes wrong
 
-Section’s story is simpler:
+Section’s outward story should be simpler:
 
-- keep `source/path` as the model
-- keep the local tree as the work surface
-- keep sync truth explicit
-- keep conflict resolution deliberate
+- connect remote storage
+- work in one familiar local folder
+- keep humans and agents in the same place
+- surface sync issues clearly when they need attention
 
 ## Three Core Messages
 
-1. **One local tree**
-   - humans and agents work against the same local paths
-2. **Truthful sync state**
-   - `ready / syncing / conflict / error` is explicit instead of hidden
-3. **Agent-ready control plane**
-   - `watch`, `inspect`, `compare`, and `resolve` are built for automation
+1. **One shared local folder**
+   - humans and agents work in the same place
+2. **Remote storage without remote-only workflows**
+   - the working surface stays local and familiar
+3. **Clear sync when it matters**
+   - Section surfaces state and conflicts instead of hiding them
 
 ## Landing Page Draft
 
@@ -50,7 +50,7 @@ Headline:
 
 Subheadline:
 
-> Section turns remote sources into a truthful local work surface with explicit sync state, event-driven watch, and deliberate conflict resolution.
+> Connect remote storage, work in one local folder, and keep sync clear for both humans and agents.
 
 Primary CTA:
 
@@ -62,14 +62,14 @@ Secondary CTA:
 
 ### Supporting bullets
 
-- Bind remote sources to local directories
-- Keep daily work in normal local paths
-- Subscribe once to sync events instead of polling
-- Compare and resolve by local path when state matters
+- Connect remote storage to a local folder
+- Keep daily work in Finder, terminal, and editors
+- Let humans and agents work against the same files
+- Surface sync issues clearly instead of hiding them
 
 ### Product blurb
 
-Section is a cross-platform `source/path` sync collaboration layer built on Apache OpenDAL. It is designed for workflows where humans, shells, editors, and agents need to operate on the same local tree without giving up truthful sync visibility.
+Section is a cross-platform collaboration layer that connects remote storage to a shared local folder for humans and agents. It is designed for workflows where daily work should stay local and familiar, while sync state remains explicit when needed.
 
 ## Demo Story
 
