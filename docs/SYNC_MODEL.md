@@ -2,43 +2,33 @@
 
 ## Purpose
 
-This document defines the new product mainline for Section after the pivot away from mount-first delivery.
-
-The mainline question is now:
-
-> What does Section guarantee when it exposes sources and paths with truthful sync and conflict state?
+This document defines the active Section sync contract.
 
 ## Core Promise
 
-Section guarantees a **truthful source/path model**, not a cross-platform POSIX illusion.
+Section guarantees a truthful source/path sync model.
 
 That means:
 
-- sources remain the primary configured objects
-- paths remain the primary content objects
-- files and directories can be synced into a local directory
+- sources remain the configured objects
+- paths remain the content objects
+- files and directories sync into a local directory
 - local and remote changes can be reconciled
-- user-facing state stays simple and truthful
-
-It does **not** mean:
-
-- all platforms have identical host-native execution behavior
-- full POSIX metadata round-trips across all backends and OSes
-- every object type is preserved in MVP
+- state remains simple and truthful
 
 ## Source Model
 
-Each source should define:
+Each source defines:
 
 - backend/provider identity
 - remote root
 - optional local root
 - source health
-- source sync mode / policy
+- source sync policy
 
-## Path Object Model
+## Path Model
 
-MVP-supported object classes:
+MVP object classes:
 
 - regular files
 - directories
@@ -50,31 +40,22 @@ Deferred object classes:
 - device files
 - sockets
 - FIFOs
-- complex xattr-heavy objects
+- xattr-heavy objects
 
 ## State Model
 
-### Public Path State
+### Public state
 
-Each path should expose only:
-
-- `ready`
-- `syncing`
-- `conflict`
-- `error`
-
-### Public Source State
-
-Each source should expose only:
+Each source and path exposes:
 
 - `ready`
 - `syncing`
 - `conflict`
 - `error`
 
-### Detail Fields
+### Detail fields
 
-The following should stay out of the main user-facing state model and only appear in details / diagnostics / machine-readable output:
+Detail output may include:
 
 - `local_present`
 - `dirty_local`
@@ -86,7 +67,7 @@ The following should stay out of the main user-facing state model and only appea
 
 ## Metadata Policy
 
-MVP should preserve:
+MVP preserves:
 
 - path
 - type
@@ -94,161 +75,92 @@ MVP should preserve:
 - modified time where practical
 - content hash/version where practical
 
-MVP should not promise strict preservation of:
+MVP does not promise strict preservation for:
 
 - uid/gid
 - owner/group
 - ACL
-- execute bit across all platforms
+- execute bit across platforms
 - xattr
 
-If some of these are present on a specific platform/backend combination, they are best-effort enhancements, not the primary contract.
+## Local Presence
 
-## Local Presence Model
-
-Section still needs internal detail for:
+Section tracks:
 
 - source local-root binding
 - local file presence
-- pinned local content
-- evictable local content
-- stale local content awaiting refresh
+- pinned content
+- evictable content
+- stale local content
 
-But these should not become the primary user-facing state names.
+These remain detail fields, not primary state names.
 
 ## Conflict Model
 
-Conflict is not an edge case; it is a first-class source/path state.
+Conflict means stale-overwrite protection.
 
-Section should define:
+In MVP:
 
-- what counts as a stale overwrite attempt
-- how conflict surfaces to user and agent
-- what repair actions exist
+- a local upload based on stale remote state enters `conflict`
+- sync for that path pauses
+- the local file is preserved
+- the current remote version is not overwritten automatically
 
-### MVP Conflict Policy
-
-MVP should use explicit resolution, not auto-merge or version branches.
-
-In MVP, `conflict` means one thing:
-
-- local upload is based on an older remote version, and Section refuses a blind overwrite
-
-When a conflict is detected:
-
-- the path state becomes `conflict`
-- automatic sync for that path stops
-- the local current file is preserved
-- the remote current version is not overwritten automatically
-
-The allowed resolution actions are:
+Resolution actions are:
 
 - `use-local`
 - `use-remote`
 
-If a user wants to merge manually in an editor, that still ends as `use-local` after the merged local file is ready.
+## Control Plane Surface
 
-After an explicit resolution, the path can return to normal sync.
+The local file tree is the data plane.
 
-## Observation and Resolution Surface
-
-The local file tree is the data plane. It is not the full sync-control surface.
-
-A normal editor or shell only sees:
-
-- local file content
-- normal filesystem metadata
-
-It does not reliably know:
-
-- current sync state
-- current remote version
-- whether the local file is based on stale remote state
-- how to choose `use-local` or `use-remote`
-
-That information must come from the control plane.
-
-At minimum, the control plane should expose:
+The control plane exposes:
 
 - `watch`
   - source/path state-change events
-  - a long-lived notification surface so agents do not poll every file
 - `path inspect`
   - public state
   - detail fields
   - `base_remote_version`
   - `current_remote_version`
 - `path compare`
-  - whether local is based on current remote
-  - local/remote compare references or snapshot information
+  - local vs current remote truth
 - `path resolve --strategy use-local|use-remote`
-  - explicit stale-overwrite resolution
+  - explicit conflict resolution
 
-So the contract is:
+## Local Discovery
 
-- ordinary apps work against local files
-- Section-aware clients query and control sync state through the control plane
-
-For normal agent ergonomics, these control-plane entry points should accept a local path inside a bound root, not force the caller to manually reconstruct `source/path`.
-
-For normal agent notification semantics, the preferred model is subscribe-then-inspect, not poll-then-guess.
-
-## Local Discovery Entry
-
-If a bound local root has no local discovery entry, agents cannot reliably know they are inside a Section-managed tree.
-
-So each bound local root should contain one lightweight marker:
+Each bound local root contains:
 
 - `.section/root.json`
 
-Its purpose is only discovery, not full sync-state storage.
-
-At minimum it should identify:
+It exists only for discovery and minimally identifies:
 
 - `source_id`
 - `local_root`
-- control-plane endpoint for `sectiond`
+- control-plane endpoint
 
-The discovery algorithm is:
+Preferred flow:
 
-1. start from the current path
-2. walk up parent directories
-3. stop when `.section/root.json` is found
-4. treat that directory as the bound local root
-5. use the marker to query the control plane for sync truth
+1. subscribe once with `watch`
+2. let the client discover `.section/root.json` internally
+3. react to events
+4. call `inspect` / `compare` only when needed
+5. call `resolve` when action is required
 
-This keeps the split clean:
-
-- local files remain normal files
-- discovery is local and cheap
-- sync truth still comes from the control plane
-
-The preferred call flow is:
-
-1. agent subscribes once via `watch` on a local path or bound root
-2. the client discovers `.section/root.json` internally
-3. an event indicates which source/path changed state
-4. agent calls `path inspect` / `path compare` only when needed
-5. agent calls `path resolve` if explicit action is required
+Common control-plane entry points should accept local paths directly.
 
 ## Execution Boundary
 
 Execution is outside the current project scope.
-
-The current project promises only:
-
-- public state visibility
-- local presence detail when needed
-- clear local vs remote state
-- truthful source/path state
 
 ## User-Facing Truth
 
 The product must be honest about:
 
 - which paths are `ready / syncing / conflict / error`
-- which files are already local when users need that detail
+- which sources are `ready / syncing / conflict / error`
+- which files are already local when detail is requested
 - which files are dirty when diagnostics require it
 - which files are conflicted
-- which sources are `ready / syncing / conflict / error`
-- which objects fall outside MVP fidelity

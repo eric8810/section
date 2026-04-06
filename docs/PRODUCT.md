@@ -1,263 +1,158 @@
 # Section Product Model
 
-## 一句话定义
+## One-Line Definition
 
-Section 是一个**跨平台 source/path sync 协作层**：
+Section is a cross-platform `source/path` sync collaboration layer.
 
-- 保持 `source/path` 作为主 mental model
-- 把任意后端介质同步到本地目录
-- 让人类、agent、shell、editor 对着同一份本地 path 工作
-- 不把“统一宿主机 POSIX 执行语义”当成主产品承诺
+## Product Promise
 
-## 核心产品判断
+Section promises:
 
-这次 pivot 的关键不是“哪种文件系统技术更纯粹”，而是：
+- `source/path` stays the primary model
+- a source can bind to a local directory
+- regular files and directories sync into that local tree
+- humans and agents work against the same local paths
+- state is visible and controllable
+- public state stays at `ready / syncing / conflict / error`
 
-- 普通用户很难可靠使用 `FUSE` 作为默认入口
-- 但是人类和 agent 仍然需要在同一份本地目录里协作
-- 新路线不该为了 sync 再发明一个额外的顶层对象
+Section does not promise:
 
-所以主线改成：
+- identical host-native execution semantics across platforms
+- strict round-trip preservation for every POSIX metadata field
+- support for every filesystem object type in MVP
 
-1. **source/path + sync state 是主线**
-2. **execution 不是当前项目范围**
+## Access Surfaces
 
-## 产品承诺
+| Surface | Role |
+|--------|------|
+| Local file tree | daily read/write surface for humans, editors, shells, and agents |
+| Control plane | source/path status, compare, resolve, sync, and diagnostics |
+| Runtime layer | execution environment outside the current project scope |
 
-Section 主线应该承诺的是：
+## Source/Path Contract
 
-- 用户面对的仍然是 `source/path`
-- 某个 source 可以绑定一个本地目录
-- 文件内容、目录结构、同步状态、冲突状态是可见和可控的
-- 人类和 agent 都在同一份本地 path 上工作
-- 对外状态保持简单：`ready / syncing / conflict / error`
-
-Section 主线不承诺的是：
-
-- macOS / Linux / Windows 的原生执行语义完全一致
-- 完整 POSIX metadata 在跨平台间严格 round-trip
-- 第一版就提供任意挂载点、原生 mount、零差异文件系统体验
-
-## 用户与交互面
-
-| 用户 / 进程 | 主访问方式 | 说明 |
-|-------------|------------|------|
-| 人类用户 | 本地 path | Finder / Explorer / shell / editor |
-| AI Agent | 同一份本地 path | 不走专有 API 作为主路径 |
-| CLI / GUI / API | 控制面 | 管 source/path、状态、同步、冲突、pin/pull |
-| Runtime | 执行面 | 解释器 / 容器 / WSL / remote runner |
-
-## 产品分层
-
-### Source/Path Plane
-
-这是主工作面：
-
-- `source/path`
-- source 绑定到本地目录
-- 普通文件 / 目录工作流
-- agent 与人类共享
-- sync / local-ready / conflict 都围绕 source 与 path 状态发生
-
-### Control Plane
-
-这是管理面：
-
-- source 管理
-- source 绑定本地目录
-- status / health / diagnostics
-- sync / pull / pin / repair
-- 配置、认证、安装引导
-
-这里还必须承担一件事：
-
-- 提供普通文件系统本体无法表达的 sync / version / compare / resolve 能力
-
-### Execution Non-Goal
-
-当前项目只需要把边界说清楚：
-
-- Section 不承诺统一宿主机执行语义
-- 当前项目不定义 scripts / agents 的执行方案
-- 当前项目只保证 source/path sync 与冲突处理
-
-## Source/Path Sync Contract
-
-主线 MVP 应先定义清楚：
-
-### 保证的对象
+### Supported objects
 
 - regular files
 - directories
-- 内容同步
-- 基础状态可见：
-  - ready / syncing / conflict / error
 
-### 对外与对内的边界
+### Public state
 
-对外主状态只保留：
+Each source and path exposes only:
 
 - `ready`
 - `syncing`
 - `conflict`
 - `error`
 
-下面这些不应成为用户主心智，只作为详情字段或内部实现：
+### Detail fields
+
+The following remain detail fields rather than primary state:
 
 - `local_present`
 - `dirty_local`
 - `dirty_remote`
 - `pinned`
 - `stale`
+- health reason
 - error reason
 
-### 暂不保证的对象
+### Metadata scope
 
-- 完整权限 / owner / ACL 跨平台同步
-- 完整 `xattr`
-- 完整 `symlink / hardlink`
-- 设备文件、socket、FIFO 等复杂对象
+MVP preserves:
 
-### 核心产品动作
+- path
+- type
+- size
+- modified time where practical
+- content hash/version where practical
 
-- attach source
-- bind local root
-- pull / pin
-- observe local changes
-- sync remote changes
-- resolve conflicts explicitly
+MVP does not promise strict preservation for:
 
-### 冲突解决方案
+- uid/gid
+- owner/group
+- ACL
+- execute bit across all platforms
+- xattr
+- symlink / hardlink
+- device files / sockets / FIFOs
 
-MVP 不做自动 merge，也不做版本分叉模型。
+## Conflict Model
 
-这里的 `conflict` 只表示一件事：
+MVP conflict is stale-overwrite protection.
 
-- 本地上传基于旧的 remote 状态，Section 拒绝做 blind overwrite
+`conflict` means:
 
-发生冲突时：
+- a local upload is based on stale remote state
+- Section refuses a blind overwrite
 
-- path 状态进入 `conflict`
-- 该 path 的自动同步暂停
-- 本地当前版本保留不动
-- 当前 remote 版本不会被自动覆盖
+When conflict happens:
 
-用户只允许 2 种解决动作：
+- the path enters `conflict`
+- sync for that path pauses
+- the local file is preserved
+- the current remote version is not overwritten automatically
+
+Resolution actions are:
 
 - `use-local`
 - `use-remote`
 
-如果用户想手工 merge，也是在本地编辑完成后，最终再执行一次 `use-local`。
+If a user merges manually in an editor, the final action is still `use-local`.
 
-只有显式 resolve 后，这个 path 才恢复正常同步。
+## Control Plane
 
-### 应用如何得知状态与版本
+The control plane exists because the local file itself cannot reliably express sync truth.
 
-结论很直接：
+Minimum control-plane surface:
 
-- 普通应用只会看到“文件已经在本地”
-- 普通 POSIX 文件本体不能可靠表达 sync state / remote version / resolve action
-- 这些信息必须通过 Section control plane 获取
-
-所以当前产品应明确区分两层：
-
-- data plane：本地文件树，供 editor / shell / agent 正常读写
-- control plane：供 Section-aware CLI / GUI / API 查询状态、版本、对比和 resolve
-
-最小 control-plane 能力应是：
-
-- `path inspect`
-  - 返回 `ready / syncing / conflict / error`
-  - 返回 detail fields
-  - 返回 `base_remote_version`
-  - 返回 `current_remote_version`
 - `watch`
-  - 以事件流方式通知 path/source 状态变化
-  - 让 agent 不需要不停轮询 `inspect`
+  - event stream for source/path state changes
+- `path inspect`
+  - public state
+  - detail fields
+  - `base_remote_version`
+  - `current_remote_version`
 - `path compare`
-  - 告诉调用方本地内容是否基于当前 remote
-  - 暴露 local / remote 的可对比引用或快照信息
+  - whether local is based on current remote
+  - local/remote compare references
 - `path resolve --strategy use-local|use-remote`
-  - 显式完成冲突取舍
+  - explicit conflict resolution
 
-也就是说：
+## Local Discovery
 
-- 应用本身不会“自动知道”
-- Section-aware 客户端必须主动调用 control plane
-
-### Agent 如何发现这是 Section 目录
-
-如果本地目录里完全没有入口，agent 就无从发现。
-
-所以每个 bound local root 都应该放一个极轻量的本地 marker：
+Each bound local root should contain:
 
 - `.section/root.json`
 
-它不是同步状态数据库，只承担 discovery 作用，至少包含：
+It exists only for discovery and should minimally identify:
 
 - `source_id`
 - `local_root`
 - `sectiond` control-plane endpoint
 
-agent 的发现流程应是：
+The preferred agent flow is:
 
-1. 从当前工作路径开始向上找
-2. 找到 `.section/root.json`
-3. 确认当前路径属于某个 Section-bound local root
-4. 再调用 `path inspect / compare / resolve`
+1. subscribe once with `watch` from a local path or bound root
+2. let the client discover `.section/root.json` internally
+3. react to state-change events
+4. call `inspect` / `compare` only when needed
+5. call `resolve` when action is required
 
-这样区分很清楚：
-
-- 本地文件树负责日常读写
-- root marker 负责 discovery
-- control plane 负责 sync truth
-
-但对 agent 的常用入口，不该要求它手动解析 marker 再自己拼 source/path。
-
-更合理的 agent UX 应该是：
+Common control-plane entry points should accept local paths directly:
 
 - `section watch ./ --jsonl`
 - `section path inspect ./some/local/file --json`
 - `section path compare ./some/local/file --json`
 - `section path resolve ./some/local/file --strategy use-local`
 
-也就是说：
+## MVP
 
-- agent 先订阅一次当前 root 的事件流
-- 命令直接接受本地路径
-- CLI/GUI/API 在内部完成：
-  - 向上查找 `.section/root.json`
-  - 识别 source 与 local root
-  - 把本地路径映射成真实的 source/path
-  - 返回 sync truth 或执行 resolve
+MVP should deliver:
 
-典型流程应该是：
-
-1. `section watch ./ --jsonl`
-2. 收到某个 path 进入 `conflict` / `error` / `syncing`
-3. 再对那个具体本地路径调用 `inspect` / `compare`
-4. 必要时执行 `resolve`
-
-这样 agent 的正常使用流程才不会太笨重。
-
-## 平台策略
-
-| 能力 | Linux | macOS | Windows | 主线判断 |
-|------|-------|-------|---------|----------|
-| core/provider/CLI | 支持 | 支持 | 目标支持 | 必须持续 green |
-| source/path sync | 主线 | 主线 | 主线 | 产品默认入口 |
-| execution | runtime 负责 | runtime 负责 | runtime 负责 | 不由 FS 层硬统一 |
-
-## MVP 定义（pivot 后）
-
-新的 MVP 应该是：
-
-1. 能连接一个或多个 source
-2. 能为 source 绑定本地目录，并把 regular files / directories 可靠同步到本地
-3. 本地修改与远端修改都能被收敛
-4. source/path 级别的 `ready / syncing / conflict / error` 状态可见
-5. agent 与人类都在同一份本地 path 工作
-6. 当前项目不处理 execution 方案，只明确它不在承诺范围内
-
-
-它们应该建立在稳定的 source/path sync contract 之上，而不是反过来定义产品。
+1. connect one or more sources
+2. bind a source to a local directory
+3. sync regular files and directories into that local tree
+4. converge local and remote changes
+5. expose `ready / syncing / conflict / error`
+6. expose control-plane status / compare / resolve / watch surfaces

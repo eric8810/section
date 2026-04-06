@@ -1,121 +1,81 @@
 # Sectiond Boundary
 
-## Why this doc exists
+## Purpose
 
-`docs/ARCHITECTURE.md` explains the product direction. This document makes that direction operational by defining the first concrete contract for `sectiond`.
+This document defines the active ownership boundary for `sectiond`.
 
-The short version:
+## Invariants
 
-- `source/path` is the primary working surface
-- `CLI / API` are the control plane
-- `sectiond` is the future single local runtime center
+These stay true:
 
-This repo is still in transition, so the goal of this document is not to pretend the daemon already exists. The goal is to define what will move into it and what must stay outside it.
+1. `source/path` remains the primary model
+2. sync and conflict live on sources and paths
+3. public state stays at `ready / syncing / conflict / error`
+4. control-plane clients consume one authoritative `sectiond` state model
 
-## Product invariant
-
-Section is only on the right path if these things stay true:
-
-1. `source/path` stays the only primary product mental model.
-2. Sync and conflict live on sources and paths, not in a separate top-level abstraction.
-3. Public state stays simple: `ready / syncing / conflict / error`.
-4. CLI/API must consume the same `sectiond`-owned source/path state model.
-
-## sectiond ownership
-
-The long-lived local runtime should own the shared semantics that must not diverge between clients.
-
-### sectiond owns
+## sectiond Owns
 
 - source registry
 - source local-root bindings
-- bound-root discovery marker metadata
-- operator lifecycle
+- `.section/root.json` marker metadata
 - routing
 - source/path public state
 - source/path detail state
 - source/path event stream
 - metadata/content cache
-- refresh/invalidation
-- permissions/conflict semantics
+- refresh / invalidation
+- conflict semantics
 - health and diagnostics
-- runtime sessions / lifecycle state
+- runtime lifecycle state
 
-### sectiond does not own
+## sectiond Does Not Own
 
-- parsing human CLI flags
-- rendering terminal output
-- GUI-specific presentation
+- human CLI flag parsing
+- terminal rendering
+- GUI presentation
 
-Those remain client responsibilities.
+## Control Plane Surface
 
-## Surface split
+Control-plane clients should expose:
 
-### Control plane
-
-These are client-facing management actions:
-
-- source add/remove/list
+- source add / remove / list
 - source bind-local-root / unbind-local-root
 - source sync / source status
 - watch / event subscribe
 - path pull / pin / inspect / compare / resolve / repair
 - status / diagnostics
 - refresh / repair / health checks
-- config/bootstrap/preflight
+- config / bootstrap / preflight
 
-Binding a local root should also materialize a lightweight discovery marker so agents starting from an arbitrary path can discover the corresponding Section root before calling the control plane.
+Common control-plane entry points should accept local paths directly and perform `.section/root.json` discovery internally.
 
-In the common case, agents should not parse that marker themselves. Control-plane clients should accept a local path, perform discovery internally, and then resolve the path onto the authoritative source/path state owned by `sectiond`.
+## Data Plane
 
-Today these still surface through `section-cli`, but the route-map direction is explicit: those commands should enter through `sectiond`, not keep accumulating parallel runtime logic in the CLI process.
+The data plane is the local bound tree used for:
 
-### Data plane
+- traversal
+- list / read / write / delete / rename
+- shared human/agent editing
 
-These are the semantics that users depend on:
+## Runtime Boundary
 
-- path traversal
-- list/read/write/delete/rename
-- cache-backed visibility
-- source/path state visibility
-- refresh visibility
-- shell/script/editor access against the local tree when configured
-
-
-## Runtime boundary
-
-The first practical boundary is:
+The runtime boundary is:
 
 1. load local config
-2. build a merged source registry
-3. build routing/runtime state once
-4. expose it to control-plane and data-plane clients
+2. load source registry
+3. build routing and runtime state
+4. expose that state to control-plane clients
+5. emit state-change events
 
-That is why the repo now contains a `crates/sectiond` workspace member. It is not the final daemon yet. It is the first concrete runtime boundary for:
-
-- merged source loading
-- runtime snapshotting
-- explicit contract ownership
-
-## Transitional truth
-
-Right now the runtime boundary still has transitional behavior:
-
-- source definitions can still come from both config and `ProviderStore`
-- when the same source exists in both places, config-file entries still win
-- `sectiond` is a skeleton crate, not the final daemon process
-
-This is intentional and explicit. The next pivot issue (`#22`) is where these semantics should consolidate into a single authoritative local state machine.
-
-## Immediate follow-up mapping
+## Active Mapping
 
 - `#19`
-  - define the source/path sync contract and non-goals
+  - source/path sync contract and non-goals
 - `#22`
-  - move shared source/path sync semantics into `sectiond`
+  - sectiond as the source/path sync core
 - `#21`
-  - add source local-root binding and path detail state
+  - local-root binding and path detail state
 - `#20`
-  - add bidirectional sync and conflict resolution
+  - bidirectional sync and conflict resolution
 - `#24`
-  - move CLI toward source/path control-plane behavior
+  - source/path control plane
