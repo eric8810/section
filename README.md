@@ -28,6 +28,7 @@ Section's active product model is:
 - [docs/QUICKSTART.md](docs/QUICKSTART.md)
 - [docs/USER_MANUAL.md](docs/USER_MANUAL.md)
 - [docs/PROMO.md](docs/PROMO.md)
+- [docs/release/README.md](docs/release/README.md)
 
 ## Current Implementation
 

@@ -1,0 +1,24 @@
+changelog:
+  categories:
+    - title: Core Sync Engine
+      labels:
+        - core
+        - sync
+        - sectiond
+    - title: CLI and Control Plane
+      labels:
+        - cli
+        - control-plane
+    - title: Docs and Onboarding
+      labels:
+        - docs
+        - onboarding
+    - title: Distribution and Launch
+      labels:
+        - distribution
+        - launch
+  exclude:
+    labels:
+      - chore
+      - ci
+      - test
