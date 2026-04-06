@@ -2,7 +2,8 @@
 
 Cross-platform source/path sync collaboration layer for humans and agents, built on [Apache OpenDAL](https://github.com/apache/opendal).
 
-![Uploading Gemini_Generated_Image_4x0b3z4x0b3z4x0b.png…]()
+<img width="1024" height="1024" alt="Gemini_Generated_Image_4x0b3z4x0b3z4x0b" src="https://github.com/user-attachments/assets/f137d183-c005-43a8-89d8-89687fd06bbf" />
+
 
 
 ## Active Model
