@@ -170,6 +170,9 @@ That information must come from the control plane.
 
 At minimum, the control plane should expose:
 
+- `watch`
+  - source/path state-change events
+  - a long-lived notification surface so agents do not poll every file
 - `path inspect`
   - public state
   - detail fields
@@ -187,6 +190,8 @@ So the contract is:
 - Section-aware clients query and control sync state through the control plane
 
 For normal agent ergonomics, these control-plane entry points should accept a local path inside a bound root, not force the caller to manually reconstruct `source/path`.
+
+For normal agent notification semantics, the preferred model is subscribe-then-inspect, not poll-then-guess.
 
 ## Local Discovery Entry
 
@@ -220,10 +225,11 @@ This keeps the split clean:
 
 The preferred call flow is:
 
-1. agent passes a local path to `path inspect` / `path compare` / `path resolve`
+1. agent subscribes once via `watch` on a local path or bound root
 2. the client discovers `.section/root.json` internally
-3. the client resolves that local path to the real source/path binding
-4. the control plane returns sync truth or performs the requested action
+3. an event indicates which source/path changed state
+4. agent calls `path inspect` / `path compare` only when needed
+5. agent calls `path resolve` if explicit action is required
 
 ## Execution Boundary
 

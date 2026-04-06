@@ -34,6 +34,7 @@ The long-lived local runtime should own the shared semantics that must not diver
 - routing
 - source/path public state
 - source/path detail state
+- source/path event stream
 - metadata/content cache
 - refresh/invalidation
 - permissions/conflict semantics
@@ -57,6 +58,7 @@ These are client-facing management actions:
 - source add/remove/list
 - source bind-local-root / unbind-local-root
 - source sync / source status
+- watch / event subscribe
 - path pull / pin / inspect / compare / resolve / repair
 - status / diagnostics
 - refresh / repair / health checks

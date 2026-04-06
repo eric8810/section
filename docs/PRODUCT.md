@@ -171,6 +171,9 @@ MVP 不做自动 merge，也不做版本分叉模型。
   - 返回 detail fields
   - 返回 `base_remote_version`
   - 返回 `current_remote_version`
+- `watch`
+  - 以事件流方式通知 path/source 状态变化
+  - 让 agent 不需要不停轮询 `inspect`
 - `path compare`
   - 告诉调用方本地内容是否基于当前 remote
   - 暴露 local / remote 的可对比引用或快照信息
@@ -213,18 +216,27 @@ agent 的发现流程应是：
 
 更合理的 agent UX 应该是：
 
+- `section watch ./ --jsonl`
 - `section path inspect ./some/local/file --json`
 - `section path compare ./some/local/file --json`
 - `section path resolve ./some/local/file --strategy use-local`
 
 也就是说：
 
+- agent 先订阅一次当前 root 的事件流
 - 命令直接接受本地路径
 - CLI/GUI/API 在内部完成：
   - 向上查找 `.section/root.json`
   - 识别 source 与 local root
   - 把本地路径映射成真实的 source/path
   - 返回 sync truth 或执行 resolve
+
+典型流程应该是：
+
+1. `section watch ./ --jsonl`
+2. 收到某个 path 进入 `conflict` / `error` / `syncing`
+3. 再对那个具体本地路径调用 `inspect` / `compare`
+4. 必要时执行 `resolve`
 
 这样 agent 的正常使用流程才不会太笨重。
 

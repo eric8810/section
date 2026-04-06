@@ -111,6 +111,7 @@ Section 现在从 `FS-first mount product` pivot 到：
 产出：
 
 - source sync bind/status
+- local-path-aware watch / event subscribe
 - local-path-aware path inspect
 - local-path-aware path compare
 - local-path-aware path resolve
