@@ -56,6 +56,29 @@ Each archive must unpack to:
    npx --package @eric8810/section section --help
    ```
 
+## GitHub CI/CD
+
+The repo should carry two npm-related GitHub workflows:
+
+- `.github/workflows/ci.yml`
+  - syntax-check the npm shims
+  - run `npm pack --dry-run`
+- `.github/workflows/publish-npm.yml`
+  - trigger on GitHub Release publish or manual dispatch
+  - require `id-token: write`
+  - verify release tag matches `packaging/npm/package.json`
+  - verify the required binary archives already exist on that GitHub Release
+  - publish with `npm publish --access public --provenance`
+
+Before live publish, configure npm trusted publishing for workflow file:
+
+- `publish-npm.yml`
+
+Official references:
+
+- GitHub Actions npm publishing: <https://docs.github.com/en/actions/tutorials/publish-packages/publish-nodejs-packages>
+- npm trusted publishing: <https://docs.npmjs.com/trusted-publishers/>
+
 ## Practical Boundary
 
 This npm package is intentionally only a distribution layer.

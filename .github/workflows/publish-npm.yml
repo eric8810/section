@@ -1,0 +1,71 @@
+name: publish-npm
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to publish, for example v0.1.0-alpha.1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "RELEASE_TAG=${{ github.event.release.tag_name }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify package version matches tag
+        run: |
+          VERSION=$(node -p "require('./packaging/npm/package.json').version")
+          test "v$VERSION" = "$RELEASE_TAG"
+
+      - name: Verify required binary archives exist on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/releases/tags/$RELEASE_TAG --jq '.assets[].name' > release-assets.txt
+          VERSION="${RELEASE_TAG#v}"
+          for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            asset="section-${VERSION}-${target}.tar.gz"
+            grep -Fx "$asset" release-assets.txt >/dev/null
+          done
+
+      - name: Syntax check npm shims
+        run: |
+          node --check packaging/npm/bin/section.js
+          node --check packaging/npm/bin/sectiond.js
+          node --check packaging/npm/lib/runtime.js
+          node --check packaging/npm/scripts/postinstall.js
+
+      - name: npm pack dry run
+        working-directory: packaging/npm
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        working-directory: packaging/npm
+        run: npm publish --access public --provenance
