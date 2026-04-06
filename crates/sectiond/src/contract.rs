@@ -20,50 +20,46 @@ pub struct SectiondContract {
 impl Default for SectiondContract {
     fn default() -> Self {
         Self {
-            product_goal: "humans, agents, shell tools, and editors collaborate on the same mounted workspace".to_string(),
-            primary_surface: "filesystem-first shared workspace".to_string(),
+            product_goal: "humans and agents collaborate through truthful source/path sync into local bound directories".to_string(),
+            primary_surface: "source/path sync with local-root bindings".to_string(),
             control_plane: vec![
                 "source registry management".to_string(),
+                "source local-root binding management".to_string(),
+                "path inspect / compare / resolve".to_string(),
+                "watch / event subscription".to_string(),
                 "status, health, and diagnostics".to_string(),
-                "refresh and invalidation control".to_string(),
-                "configuration and install/preflight flows".to_string(),
-                "honest fallback workflows when mount is unavailable".to_string(),
             ],
             data_plane: vec![
-                "mounted namespace exposure".to_string(),
-                "path routing and operator access".to_string(),
-                "permission and conflict semantics".to_string(),
-                "cache-backed read/write/list behavior".to_string(),
-                "shell/editor/script execution against the mounted tree".to_string(),
+                "bound local directory trees".to_string(),
+                "local file and directory access".to_string(),
+                "source/path state reconciliation".to_string(),
+                "local/remote change ingestion".to_string(),
             ],
             ownership: vec![
                 ResponsibilityBoundary {
-                    responsibility: "source registry and operator lifecycle".to_string(),
+                    responsibility: "source registry, local-root bindings, and path state".to_string(),
                     owner: "sectiond".to_string(),
                 },
                 ResponsibilityBoundary {
-                    responsibility: "routing, cache, refresh, permissions, diagnostics".to_string(),
+                    responsibility: "event emission, sync scheduling, and diagnostics".to_string(),
                     owner: "sectiond".to_string(),
                 },
                 ResponsibilityBoundary {
-                    responsibility: "source add/remove/list, status, refresh control".to_string(),
+                    responsibility: "source/path control-plane commands".to_string(),
                     owner: "section-cli as a sectiond client".to_string(),
-                },
-                ResponsibilityBoundary {
-                    responsibility: "mounted namespace exposure".to_string(),
-                    owner: "platform mount adapters backed by sectiond".to_string(),
                 },
             ],
             lifecycle: vec![
                 "load runtime configuration".to_string(),
-                "materialize a single merged source registry".to_string(),
-                "expose control-plane and data-plane clients against one local state machine".to_string(),
-                "surface health and shutdown semantics from the same runtime center".to_string(),
+                "load source registry and local-root bindings".to_string(),
+                "build one authoritative source/path state machine".to_string(),
+                "serve control-plane clients against that shared state".to_string(),
+                "emit source/path state changes".to_string(),
             ],
             transition_notes: vec![
-                "the current repo is still pre-sectiond".to_string(),
-                "config-file sources still coexist with the provider store during the transition".to_string(),
-                "this crate is the first concrete boundary for the future daemon, not the final runtime".to_string(),
+                "the current repo is moving from helper-style commands toward sectiond-owned sync state".to_string(),
+                "sync ingestion and eventing are only partially implemented today".to_string(),
+                "this crate defines the active runtime boundary for the new route".to_string(),
             ],
         }
     }

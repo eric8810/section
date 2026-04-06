@@ -31,6 +31,7 @@ pub struct SourceSnapshot {
     pub metadata_ttl_secs: u64,
     pub content_ttl_secs: u64,
     pub origin: SourceOrigin,
+    pub local_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -48,6 +49,7 @@ pub struct SourceStatusSnapshot {
     pub name: String,
     pub provider: String,
     pub origin: SourceOrigin,
+    pub local_root: Option<PathBuf>,
     pub connected: bool,
 }
 
@@ -76,6 +78,11 @@ impl SectiondRuntime {
     pub fn from_config_and_store(config: &SectionConfig, store: &ProviderStore) -> Result<Self> {
         let file_sources = config.sources.clone();
         let store_sources = store.load_all()?;
+        let binding_map = store
+            .list_source_local_roots()?
+            .into_iter()
+            .map(|binding| (binding.source_name, binding.local_root))
+            .collect::<std::collections::HashMap<_, _>>();
 
         let mut merged = config.clone();
         for (name, source) in &store_sources {
@@ -92,6 +99,7 @@ impl SectiondRuntime {
                 .sources
                 .get(&name)
                 .expect("merged source should exist for every discovered name");
+            let local_root = binding_map.get(&name).cloned();
             let origin = match (
                 file_sources.contains_key(&name),
                 store_sources.contains_key(&name),
@@ -109,6 +117,7 @@ impl SectiondRuntime {
                 metadata_ttl_secs: source.cache.metadata_ttl_secs,
                 content_ttl_secs: source.cache.content_ttl_secs,
                 origin,
+                local_root,
             });
         }
 
@@ -165,6 +174,7 @@ impl SectiondRuntime {
                 name: source.name.clone(),
                 provider: source.provider.clone(),
                 origin: source.origin,
+                local_root: source.local_root.clone(),
                 connected,
             });
         }

@@ -5,7 +5,10 @@ pub mod permission;
 pub mod runtime;
 
 pub use contract::{ResponsibilityBoundary, SectiondContract};
-pub use control_plane::{RefreshResult, SectiondControlPlane, SourceRegistryEntry};
+pub use control_plane::{
+    PathDetailSnapshot, PathInspectSnapshot, RefreshResult, RootDiscoveryMarker,
+    SectiondControlPlane, SourceRegistryEntry,
+};
 pub use data_plane::SectiondDataPlane;
 pub use permission::{ensure_directory_write_allowed, ensure_open_allowed};
 pub use runtime::{

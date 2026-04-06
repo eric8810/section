@@ -58,12 +58,17 @@ fn inspect(config_path: Option<&std::path::Path>, json_mode: bool) -> Result<()>
     } else {
         for source in snapshot.sources {
             println!(
-                "    - {} (provider: {}, origin: {}, metadata_ttl_secs: {}, content_ttl_secs: {})",
+                "    - {} (provider: {}, origin: {}, metadata_ttl_secs: {}, content_ttl_secs: {}, local_root: {})",
                 source.name,
                 source.provider,
                 source.origin.as_str(),
                 source.metadata_ttl_secs,
-                source.content_ttl_secs
+                source.content_ttl_secs,
+                source
+                    .local_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "-".to_string()),
             );
         }
     }

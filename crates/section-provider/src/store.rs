@@ -3,7 +3,27 @@ use anyhow::Context;
 use rusqlite::Connection;
 use section_core::config::{CacheConfig, SourceConfig};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocalRootBinding {
+    pub source_name: String,
+    pub local_root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathSyncStateRecord {
+    pub source_name: String,
+    pub path: String,
+    pub public_state: String,
+    pub local_present: bool,
+    pub dirty_local: bool,
+    pub dirty_remote: bool,
+    pub pinned: bool,
+    pub stale: bool,
+    pub base_remote_version: Option<String>,
+    pub current_remote_version: Option<String>,
+}
 
 /// Persistent store for sources and their credentials.
 pub struct ProviderStore {
@@ -43,6 +63,23 @@ impl ProviderStore {
                 metadata_ttl_secs INTEGER NOT NULL DEFAULT 60,
                 content_ttl_secs INTEGER NOT NULL DEFAULT 300,
                 encrypted INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS source_local_roots (
+                source_name TEXT PRIMARY KEY,
+                local_root TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS path_sync_state (
+                source_name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                public_state TEXT NOT NULL DEFAULT 'ready',
+                local_present INTEGER NOT NULL DEFAULT 0,
+                dirty_local INTEGER NOT NULL DEFAULT 0,
+                dirty_remote INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                stale INTEGER NOT NULL DEFAULT 0,
+                base_remote_version TEXT,
+                current_remote_version TEXT,
+                PRIMARY KEY (source_name, path)
             );",
         )?;
 
@@ -121,7 +158,142 @@ impl ProviderStore {
     pub fn remove_source(&self, name: &str) -> anyhow::Result<()> {
         self.conn
             .execute("DELETE FROM sources WHERE name = ?1", [name])?;
+        self.conn.execute(
+            "DELETE FROM source_local_roots WHERE source_name = ?1",
+            [name],
+        )?;
+        self.conn
+            .execute("DELETE FROM path_sync_state WHERE source_name = ?1", [name])?;
         Ok(())
+    }
+
+    pub fn set_source_local_root(
+        &self,
+        source_name: &str,
+        local_root: &Path,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO source_local_roots (source_name, local_root)
+             VALUES (?1, ?2)",
+            rusqlite::params![source_name, local_root.to_string_lossy().as_ref()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_source_local_root(&self, source_name: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "DELETE FROM source_local_roots WHERE source_name = ?1",
+            [source_name],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_source_local_root(&self, source_name: &str) -> anyhow::Result<Option<PathBuf>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT local_root FROM source_local_roots WHERE source_name = ?1")?;
+        let row = stmt.query_row([source_name], |row| row.get::<_, String>(0));
+
+        match row {
+            Ok(local_root) => Ok(Some(PathBuf::from(local_root))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn list_source_local_roots(&self) -> anyhow::Result<Vec<SourceLocalRootBinding>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_name, local_root FROM source_local_roots ORDER BY source_name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SourceLocalRootBinding {
+                source_name: row.get(0)?,
+                local_root: PathBuf::from(row.get::<_, String>(1)?),
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn upsert_path_sync_state(&self, record: &PathSyncStateRecord) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO path_sync_state (
+                source_name,
+                path,
+                public_state,
+                local_present,
+                dirty_local,
+                dirty_remote,
+                pinned,
+                stale,
+                base_remote_version,
+                current_remote_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(source_name, path) DO UPDATE SET
+                public_state = excluded.public_state,
+                local_present = excluded.local_present,
+                dirty_local = excluded.dirty_local,
+                dirty_remote = excluded.dirty_remote,
+                pinned = excluded.pinned,
+                stale = excluded.stale,
+                base_remote_version = excluded.base_remote_version,
+                current_remote_version = excluded.current_remote_version",
+            rusqlite::params![
+                record.source_name,
+                record.path,
+                record.public_state,
+                i64::from(record.local_present),
+                i64::from(record.dirty_local),
+                i64::from(record.dirty_remote),
+                i64::from(record.pinned),
+                i64::from(record.stale),
+                record.base_remote_version,
+                record.current_remote_version,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_path_sync_state(
+        &self,
+        source_name: &str,
+        path: &str,
+    ) -> anyhow::Result<Option<PathSyncStateRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                source_name,
+                path,
+                public_state,
+                local_present,
+                dirty_local,
+                dirty_remote,
+                pinned,
+                stale,
+                base_remote_version,
+                current_remote_version
+             FROM path_sync_state
+             WHERE source_name = ?1 AND path = ?2",
+        )?;
+        let row = stmt.query_row(rusqlite::params![source_name, path], |row| {
+            Ok(PathSyncStateRecord {
+                source_name: row.get(0)?,
+                path: row.get(1)?,
+                public_state: row.get(2)?,
+                local_present: row.get::<_, i64>(3)? != 0,
+                dirty_local: row.get::<_, i64>(4)? != 0,
+                dirty_remote: row.get::<_, i64>(5)? != 0,
+                pinned: row.get::<_, i64>(6)? != 0,
+                stale: row.get::<_, i64>(7)? != 0,
+                base_remote_version: row.get(8)?,
+                current_remote_version: row.get(9)?,
+            })
+        });
+
+        match row {
+            Ok(record) => Ok(Some(record)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
     }
 
     pub fn list_sources(&self) -> anyhow::Result<Vec<(String, String, HashMap<String, String>)>> {
@@ -295,5 +467,68 @@ mod tests {
             .expect("migrated row");
         assert_eq!(encrypted, 1);
         assert_ne!(raw_options, r#"{"root":"/tmp/legacy"}"#);
+    }
+
+    #[test]
+    fn source_local_root_bindings_round_trip() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+        let local_root = temp_dir.path().join("bound");
+
+        store
+            .set_source_local_root("local", &local_root)
+            .expect("set local root");
+
+        assert_eq!(
+            store
+                .get_source_local_root("local")
+                .expect("get local root"),
+            Some(local_root.clone())
+        );
+
+        let bindings = store
+            .list_source_local_roots()
+            .expect("list source local roots");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].source_name, "local");
+        assert_eq!(bindings[0].local_root, local_root);
+
+        store
+            .remove_source_local_root("local")
+            .expect("remove local root");
+        assert_eq!(
+            store
+                .get_source_local_root("local")
+                .expect("get local root after remove"),
+            None
+        );
+    }
+
+    #[test]
+    fn path_sync_state_round_trips() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+        let record = PathSyncStateRecord {
+            source_name: "local".to_string(),
+            path: "nested/file.txt".to_string(),
+            public_state: "conflict".to_string(),
+            local_present: true,
+            dirty_local: true,
+            dirty_remote: false,
+            pinned: false,
+            stale: true,
+            base_remote_version: Some("v1".to_string()),
+            current_remote_version: Some("v2".to_string()),
+        };
+
+        store
+            .upsert_path_sync_state(&record)
+            .expect("upsert path sync state");
+
+        let loaded = store
+            .get_path_sync_state("local", "nested/file.txt")
+            .expect("get path sync state")
+            .expect("path sync state should exist");
+        assert_eq!(loaded, record);
     }
 }

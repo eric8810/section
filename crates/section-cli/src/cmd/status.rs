@@ -36,10 +36,15 @@ pub fn run(config_path: Option<&Path>, json_mode: bool) -> Result<()> {
             };
 
             println!(
-                "  {name:<16}(provider: {provider:<10}, origin: {origin}) {status}",
+                "  {name:<16}(provider: {provider:<10}, origin: {origin}, local_root: {local_root}) {status}",
                 name = source.name,
                 provider = source.provider,
                 origin = source.origin.as_str(),
+                local_root = source
+                    .local_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 status = connectivity,
             );
         }

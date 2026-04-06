@@ -55,6 +55,49 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
                 println!("Source '{name}' added (provider: {provider}).");
             }
         }
+        SourceAction::Bind { name, local_root } => {
+            let entry = control_plane.source_bind_local_root(&name, &local_root)?;
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({
+                        "ok": true,
+                        "message": format!(
+                            "Source '{name}' bound to local root {}.",
+                            entry
+                                .local_root
+                                .as_ref()
+                                .expect("bound source should have local root")
+                                .display()
+                        ),
+                        "source": entry,
+                    })
+                );
+            } else {
+                println!(
+                    "Source '{name}' bound to local root {}.",
+                    entry
+                        .local_root
+                        .as_ref()
+                        .expect("bound source should have local root")
+                        .display()
+                );
+            }
+        }
+        SourceAction::Unbind { name } => {
+            control_plane.source_unbind_local_root(&name)?;
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({
+                        "ok": true,
+                        "message": format!("Source '{name}' local root removed."),
+                    })
+                );
+            } else {
+                println!("Source '{name}' local root removed.");
+            }
+        }
         SourceAction::Remove { name } => {
             control_plane.source_remove(&name)?;
             if json_mode {
@@ -83,6 +126,7 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
                             "origin": source.origin,
                             "metadata_ttl_secs": source.metadata_ttl_secs,
                             "content_ttl_secs": source.content_ttl_secs,
+                            "local_root": source.local_root,
                             "options": masked_options,
                         })
                     })
@@ -93,12 +137,17 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
             } else {
                 for source in &sources {
                     println!(
-                        "  {}  (provider: {}, origin: {}, metadata_ttl_secs: {}, content_ttl_secs: {})",
+                        "  {}  (provider: {}, origin: {}, metadata_ttl_secs: {}, content_ttl_secs: {}, local_root: {})",
                         source.name,
                         source.provider,
                         source.origin.as_str(),
                         source.metadata_ttl_secs,
                         source.content_ttl_secs,
+                        source
+                            .local_root
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "-".to_string()),
                     );
                     let mut keys: Vec<&String> = source.options.keys().collect();
                     keys.sort();

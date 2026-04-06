@@ -1,4 +1,4 @@
 pub mod crypto;
 pub mod store;
 
-pub use store::ProviderStore;
+pub use store::{PathSyncStateRecord, ProviderStore, SourceLocalRootBinding};

@@ -30,6 +30,11 @@ enum Commands {
         #[command(subcommand)]
         action: SourceAction,
     },
+    /// Inspect source/path sync state through local paths
+    Path {
+        #[command(subcommand)]
+        action: PathAction,
+    },
     /// List files
     Ls {
         /// Path (e.g., my-s3/documents/)
@@ -110,6 +115,18 @@ pub enum SourceAction {
         #[arg(long, value_parser = parse_key_val)]
         opt: Vec<(String, String)>,
     },
+    /// Bind a source to a local root directory
+    Bind {
+        /// Source name
+        name: String,
+        /// Local root path
+        local_root: PathBuf,
+    },
+    /// Remove the local-root binding for a source
+    Unbind {
+        /// Source name
+        name: String,
+    },
     /// Remove a data source
     Remove {
         /// Source name
@@ -117,6 +134,15 @@ pub enum SourceAction {
     },
     /// List all data sources
     List,
+}
+
+#[derive(Subcommand)]
+pub enum PathAction {
+    /// Inspect sync state for a local path under a bound root
+    Inspect {
+        /// Local filesystem path
+        path: PathBuf,
+    },
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {
@@ -136,6 +162,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Source { action } => cmd::source::run(cli.config.as_deref(), action, json),
+        Commands::Path { action } => cmd::path::run(cli.config.as_deref(), action, json),
         Commands::Ls { path, long } => {
             let (config, store) = load_config_and_store(cli.config.as_deref())?;
             cmd::file::ls(&config, &store, path.as_deref(), json, long)

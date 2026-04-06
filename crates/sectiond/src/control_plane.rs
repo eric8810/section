@@ -2,8 +2,8 @@ use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
 use section_core::config::{CacheConfig, SourceConfig};
 use section_core::SectionConfig;
-use section_provider::ProviderStore;
-use serde::Serialize;
+use section_provider::{PathSyncStateRecord, ProviderStore};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,7 +18,36 @@ pub struct SourceRegistryEntry {
     pub origin: SourceOrigin,
     pub metadata_ttl_secs: u64,
     pub content_ttl_secs: u64,
+    pub local_root: Option<PathBuf>,
     pub options: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RootDiscoveryMarker {
+    pub source_id: String,
+    pub local_root: PathBuf,
+    pub control_plane_endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PathDetailSnapshot {
+    pub local_present: bool,
+    pub dirty_local: bool,
+    pub dirty_remote: bool,
+    pub pinned: bool,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PathInspectSnapshot {
+    pub source_id: String,
+    pub local_root: PathBuf,
+    pub local_path: PathBuf,
+    pub source_path: String,
+    pub state: String,
+    pub detail: PathDetailSnapshot,
+    pub base_remote_version: Option<String>,
+    pub current_remote_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -60,12 +89,22 @@ impl SectiondControlPlane {
 
     pub fn source_remove(&self, name: &str) -> Result<()> {
         self.ensure_name_is_not_config_owned(name, "remove")?;
+        let previous_root = self.store.get_source_local_root(name)?;
         self.store.remove_source(name)?;
+        if let Some(previous_root) = previous_root {
+            remove_root_marker(&previous_root)?;
+        }
         Ok(())
     }
 
     pub fn list_sources(&self) -> Result<Vec<SourceRegistryEntry>> {
         let store_sources = self.store.load_all()?;
+        let binding_map = self
+            .store
+            .list_source_local_roots()?
+            .into_iter()
+            .map(|binding| (binding.source_name, binding.local_root))
+            .collect::<HashMap<_, _>>();
         let mut source_names = BTreeSet::new();
         source_names.extend(self.config.sources.keys().cloned());
         source_names.extend(store_sources.keys().cloned());
@@ -94,6 +133,7 @@ impl SectiondControlPlane {
             };
 
             entries.push(SourceRegistryEntry {
+                local_root: binding_map.get(&name).cloned(),
                 name,
                 provider: effective_source.provider.clone(),
                 origin,
@@ -108,6 +148,67 @@ impl SectiondControlPlane {
         }
 
         Ok(entries)
+    }
+
+    pub fn source_bind_local_root(&self, name: &str, local_root: &Path) -> Result<SourceRegistryEntry> {
+        self.ensure_source_exists(name)?;
+
+        let local_root = absolutize_path(local_root)?;
+        let previous_root = self.store.get_source_local_root(name)?;
+        self.store.set_source_local_root(name, &local_root)?;
+        write_root_marker(name, &local_root)?;
+
+        if let Some(previous_root) = previous_root {
+            if previous_root != local_root {
+                remove_root_marker(&previous_root)?;
+            }
+        }
+
+        self.find_source(name)?
+            .ok_or_else(|| anyhow::anyhow!("source {name} was bound but could not be reloaded"))
+    }
+
+    pub fn source_unbind_local_root(&self, name: &str) -> Result<()> {
+        self.ensure_source_exists(name)?;
+
+        if let Some(previous_root) = self.store.get_source_local_root(name)? {
+            self.store.remove_source_local_root(name)?;
+            remove_root_marker(&previous_root)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn path_inspect(&self, input_path: &Path) -> Result<PathInspectSnapshot> {
+        let local_path = absolutize_path(input_path)?;
+        let marker = discover_root_marker(&local_path)?;
+        let authoritative_root = self
+            .store
+            .get_source_local_root(&marker.source_id)?
+            .ok_or_else(|| anyhow::anyhow!("source {} has no bound local root", marker.source_id))?;
+
+        let source_path = relative_source_path(&authoritative_root, &local_path)?;
+        let state = self
+            .store
+            .get_path_sync_state(&marker.source_id, &source_path)?
+            .unwrap_or_else(|| default_path_state(&marker.source_id, &source_path, &local_path));
+
+        Ok(PathInspectSnapshot {
+            source_id: marker.source_id,
+            local_root: authoritative_root,
+            local_path,
+            source_path: display_source_path(&source_path),
+            state: state.public_state,
+            detail: PathDetailSnapshot {
+                local_present: state.local_present,
+                dirty_local: state.dirty_local,
+                dirty_remote: state.dirty_remote,
+                pinned: state.pinned,
+                stale: state.stale,
+            },
+            base_remote_version: state.base_remote_version,
+            current_remote_version: state.current_remote_version,
+        })
     }
 
     pub fn status_snapshot(&self) -> Result<StatusSnapshot> {
@@ -151,6 +252,13 @@ impl SectiondControlPlane {
             .find(|entry| entry.name == name))
     }
 
+    fn ensure_source_exists(&self, name: &str) -> Result<()> {
+        if self.find_source(name)?.is_none() {
+            bail!("source {name} is not registered");
+        }
+        Ok(())
+    }
+
     fn ensure_name_is_not_config_owned(&self, name: &str, action: &str) -> Result<()> {
         if self.config.sources.contains_key(name) {
             bail!(
@@ -159,6 +267,110 @@ impl SectiondControlPlane {
         }
 
         Ok(())
+    }
+}
+
+fn absolutize_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn write_root_marker(source_id: &str, local_root: &Path) -> Result<()> {
+    let marker = RootDiscoveryMarker {
+        source_id: source_id.to_string(),
+        local_root: local_root.to_path_buf(),
+        control_plane_endpoint: "sectiond://local".to_string(),
+    };
+    let marker_dir = local_root.join(".section");
+    std::fs::create_dir_all(&marker_dir)?;
+    std::fs::write(
+        marker_dir.join("root.json"),
+        serde_json::to_vec_pretty(&marker)?,
+    )?;
+    Ok(())
+}
+
+fn remove_root_marker(local_root: &Path) -> Result<()> {
+    let marker_dir = local_root.join(".section");
+    let marker_path = marker_dir.join("root.json");
+    if marker_path.exists() {
+        std::fs::remove_file(&marker_path)?;
+    }
+    if marker_dir.exists() {
+        let mut entries = std::fs::read_dir(&marker_dir)?;
+        if entries.next().is_none() {
+            std::fs::remove_dir(&marker_dir)?;
+        }
+    }
+    Ok(())
+}
+
+fn discover_root_marker(path: &Path) -> Result<RootDiscoveryMarker> {
+    let mut current = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+
+    loop {
+        let marker_path = current.join(".section").join("root.json");
+        if marker_path.exists() {
+            let marker = std::fs::read(&marker_path)?;
+            return Ok(serde_json::from_slice(&marker)?);
+        }
+
+        if !current.pop() {
+            bail!(
+                "no Section local-root marker found above {}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn relative_source_path(local_root: &Path, local_path: &Path) -> Result<String> {
+    let relative = local_path.strip_prefix(local_root).map_err(|_| {
+        anyhow::anyhow!(
+            "{} is outside the bound local root {}",
+            local_path.display(),
+            local_root.display()
+        )
+    })?;
+
+    let raw = relative
+        .iter()
+        .map(|segment| segment.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    Ok(raw)
+}
+
+fn display_source_path(path: &str) -> String {
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn default_path_state(source_id: &str, path: &str, local_path: &Path) -> PathSyncStateRecord {
+    PathSyncStateRecord {
+        source_name: source_id.to_string(),
+        path: path.to_string(),
+        public_state: "ready".to_string(),
+        local_present: local_path.exists(),
+        dirty_local: false,
+        dirty_remote: false,
+        pinned: false,
+        stale: false,
+        base_remote_version: None,
+        current_remote_version: None,
     }
 }
 
@@ -302,6 +514,120 @@ mod tests {
         assert_eq!(
             store_source.options.get("root").map(String::as_str),
             Some("/tmp/from-store")
+        );
+    }
+
+    #[test]
+    fn source_bind_local_root_writes_marker_and_updates_registry_entry() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("section.toml");
+        write_config(temp_dir.path(), &config_path, "config-only");
+
+        let control = SectiondControlPlane::load(Some(&config_path)).expect("control plane");
+        control
+            .source_add(
+                "store-only",
+                "fs",
+                HashMap::from([("root".to_string(), "/tmp/from-store".to_string())]),
+            )
+            .expect("add source");
+
+        let local_root = temp_dir.path().join("bound-root");
+        let entry = control
+            .source_bind_local_root("store-only", &local_root)
+            .expect("bind local root");
+
+        assert_eq!(entry.local_root, Some(local_root.clone()));
+
+        let marker = std::fs::read(local_root.join(".section").join("root.json"))
+            .expect("read root marker");
+        let marker: RootDiscoveryMarker =
+            serde_json::from_slice(&marker).expect("parse root marker");
+        assert_eq!(marker.source_id, "store-only");
+        assert_eq!(marker.local_root, local_root);
+        assert_eq!(marker.control_plane_endpoint, "sectiond://local");
+    }
+
+    #[test]
+    fn path_inspect_resolves_local_path_and_detail_state() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("section.toml");
+        write_config(temp_dir.path(), &config_path, "config-only");
+
+        let control = SectiondControlPlane::load(Some(&config_path)).expect("control plane");
+        control
+            .source_add(
+                "store-only",
+                "fs",
+                HashMap::from([("root".to_string(), "/tmp/from-store".to_string())]),
+            )
+            .expect("add source");
+
+        let local_root = temp_dir.path().join("bound-root");
+        control
+            .source_bind_local_root("store-only", &local_root)
+            .expect("bind local root");
+
+        let nested = local_root.join("notes").join("todo.txt");
+        std::fs::create_dir_all(nested.parent().expect("parent")).expect("create parent");
+        std::fs::write(&nested, "hello").expect("write local file");
+        control
+            .store
+            .upsert_path_sync_state(&PathSyncStateRecord {
+                source_name: "store-only".to_string(),
+                path: "notes/todo.txt".to_string(),
+                public_state: "conflict".to_string(),
+                local_present: true,
+                dirty_local: true,
+                dirty_remote: true,
+                pinned: false,
+                stale: true,
+                base_remote_version: Some("v1".to_string()),
+                current_remote_version: Some("v2".to_string()),
+            })
+            .expect("seed path state");
+
+        let inspect = control.path_inspect(&nested).expect("path inspect");
+        assert_eq!(inspect.source_id, "store-only");
+        assert_eq!(inspect.local_root, local_root);
+        assert_eq!(inspect.local_path, nested);
+        assert_eq!(inspect.source_path, "notes/todo.txt");
+        assert_eq!(inspect.state, "conflict");
+        assert!(inspect.detail.local_present);
+        assert!(inspect.detail.dirty_local);
+        assert!(inspect.detail.dirty_remote);
+        assert!(inspect.detail.stale);
+        assert_eq!(inspect.base_remote_version.as_deref(), Some("v1"));
+        assert_eq!(inspect.current_remote_version.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn source_remove_cleans_up_root_marker() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("section.toml");
+        write_config(temp_dir.path(), &config_path, "config-only");
+
+        let control = SectiondControlPlane::load(Some(&config_path)).expect("control plane");
+        control
+            .source_add(
+                "store-only",
+                "fs",
+                HashMap::from([("root".to_string(), "/tmp/from-store".to_string())]),
+            )
+            .expect("add source");
+
+        let local_root = temp_dir.path().join("bound-root");
+        control
+            .source_bind_local_root("store-only", &local_root)
+            .expect("bind local root");
+
+        control
+            .source_remove("store-only")
+            .expect("remove store-owned source");
+
+        assert!(
+            !local_root.join(".section").join("root.json").exists(),
+            "root marker should be removed"
         );
     }
 
