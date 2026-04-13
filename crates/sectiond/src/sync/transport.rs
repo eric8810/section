@@ -1,18 +1,24 @@
-use super::{
-    delete_local_entry, delete_remote_entry, ensure_remote_dir, ensure_remote_parent_dirs,
-    hash_bytes, remote_file_token,
-};
+use super::{delete_local_entry, normalized_dir, remote_file_token};
 use crate::sync::coordinator::{PathSyncPlan, PlannedOp};
 use anyhow::Result;
+use futures::TryStreamExt;
 use opendal::layers::{ConcurrentLimitLayer, RetryLayer, TracingLayer};
 use opendal::Operator;
+use ring::digest::{Context, SHA256};
 use std::fs;
+use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::runtime::Handle;
 use tracing::{debug, info, warn};
 
 pub(crate) trait Transport {
-    fn execute(&self, plan: &PathSyncPlan) -> Result<TransportOutcome>;
+    fn execute(
+        &self,
+        plan: &PathSyncPlan,
+        progress: Option<TransportProgressObserver>,
+    ) -> Result<TransportOutcome>;
 }
 
 #[derive(Debug, Clone)]
@@ -38,8 +44,17 @@ pub(crate) struct TransportOutcome {
     pub(crate) remote_version: Option<String>,
 }
 
-pub(crate) struct OpenDalTransport<'a> {
-    rt: &'a tokio::runtime::Runtime,
+#[derive(Debug, Clone)]
+pub(crate) struct TransportProgress {
+    pub(crate) bytes_complete: u64,
+    pub(crate) bytes_total: Option<u64>,
+}
+
+pub(crate) type TransportProgressObserver = Arc<dyn Fn(TransportProgress) + Send + Sync + 'static>;
+
+#[derive(Clone)]
+pub(crate) struct OpenDalTransport {
+    handle: Handle,
     operator: Operator,
     local_root: PathBuf,
     config: TransportConfig,
@@ -53,9 +68,9 @@ fn log_retry(err: &opendal::Error, dur: std::time::Duration) {
     );
 }
 
-impl<'a> OpenDalTransport<'a> {
+impl OpenDalTransport {
     pub(crate) fn new(
-        rt: &'a tokio::runtime::Runtime,
+        rt: &tokio::runtime::Runtime,
         operator: Operator,
         local_root: PathBuf,
         config: TransportConfig,
@@ -84,7 +99,7 @@ impl<'a> OpenDalTransport<'a> {
         );
 
         Self {
-            rt,
+            handle: rt.handle().clone(),
             operator,
             local_root,
             config,
@@ -92,8 +107,12 @@ impl<'a> OpenDalTransport<'a> {
     }
 }
 
-impl Transport for OpenDalTransport<'_> {
-    fn execute(&self, plan: &PathSyncPlan) -> Result<TransportOutcome> {
+impl Transport for OpenDalTransport {
+    fn execute(
+        &self,
+        plan: &PathSyncPlan,
+        progress: Option<TransportProgressObserver>,
+    ) -> Result<TransportOutcome> {
         let started = Instant::now();
         debug!(
             path = %plan.path,
@@ -110,30 +129,91 @@ impl Transport for OpenDalTransport<'_> {
                     fs::create_dir_all(self.local_root.join(path))?;
                 }
                 PlannedOp::CreateRemoteDir { path } => {
-                    ensure_remote_dir(self.rt, &self.operator, path)?;
+                    ensure_remote_dir(&self.handle, &self.operator, path)?;
                 }
                 PlannedOp::PullFile { path } => {
                     let local_path = self.local_root.join(path);
                     if let Some(parent) = local_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    let data = self.rt.block_on(self.operator.read(path))?;
-                    fs::write(&local_path, data.to_bytes().as_ref())?;
-                    outcome.local_version = Some(hash_bytes(data.to_bytes().as_ref()));
+                    let bytes_total = self
+                        .handle
+                        .block_on(self.operator.stat(path))
+                        .ok()
+                        .map(|meta| meta.content_length());
+                    let reader = self.handle.block_on(self.operator.reader(path))?;
+                    let mut stream = self.handle.block_on(reader.into_bytes_stream(..))?;
+                    let mut file = fs::File::create(&local_path)?;
+                    let mut hasher = Context::new(&SHA256);
+                    let mut bytes_complete = 0_u64;
+                    let mut last_emitted = 0_u64;
+
+                    while let Some(chunk) = self.handle.block_on(stream.try_next())? {
+                        file.write_all(chunk.as_ref())?;
+                        hasher.update(chunk.as_ref());
+                        bytes_complete += chunk.len() as u64;
+                        emit_progress(
+                            progress.as_ref(),
+                            &mut last_emitted,
+                            bytes_complete,
+                            bytes_total,
+                            false,
+                        );
+                    }
+
+                    emit_progress(
+                        progress.as_ref(),
+                        &mut last_emitted,
+                        bytes_complete,
+                        bytes_total,
+                        true,
+                    );
+                    outcome.local_version = Some(digest_to_hex(hasher.finish().as_ref()));
                 }
                 PlannedOp::PushFile { path } => {
                     let local_path = self.local_root.join(path);
-                    let data = fs::read(&local_path)?;
-                    ensure_remote_parent_dirs(self.rt, &self.operator, path)?;
-                    self.rt.block_on(self.operator.write(path, data))?;
-                    let meta = self.rt.block_on(self.operator.stat(path))?;
+                    let metadata = fs::metadata(&local_path)?;
+                    let bytes_total = Some(metadata.len());
+                    let mut reader = BufReader::new(fs::File::open(&local_path)?);
+                    ensure_remote_parent_dirs(&self.handle, &self.operator, path)?;
+                    let mut writer = self.handle.block_on(self.operator.writer(path))?;
+                    let mut bytes_complete = 0_u64;
+                    let mut last_emitted = 0_u64;
+                    let mut buffer = vec![0_u8; 1024 * 1024];
+
+                    loop {
+                        let read = reader.read(&mut buffer)?;
+                        if read == 0 {
+                            break;
+                        }
+
+                        self.handle
+                            .block_on(writer.write(buffer[..read].to_vec()))?;
+                        bytes_complete += read as u64;
+                        emit_progress(
+                            progress.as_ref(),
+                            &mut last_emitted,
+                            bytes_complete,
+                            bytes_total,
+                            false,
+                        );
+                    }
+
+                    let meta = self.handle.block_on(writer.close())?;
+                    emit_progress(
+                        progress.as_ref(),
+                        &mut last_emitted,
+                        bytes_complete,
+                        bytes_total,
+                        true,
+                    );
                     outcome.remote_version = remote_file_token(&meta);
                 }
                 PlannedOp::DeleteLocal { path, kind } => {
                     delete_local_entry(&self.local_root, path, *kind)?;
                 }
                 PlannedOp::DeleteRemote { path, kind } => {
-                    delete_remote_entry(self.rt, &self.operator, path, *kind)?;
+                    delete_remote_entry(&self.handle, &self.operator, path, *kind)?;
                 }
             }
         }
@@ -147,6 +227,74 @@ impl Transport for OpenDalTransport<'_> {
 
         Ok(outcome)
     }
+}
+
+fn emit_progress(
+    observer: Option<&TransportProgressObserver>,
+    last_emitted: &mut u64,
+    bytes_complete: u64,
+    bytes_total: Option<u64>,
+    force: bool,
+) {
+    if !force && bytes_complete.saturating_sub(*last_emitted) < 1024 * 1024 {
+        return;
+    }
+    *last_emitted = bytes_complete;
+
+    if let Some(observer) = observer {
+        observer(TransportProgress {
+            bytes_complete,
+            bytes_total,
+        });
+    }
+}
+
+fn digest_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn ensure_remote_parent_dirs(
+    handle: &Handle,
+    operator: &Operator,
+    source_path: &str,
+) -> Result<()> {
+    if let Some((parent, _)) = source_path.rsplit_once('/') {
+        let mut current = String::new();
+        for segment in parent.split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            if !current.is_empty() {
+                current.push('/');
+            }
+            current.push_str(segment);
+            handle.block_on(operator.create_dir(&normalized_dir(&current)))?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_remote_dir(handle: &Handle, operator: &Operator, source_path: &str) -> Result<()> {
+    ensure_remote_parent_dirs(handle, operator, source_path)?;
+    handle.block_on(operator.create_dir(&normalized_dir(source_path)))?;
+    Ok(())
+}
+
+fn delete_remote_entry(
+    handle: &Handle,
+    operator: &Operator,
+    source_path: &str,
+    kind: crate::sync::EntryKind,
+) -> Result<()> {
+    match kind {
+        crate::sync::EntryKind::Dir => {
+            handle.block_on(operator.remove_all(&normalized_dir(source_path)))?;
+        }
+        crate::sync::EntryKind::File => {
+            handle.block_on(operator.delete(source_path))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -188,7 +336,7 @@ mod tests {
             conflicts: 0,
         };
 
-        transport.execute(&plan).expect("execute");
+        transport.execute(&plan, None).expect("execute");
         assert_eq!(
             fs::read_to_string(remote.path().join("notes.txt")).expect("read remote"),
             "hello"
@@ -220,7 +368,7 @@ mod tests {
             conflicts: 0,
         };
 
-        let outcome = transport.execute(&plan).expect("execute");
+        let outcome = transport.execute(&plan, None).expect("execute");
         assert_eq!(
             fs::read_to_string(local.path().join("notes.txt")).expect("read local"),
             "hello"
@@ -254,7 +402,7 @@ mod tests {
             conflicts: 0,
         };
 
-        transport.execute(&plan).expect("execute");
+        transport.execute(&plan, None).expect("execute");
         assert!(!local.path().join("notes.txt").exists());
     }
 }

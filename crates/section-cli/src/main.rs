@@ -145,6 +145,9 @@ pub enum SourceAction {
         /// Keep syncing in a loop
         #[arg(long)]
         watch: bool,
+        /// Path and transport concurrency
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
         /// Poll interval in seconds while watching
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,

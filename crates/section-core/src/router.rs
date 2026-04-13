@@ -80,6 +80,7 @@ impl Router {
 
     fn build_operator(source_cfg: &SourceConfig) -> Result<Operator> {
         let mut options = source_cfg.options.clone();
+        options.retain(|key, _| !key.starts_with("section."));
         if source_cfg.provider == "webdav" {
             if let Some(endpoint) = options.get_mut("endpoint") {
                 *endpoint = endpoint.trim_end_matches('/').to_string();
@@ -178,5 +179,27 @@ mod tests {
         router.add_operator("a-src", replacement);
 
         assert!(router.get_operator("a-src").is_ok());
+    }
+
+    #[test]
+    fn reserved_section_options_are_not_forwarded_to_operator_builders() {
+        let mut options = HashMap::new();
+        options.insert("root".to_string(), "/tmp/a".to_string());
+        options.insert(
+            "section.sync_inventory_manifest".to_string(),
+            "inventory.jsonl".to_string(),
+        );
+        let source = SourceConfig {
+            provider: "fs".to_string(),
+            options,
+            cache: CacheConfig::default(),
+        };
+
+        let op = Router::build_operator(&source).expect("router with reserved section option");
+        let meta = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(op.stat("/"))
+            .expect("stat root");
+        assert!(meta.is_dir());
     }
 }

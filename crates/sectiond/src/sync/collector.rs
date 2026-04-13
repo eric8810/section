@@ -5,10 +5,11 @@ use super::{
 use anyhow::Result;
 use opendal::{Entry, Metadata, Operator};
 use section_provider::{LocalScanCacheRecord, PathSyncStateRecord, RemoteManifestRecord};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ObservedEntry {
@@ -33,6 +34,8 @@ pub struct RemoteScanStats {
     pub metadata_hits: usize,
     pub stat_fallbacks: usize,
     pub body_fallbacks: usize,
+    pub accelerator: Option<String>,
+    pub accelerated_entries: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -80,12 +83,34 @@ pub(crate) trait SnapshotCollector {
 
 pub(crate) struct DefaultSnapshotCollector<'a> {
     rt: &'a tokio::runtime::Runtime,
+    inventory_manifest_path: Option<String>,
 }
 
 impl<'a> DefaultSnapshotCollector<'a> {
-    pub(crate) fn new(rt: &'a tokio::runtime::Runtime) -> Self {
-        Self { rt }
+    pub(crate) fn new(
+        rt: &'a tokio::runtime::Runtime,
+        inventory_manifest_path: Option<String>,
+    ) -> Self {
+        Self {
+            rt,
+            inventory_manifest_path,
+        }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct InventoryManifestEntry {
+    path: String,
+    #[serde(default = "default_inventory_entry_kind", alias = "entry_kind")]
+    kind: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    etag: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    mtime_ms: Option<i64>,
 }
 
 impl SnapshotCollector for DefaultSnapshotCollector<'_> {
@@ -161,6 +186,20 @@ impl SnapshotCollector for DefaultSnapshotCollector<'_> {
         op: &Operator,
         manifest: &HashMap<String, RemoteManifestRecord>,
     ) -> Result<RemoteSnapshot> {
+        if let Some(inventory_manifest_path) = &self.inventory_manifest_path {
+            match self.collect_remote_from_inventory_manifest(op, manifest, inventory_manifest_path)
+            {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(err) => {
+                    warn!(
+                        manifest_path = %inventory_manifest_path,
+                        error = %err,
+                        "remote inventory accelerator failed; falling back to recursive list"
+                    );
+                }
+            }
+        }
+
         let mut listed_entries: Vec<Entry> = self
             .rt
             .block_on(async { op.list_with("").recursive(true).await })?;
@@ -216,6 +255,52 @@ impl SnapshotCollector for DefaultSnapshotCollector<'_> {
                 path,
             })
             .collect()
+    }
+}
+
+impl DefaultSnapshotCollector<'_> {
+    fn collect_remote_from_inventory_manifest(
+        &self,
+        op: &Operator,
+        manifest: &HashMap<String, RemoteManifestRecord>,
+        inventory_manifest_path: &str,
+    ) -> Result<RemoteSnapshot> {
+        let data = self.rt.block_on(op.read(inventory_manifest_path))?;
+        let mut inventory_entries = parse_inventory_manifest(data.to_bytes().as_ref())?;
+        inventory_entries.sort_by(|left, right| left.path.cmp(&right.path));
+
+        let mut entries = HashMap::new();
+        let mut manifest_records = Vec::new();
+        let mut stats = RemoteScanStats {
+            accelerator: Some("inventory_manifest".to_string()),
+            ..RemoteScanStats::default()
+        };
+
+        for inventory_entry in inventory_entries {
+            let path = normalize_source_path(&inventory_entry.path);
+            if path.is_empty() {
+                continue;
+            }
+
+            let cached = manifest.get(&path);
+            let (observed, record) = observe_remote_inventory_entry(
+                self.rt,
+                op,
+                &path,
+                inventory_entry,
+                cached,
+                &mut stats,
+            )?;
+            entries.insert(path, observed);
+            manifest_records.push(record);
+            stats.accelerated_entries += 1;
+        }
+
+        Ok(RemoteSnapshot {
+            entries,
+            manifest_records,
+            stats,
+        })
     }
 }
 
@@ -376,6 +461,122 @@ fn observe_remote_entry_with_manifest(
     ))
 }
 
+fn observe_remote_inventory_entry(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    source_path: &str,
+    inventory_entry: InventoryManifestEntry,
+    cached: Option<&RemoteManifestRecord>,
+    stats: &mut RemoteScanStats,
+) -> Result<(ObservedEntry, RemoteManifestRecord)> {
+    let kind = inventory_entry_kind(&inventory_entry.kind)?;
+    if kind == EntryKind::Dir {
+        let observed = ObservedEntry {
+            kind,
+            version: None,
+            size: None,
+            mtime_ms: inventory_entry.mtime_ms,
+        };
+        return Ok((
+            observed.clone(),
+            RemoteManifestRecord {
+                path: source_path.to_string(),
+                entry_kind: observed.kind.as_str().to_string(),
+                version: None,
+                size: None,
+                mtime_ms: observed.mtime_ms,
+            },
+        ));
+    }
+
+    stats.files += 1;
+    if let Some(version) = inventory_entry.version.or(inventory_entry.etag) {
+        stats.metadata_hits += 1;
+        return Ok(remote_file_observation(
+            source_path,
+            version,
+            inventory_entry.size,
+            inventory_entry.mtime_ms,
+        ));
+    }
+
+    if let Some(version) =
+        cached_manifest_version(cached, inventory_entry.size, inventory_entry.mtime_ms)
+    {
+        stats.metadata_hits += 1;
+        return Ok(remote_file_observation(
+            source_path,
+            version,
+            inventory_entry.size,
+            inventory_entry.mtime_ms,
+        ));
+    }
+
+    stats.stat_fallbacks += 1;
+    let stat_meta = rt.block_on(operator.stat(source_path))?;
+    let stat_size = remote_metadata_size(&stat_meta);
+    let stat_mtime_ms = remote_mtime_ms(&stat_meta);
+
+    if let Some(version) = remote_file_token(&stat_meta) {
+        stats.metadata_hits += 1;
+        return Ok(remote_file_observation(
+            source_path,
+            version,
+            stat_size,
+            stat_mtime_ms,
+        ));
+    }
+
+    if let Some(version) = cached_manifest_version(cached, stat_size, stat_mtime_ms) {
+        stats.metadata_hits += 1;
+        return Ok(remote_file_observation(
+            source_path,
+            version,
+            stat_size,
+            stat_mtime_ms,
+        ));
+    }
+
+    stats.body_fallbacks += 1;
+    let data = rt.block_on(operator.read(source_path))?;
+    Ok(remote_file_observation(
+        source_path,
+        hash_bytes(data.to_bytes().as_ref()),
+        stat_size,
+        stat_mtime_ms,
+    ))
+}
+
+fn parse_inventory_manifest(bytes: &[u8]) -> Result<Vec<InventoryManifestEntry>> {
+    let payload = std::str::from_utf8(bytes)?;
+    let trimmed = payload.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if trimmed.starts_with('[') {
+        return Ok(serde_json::from_str(trimmed)?);
+    }
+
+    trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).map_err(Into::into))
+        .collect()
+}
+
+fn inventory_entry_kind(raw: &str) -> Result<EntryKind> {
+    match raw {
+        "file" => Ok(EntryKind::File),
+        "dir" => Ok(EntryKind::Dir),
+        other => anyhow::bail!("unsupported inventory entry kind {other}"),
+    }
+}
+
+fn default_inventory_entry_kind() -> String {
+    "file".to_string()
+}
+
 fn remote_file_observation(
     source_path: &str,
     version: String,
@@ -444,7 +645,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         fs::write(tmp.path().join("new.txt"), "hello").expect("write file");
         let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let collector = DefaultSnapshotCollector::new(&rt);
+        let collector = DefaultSnapshotCollector::new(&rt, None);
 
         let snapshot = collector
             .collect_local(tmp.path(), &HashMap::new())
@@ -463,7 +664,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         fs::write(tmp.path().join("new.txt"), "hello").expect("write file");
         let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let collector = DefaultSnapshotCollector::new(&rt);
+        let collector = DefaultSnapshotCollector::new(&rt, None);
 
         let first = collector
             .collect_local(tmp.path(), &HashMap::new())
@@ -494,7 +695,7 @@ mod tests {
         let remote = tempfile::tempdir().expect("remote tempdir");
         fs::write(remote.path().join("notes.txt"), "hello").expect("write remote");
         let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let collector = DefaultSnapshotCollector::new(&rt);
+        let collector = DefaultSnapshotCollector::new(&rt, None);
 
         let first = collector
             .collect_remote(&fs_operator(remote.path()), &HashMap::new())
@@ -526,9 +727,39 @@ mod tests {
     }
 
     #[test]
+    fn collect_remote_can_use_inventory_manifest_accelerator() {
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        fs::write(remote.path().join("notes.txt"), "hello").expect("write remote");
+        fs::write(
+            remote.path().join("inventory.jsonl"),
+            r#"{"path":"notes.txt","kind":"file","version":"inventory-v1","size":5,"mtime_ms":1}"#,
+        )
+        .expect("write inventory");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let collector = DefaultSnapshotCollector::new(&rt, Some("inventory.jsonl".to_string()));
+
+        let snapshot = collector
+            .collect_remote(&fs_operator(remote.path()), &HashMap::new())
+            .expect("collect remote via inventory");
+
+        assert_eq!(
+            snapshot.stats.accelerator.as_deref(),
+            Some("inventory_manifest")
+        );
+        assert_eq!(snapshot.stats.accelerated_entries, 1);
+        assert_eq!(
+            snapshot
+                .entries
+                .get("notes.txt")
+                .and_then(|entry| entry.version.clone()),
+            Some("inventory-v1".to_string())
+        );
+    }
+
+    #[test]
     fn build_inputs_preserves_previous_state() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let collector = DefaultSnapshotCollector::new(&rt);
+        let collector = DefaultSnapshotCollector::new(&rt, None);
         let mut previous = HashMap::new();
         previous.insert(
             "docs/readme.txt".to_string(),

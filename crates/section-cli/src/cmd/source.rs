@@ -1,10 +1,16 @@
 use crate::SourceAction;
 use anyhow::Result;
-use sectiond::SectiondControlPlane;
+use notify::{
+    Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
+use sectiond::{
+    SectiondControlPlane, SourceSyncOptions, SourceSyncResult, SyncLifecycleEvent,
+    SyncLifecycleObserver, SyncLifecycleStage,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
-use std::thread;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 /// Mask sensitive option values for display.
@@ -103,33 +109,16 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
         SourceAction::Sync {
             name,
             watch,
+            concurrency,
             interval_secs,
-        } => loop {
-            let result = control_plane.source_sync(&name)?;
-            if json_mode {
-                println!("{}", serde_json::to_string(&result)?);
+        } => {
+            let options = sync_options(concurrency);
+            if watch {
+                run_sync_watch_loop(&control_plane, &name, &options, interval_secs, json_mode)?;
             } else {
-                println!(
-                    "Source '{name}' synced. local_root={}, pulled={}, pushed={}, conflicts={}, events={}, local_cache_hits={}/{}, remote_metadata_hits={}, remote_stat_fallbacks={}, remote_body_fallbacks={}",
-                    result.local_root.display(),
-                    result.pulled,
-                    result.pushed,
-                    result.conflicts,
-                    result.events_emitted,
-                    result.local_scan.cache_hits,
-                    result.local_scan.files,
-                    result.remote_scan.metadata_hits,
-                    result.remote_scan.stat_fallbacks,
-                    result.remote_scan.body_fallbacks,
-                );
+                run_sync_once(&control_plane, &name, &options, json_mode)?;
             }
-
-            if !watch {
-                break;
-            }
-
-            thread::sleep(Duration::from_secs(interval_secs));
-        },
+        }
         SourceAction::Remove { name } => {
             control_plane.source_remove(&name)?;
             if json_mode {
@@ -193,4 +182,213 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
         }
     }
     Ok(())
+}
+
+fn sync_options(concurrency: usize) -> SourceSyncOptions {
+    SourceSyncOptions {
+        path_concurrency: concurrency.max(1),
+        transfer_concurrency: concurrency.max(1),
+        http_concurrency: concurrency.max(1),
+        ..SourceSyncOptions::default()
+    }
+}
+
+fn run_sync_once(
+    control_plane: &SectiondControlPlane,
+    name: &str,
+    options: &SourceSyncOptions,
+    json_mode: bool,
+) -> Result<SourceSyncResult> {
+    let lifecycle = (!json_mode).then(build_lifecycle_observer);
+    let result = control_plane.source_sync_with_options(name, options, lifecycle)?;
+    if json_mode {
+        println!("{}", serde_json::to_string(&result)?);
+    } else {
+        print_sync_result(name, &result);
+    }
+    Ok(result)
+}
+
+fn run_sync_watch_loop(
+    control_plane: &SectiondControlPlane,
+    name: &str,
+    options: &SourceSyncOptions,
+    interval_secs: u64,
+    json_mode: bool,
+) -> Result<()> {
+    run_sync_once(control_plane, name, options, json_mode)?;
+
+    let local_root = control_plane.source_local_root(name)?;
+    let poll_interval = Duration::from_secs(interval_secs.max(1));
+    match start_notify_watcher(&local_root) {
+        Ok((_watcher, rx)) => loop {
+            match rx.recv_timeout(poll_interval) {
+                Ok(Ok(event)) => {
+                    if event_requires_sync(&event, &local_root) {
+                        drain_notify_burst(&rx, &local_root);
+                        run_sync_once(control_plane, name, options, json_mode)?;
+                    }
+                }
+                Ok(Err(err)) => {
+                    if !json_mode {
+                        eprintln!(
+                            "File watch error for '{}': {err}. Falling back to a sync run.",
+                            local_root.display()
+                        );
+                    }
+                    run_sync_once(control_plane, name, options, json_mode)?;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    run_sync_once(control_plane, name, options, json_mode)?;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if !json_mode {
+                        eprintln!(
+                            "File watch disconnected for '{}'. Falling back to polling.",
+                            local_root.display()
+                        );
+                    }
+                    return run_poll_watch_loop(
+                        control_plane,
+                        name,
+                        options,
+                        poll_interval,
+                        json_mode,
+                    );
+                }
+            }
+        },
+        Err(err) => {
+            if !json_mode {
+                eprintln!(
+                    "File watch unavailable for '{}': {err}. Falling back to polling every {}s.",
+                    local_root.display(),
+                    interval_secs.max(1)
+                );
+            }
+            run_poll_watch_loop(control_plane, name, options, poll_interval, json_mode)
+        }
+    }
+}
+
+fn run_poll_watch_loop(
+    control_plane: &SectiondControlPlane,
+    name: &str,
+    options: &SourceSyncOptions,
+    poll_interval: Duration,
+    json_mode: bool,
+) -> Result<()> {
+    loop {
+        std::thread::sleep(poll_interval);
+        run_sync_once(control_plane, name, options, json_mode)?;
+    }
+}
+
+fn start_notify_watcher(
+    local_root: &Path,
+) -> Result<(RecommendedWatcher, mpsc::Receiver<notify::Result<Event>>)> {
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event| {
+        let _ = tx.send(event);
+    })?;
+    watcher.configure(NotifyConfig::default())?;
+    watcher.watch(local_root, RecursiveMode::Recursive)?;
+    Ok((watcher, rx))
+}
+
+fn drain_notify_burst(rx: &mpsc::Receiver<notify::Result<Event>>, local_root: &Path) {
+    while let Ok(Ok(event)) = rx.recv_timeout(Duration::from_millis(200)) {
+        if !event_requires_sync(&event, local_root) {
+            continue;
+        }
+    }
+}
+
+fn event_requires_sync(event: &Event, local_root: &Path) -> bool {
+    if matches!(event.kind, EventKind::Access(_)) {
+        return false;
+    }
+
+    let marker_dir = local_root.join(".section");
+    event.paths.is_empty()
+        || event
+            .paths
+            .iter()
+            .any(|path| !path.starts_with(&marker_dir))
+}
+
+fn build_lifecycle_observer() -> SyncLifecycleObserver {
+    let output_lock = Arc::new(Mutex::new(()));
+    Arc::new(move |event: SyncLifecycleEvent| {
+        let _guard = output_lock.lock().expect("stdout lock");
+        match event.stage {
+            SyncLifecycleStage::Progress => {
+                let bytes_complete = event.bytes_complete.unwrap_or(0);
+                let bytes_total = event.bytes_total.unwrap_or(0);
+                if bytes_total > 0 {
+                    println!(
+                        "  [progress] {} {}/{} ({:.0}%)",
+                        event.path,
+                        human_bytes(bytes_complete),
+                        human_bytes(bytes_total),
+                        (bytes_complete as f64 / bytes_total as f64) * 100.0
+                    );
+                } else {
+                    println!(
+                        "  [progress] {} {}",
+                        event.path,
+                        human_bytes(bytes_complete)
+                    );
+                }
+            }
+            _ => {
+                println!("  [{}] {}", lifecycle_stage_label(&event.stage), event.path);
+            }
+        }
+    })
+}
+
+fn lifecycle_stage_label(stage: &SyncLifecycleStage) -> &'static str {
+    match stage {
+        SyncLifecycleStage::Queued => "queued",
+        SyncLifecycleStage::Running => "running",
+        SyncLifecycleStage::Progress => "progress",
+        SyncLifecycleStage::Completed => "completed",
+        SyncLifecycleStage::Failed => "failed",
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes}{}", UNITS[unit])
+    } else {
+        format!("{value:.1}{}", UNITS[unit])
+    }
+}
+
+fn print_sync_result(name: &str, result: &SourceSyncResult) {
+    let accelerator = result.remote_scan.accelerator.as_deref().unwrap_or("-");
+    println!(
+        "Source '{name}' synced. local_root={}, pulled={}, pushed={}, conflicts={}, events={}, local_cache_hits={}/{}, remote_metadata_hits={}, remote_stat_fallbacks={}, remote_body_fallbacks={}, remote_accelerator={}, accelerated_entries={}",
+        result.local_root.display(),
+        result.pulled,
+        result.pushed,
+        result.conflicts,
+        result.events_emitted,
+        result.local_scan.cache_hits,
+        result.local_scan.files,
+        result.remote_scan.metadata_hits,
+        result.remote_scan.stat_fallbacks,
+        result.remote_scan.body_fallbacks,
+        accelerator,
+        result.remote_scan.accelerated_entries,
+    );
 }

@@ -1,7 +1,8 @@
 use crate::sync::{
     compare_path as sync_compare_path, list_watch_events, resolve_path as sync_resolve_path,
-    sync_source as run_source_sync, PathCompareSnapshot, PathResolveResult, PathResolveStrategy,
-    SourceSyncResult,
+    sync_source as run_source_sync, sync_source_with_options as run_source_sync_with_options,
+    PathCompareSnapshot, PathResolveResult, PathResolveStrategy, SourceSyncOptions,
+    SourceSyncResult, SyncLifecycleObserver,
 };
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
@@ -224,12 +225,28 @@ impl SectiondControlPlane {
 
     pub fn source_sync(&self, name: &str) -> Result<SourceSyncResult> {
         self.ensure_source_exists(name)?;
-        let local_root = self
-            .store
-            .get_source_local_root(name)?
-            .ok_or_else(|| anyhow::anyhow!("source {name} has no bound local root"))?;
+        let local_root = self.source_local_root(name)?;
         let runtime = self.runtime()?;
         run_source_sync(&runtime, &self.store, name, &local_root)
+    }
+
+    pub fn source_sync_with_options(
+        &self,
+        name: &str,
+        options: &SourceSyncOptions,
+        lifecycle: Option<SyncLifecycleObserver>,
+    ) -> Result<SourceSyncResult> {
+        self.ensure_source_exists(name)?;
+        let local_root = self.source_local_root(name)?;
+        let runtime = self.runtime()?;
+        run_source_sync_with_options(&runtime, &self.store, name, &local_root, options, lifecycle)
+    }
+
+    pub fn source_local_root(&self, name: &str) -> Result<PathBuf> {
+        self.ensure_source_exists(name)?;
+        self.store
+            .get_source_local_root(name)?
+            .ok_or_else(|| anyhow::anyhow!("source {name} has no bound local root"))
     }
 
     pub fn path_compare(&self, input_path: &Path) -> Result<PathCompareSnapshot> {

@@ -1,5 +1,6 @@
 mod collector;
 mod coordinator;
+mod delta;
 mod transport;
 
 use anyhow::{anyhow, bail, Result};
@@ -13,11 +14,16 @@ use section_provider::{
     LocalScanCacheRecord, PathSyncStateRecord, ProviderStore, RemoteManifestRecord, SyncEventRecord,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-use transport::{OpenDalTransport, Transport, TransportConfig, TransportOutcome};
+use transport::{
+    OpenDalTransport, Transport, TransportConfig, TransportOutcome, TransportProgress,
+    TransportProgressObserver,
+};
 
 use crate::SectiondRuntime;
 
@@ -33,6 +39,56 @@ pub struct SourceSyncResult {
     pub events_emitted: usize,
     pub local_scan: LocalScanStats,
     pub remote_scan: RemoteScanStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSyncOptions {
+    pub path_concurrency: usize,
+    pub transfer_concurrency: usize,
+    pub http_concurrency: usize,
+    pub max_retries: usize,
+    pub emit_syncing_events: bool,
+}
+
+impl Default for SourceSyncOptions {
+    fn default() -> Self {
+        Self {
+            path_concurrency: 8,
+            transfer_concurrency: 8,
+            http_concurrency: 8,
+            max_retries: 3,
+            emit_syncing_events: true,
+        }
+    }
+}
+
+impl SourceSyncOptions {
+    fn transport_config(&self) -> TransportConfig {
+        TransportConfig {
+            concurrency: self.transfer_concurrency.max(1),
+            http_concurrency: self.http_concurrency.max(1),
+            max_retries: self.max_retries,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncLifecycleStage {
+    Queued,
+    Running,
+    Progress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncLifecycleEvent {
+    pub source_id: String,
+    pub path: String,
+    pub stage: SyncLifecycleStage,
+    pub bytes_complete: Option<u64>,
+    pub bytes_total: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -102,11 +158,31 @@ struct ResolveOutcome {
     events: Vec<PendingSyncEvent>,
 }
 
+pub type SyncLifecycleObserver = Arc<dyn Fn(SyncLifecycleEvent) + Send + Sync + 'static>;
+
 pub fn sync_source(
     runtime: &SectiondRuntime,
     store: &ProviderStore,
     source_id: &str,
     local_root: &Path,
+) -> Result<SourceSyncResult> {
+    sync_source_with_options(
+        runtime,
+        store,
+        source_id,
+        local_root,
+        &SourceSyncOptions::default(),
+        None,
+    )
+}
+
+pub fn sync_source_with_options(
+    runtime: &SectiondRuntime,
+    store: &ProviderStore,
+    source_id: &str,
+    local_root: &Path,
+    options: &SourceSyncOptions,
+    lifecycle: Option<SyncLifecycleObserver>,
 ) -> Result<SourceSyncResult> {
     let operator = runtime.router().get_operator(source_id)?;
     let rt = tokio::runtime::Runtime::new()?;
@@ -128,7 +204,14 @@ pub fn sync_source(
         .map(|record| (record.path.clone(), record))
         .collect::<HashMap<String, RemoteManifestRecord>>();
 
-    let collector = DefaultSnapshotCollector::new(&rt);
+    let inventory_manifest_path = runtime
+        .config()
+        .sources
+        .get(source_id)
+        .and_then(|source| source.options.get("section.sync_inventory_manifest"))
+        .cloned()
+        .filter(|path| !path.trim().is_empty());
+    let collector = DefaultSnapshotCollector::new(&rt, inventory_manifest_path);
     let local_snapshot = collector.collect_local(local_root, &local_cache)?;
     let remote_snapshot = collector.collect_remote(operator, &remote_manifest)?;
     let collector::LocalSnapshot {
@@ -158,7 +241,7 @@ pub fn sync_source(
         &rt,
         operator.clone(),
         local_root.to_path_buf(),
-        TransportConfig::default(),
+        options.transport_config(),
     );
 
     let mut pulled = 0;
@@ -166,18 +249,71 @@ pub fn sync_source(
     let mut conflicts = 0;
     let mut events_emitted = 0;
 
-    for path_plan in paths {
-        let outcome = transport.execute(&path_plan)?;
-        refresh_cached_snapshots(
-            &rt,
-            operator,
-            local_root,
-            &path_plan,
-            &outcome,
-            &mut refreshed_local_cache,
-            &mut refreshed_remote_manifest,
-        )?;
-        persist_path_plan(store, source_id, &path_plan, outcome, &mut events_emitted)?;
+    for path_plan in &paths {
+        if !path_plan.ops.is_empty() {
+            if let Some(observer) = &lifecycle {
+                observer(SyncLifecycleEvent {
+                    source_id: source_id.to_string(),
+                    path: path_plan.path.clone(),
+                    stage: SyncLifecycleStage::Queued,
+                    bytes_complete: None,
+                    bytes_total: None,
+                });
+            }
+
+            if options.emit_syncing_events {
+                store.append_sync_event(
+                    source_id,
+                    &path_plan.path,
+                    "state_changed",
+                    "syncing",
+                    now_ms(),
+                )?;
+                events_emitted += 1;
+            }
+        }
+    }
+
+    let executed = execute_path_plans(
+        source_id,
+        transport,
+        paths,
+        options.path_concurrency.max(1),
+        lifecycle,
+    )?;
+    let mut first_error = None;
+
+    for (path_plan, outcome) in executed {
+        match outcome {
+            Ok(outcome) => {
+                refresh_cached_snapshots(
+                    &rt,
+                    operator,
+                    local_root,
+                    &path_plan,
+                    &outcome,
+                    &mut refreshed_local_cache,
+                    &mut refreshed_remote_manifest,
+                )?;
+                persist_path_plan(store, source_id, &path_plan, outcome, &mut events_emitted)?;
+            }
+            Err(err) => {
+                store.append_sync_event(
+                    source_id,
+                    &path_plan.path,
+                    "state_changed",
+                    "error",
+                    now_ms(),
+                )?;
+                events_emitted += 1;
+                if first_error.is_none() {
+                    first_error = Some(anyhow!(
+                        "sync transport failed for {}: {err}",
+                        path_plan.path
+                    ));
+                }
+            }
+        }
         pulled += path_plan.pulled;
         pushed += path_plan.pushed;
         conflicts += path_plan.conflicts;
@@ -190,6 +326,10 @@ pub fn sync_source(
     let mut refreshed_remote_manifest = refreshed_remote_manifest.into_values().collect::<Vec<_>>();
     refreshed_remote_manifest.sort_by(|left, right| left.path.cmp(&right.path));
     store.replace_remote_manifest(source_id, &refreshed_remote_manifest)?;
+
+    if let Some(err) = first_error {
+        return Err(err);
+    }
 
     Ok(SourceSyncResult {
         source_id: source_id.to_string(),
@@ -259,6 +399,132 @@ pub fn compare_path(
         local_matches_base,
         local_matches_current_remote,
         stale,
+    })
+}
+
+fn execute_path_plans(
+    source_id: &str,
+    transport: OpenDalTransport,
+    paths: Vec<PathSyncPlan>,
+    path_concurrency: usize,
+    lifecycle: Option<SyncLifecycleObserver>,
+) -> Result<Vec<(PathSyncPlan, Result<TransportOutcome>)>> {
+    let queue = Arc::new(Mutex::new(
+        paths
+            .into_iter()
+            .enumerate()
+            .collect::<VecDeque<(usize, PathSyncPlan)>>(),
+    ));
+    let results = Arc::new(Mutex::new(Vec::<(
+        usize,
+        PathSyncPlan,
+        Result<TransportOutcome>,
+    )>::new()));
+    let worker_count = path_concurrency
+        .max(1)
+        .min(queue.lock().expect("queue lock").len().max(1));
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let queue = Arc::clone(&queue);
+            let results = Arc::clone(&results);
+            let transport = transport.clone();
+            let lifecycle = lifecycle.clone();
+            let source_id = source_id.to_string();
+
+            scope.spawn(move || loop {
+                let next = {
+                    let mut queue = queue.lock().expect("queue lock");
+                    queue.pop_front()
+                };
+                let Some((index, path_plan)) = next else {
+                    break;
+                };
+
+                let outcome = if path_plan.ops.is_empty() {
+                    Ok(TransportOutcome::default())
+                } else {
+                    emit_lifecycle_event(
+                        lifecycle.as_ref(),
+                        &source_id,
+                        &path_plan.path,
+                        SyncLifecycleStage::Running,
+                        None,
+                        None,
+                    );
+                    let progress = lifecycle
+                        .as_ref()
+                        .map(|observer| progress_observer(observer, &source_id, &path_plan.path));
+                    let outcome = transport.execute(&path_plan, progress);
+                    emit_lifecycle_event(
+                        lifecycle.as_ref(),
+                        &source_id,
+                        &path_plan.path,
+                        if outcome.is_ok() {
+                            SyncLifecycleStage::Completed
+                        } else {
+                            SyncLifecycleStage::Failed
+                        },
+                        None,
+                        None,
+                    );
+                    outcome
+                };
+
+                results
+                    .lock()
+                    .expect("results lock")
+                    .push((index, path_plan, outcome));
+            });
+        }
+    });
+
+    let mut results = Arc::try_unwrap(results)
+        .expect("results still referenced")
+        .into_inner()
+        .expect("results mutex poisoned");
+    results.sort_by_key(|(index, _, _)| *index);
+    Ok(results
+        .into_iter()
+        .map(|(_, path_plan, outcome)| (path_plan, outcome))
+        .collect())
+}
+
+fn emit_lifecycle_event(
+    lifecycle: Option<&SyncLifecycleObserver>,
+    source_id: &str,
+    path: &str,
+    stage: SyncLifecycleStage,
+    bytes_complete: Option<u64>,
+    bytes_total: Option<u64>,
+) {
+    if let Some(observer) = lifecycle {
+        observer(SyncLifecycleEvent {
+            source_id: source_id.to_string(),
+            path: path.to_string(),
+            stage,
+            bytes_complete,
+            bytes_total,
+        });
+    }
+}
+
+fn progress_observer(
+    observer: &SyncLifecycleObserver,
+    source_id: &str,
+    path: &str,
+) -> TransportProgressObserver {
+    let observer = Arc::clone(observer);
+    let source_id = source_id.to_string();
+    let path = path.to_string();
+    Arc::new(move |progress: TransportProgress| {
+        observer(SyncLifecycleEvent {
+            source_id: source_id.clone(),
+            path: path.clone(),
+            stage: SyncLifecycleStage::Progress,
+            bytes_complete: Some(progress.bytes_complete),
+            bytes_total: progress.bytes_total,
+        });
     })
 }
 

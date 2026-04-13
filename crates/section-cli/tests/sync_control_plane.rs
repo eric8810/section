@@ -140,6 +140,7 @@ fn source_sync_compare_resolve_and_watch_work_together() {
     );
     let watch_lines = String::from_utf8_lossy(&watch.stdout);
     assert!(watch_lines.contains("\"kind\":\"conflict_detected\""));
+    assert!(watch_lines.contains("\"state\":\"syncing\""));
 
     let resolve = run_section(
         &config_path,
@@ -231,4 +232,73 @@ fn source_sync_reports_cache_hits_on_second_noop_round() {
     assert_eq!(second["local_scan"]["cache_hits"], 1);
     assert_eq!(second["local_scan"]["cache_misses"], 0);
     assert_eq!(second["remote_scan"]["body_fallbacks"], 0);
+}
+
+#[test]
+fn source_sync_can_use_inventory_manifest_accelerator() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let config_path = temp_dir.path().join("config.toml");
+    let source_root = temp_dir.path().join("source-root");
+    let local_root = temp_dir.path().join("bound-root");
+    let remote_file = source_root.join("docs").join("readme.txt");
+    let inventory_file = source_root.join("inventory.jsonl");
+
+    fs::create_dir_all(remote_file.parent().expect("remote parent")).expect("create remote dir");
+    fs::write(&remote_file, "remote-v1").expect("write remote seed");
+    fs::write(
+        &inventory_file,
+        r#"{"path":"docs/readme.txt","kind":"file","version":"inventory-v1","size":9,"mtime_ms":1}"#,
+    )
+    .expect("write inventory");
+    write_config(&config_path, &data_dir);
+
+    let add = run_section(
+        &config_path,
+        &[
+            "source",
+            "add",
+            "local",
+            "--provider",
+            "fs",
+            "--opt",
+            &format!("root={}", source_root.display()),
+            "--opt",
+            "section.sync_inventory_manifest=inventory.jsonl",
+        ],
+    );
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let bind = run_section(
+        &config_path,
+        &[
+            "source",
+            "bind",
+            "local",
+            local_root.to_str().expect("utf8 local root"),
+        ],
+    );
+    assert!(
+        bind.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bind.stderr)
+    );
+
+    let sync = run_section(&config_path, &["--json", "source", "sync", "local"]);
+    assert!(
+        sync.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
+
+    let sync: Value = serde_json::from_slice(&sync.stdout).expect("sync json");
+    assert_eq!(
+        sync["remote_scan"]["accelerator"],
+        Value::String("inventory_manifest".to_string())
+    );
+    assert_eq!(sync["remote_scan"]["accelerated_entries"], 1);
 }
