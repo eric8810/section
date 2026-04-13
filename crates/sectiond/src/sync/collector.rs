@@ -6,12 +6,15 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ObservedEntry {
     pub(crate) kind: EntryKind,
     pub(crate) version: Option<String>,
+    // TODO(#002): use cached size for local mtime/size fast path.
+    #[allow(dead_code)]
     pub(crate) size: Option<u64>,
+    // TODO(#002): use cached mtime for incremental local/remote scans.
+    #[allow(dead_code)]
     pub(crate) mtime_ms: Option<i64>,
 }
 
@@ -58,8 +61,10 @@ impl SnapshotCollector for DefaultSnapshotCollector<'_> {
     fn collect_local(
         &self,
         root: &Path,
-        _previous: &HashMap<String, PathSyncStateRecord>,
+        previous: &HashMap<String, PathSyncStateRecord>,
     ) -> Result<HashMap<String, ObservedEntry>> {
+        // Reserved for Issue #002: current implementation is still a full scan.
+        let _ = previous;
         let mut entries = HashMap::new();
 
         fn walk(
@@ -106,8 +111,10 @@ impl SnapshotCollector for DefaultSnapshotCollector<'_> {
     fn collect_remote(
         &self,
         op: &Operator,
-        _previous: &HashMap<String, PathSyncStateRecord>,
+        previous: &HashMap<String, PathSyncStateRecord>,
     ) -> Result<HashMap<String, ObservedEntry>> {
+        // Reserved for Issue #002: current implementation is still a full scan.
+        let _ = previous;
         let entries: Vec<Entry> = self
             .rt
             .block_on(async { op.list_with("").recursive(true).await })?;

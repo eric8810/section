@@ -1,6 +1,6 @@
 use super::{
     delete_local_entry, delete_remote_entry, ensure_remote_dir, ensure_remote_parent_dirs,
-    hash_bytes,
+    hash_bytes, remote_file_token,
 };
 use crate::sync::coordinator::{PathSyncPlan, PlannedOp};
 use anyhow::Result;
@@ -67,6 +67,9 @@ impl<'a> OpenDalTransport<'a> {
                     .with_max_times(config.max_retries)
                     .with_notify(log_retry),
             )
+            // sync_source still executes one PathSyncPlan at a time.
+            // The layer is wired here now so transport remains the only layer
+            // mount point; Issue #002 can make path execution parallel later.
             .layer(
                 ConcurrentLimitLayer::new(config.concurrency)
                     .with_http_concurrent_limit(config.http_concurrency),
@@ -118,15 +121,13 @@ impl Transport for OpenDalTransport<'_> {
                     fs::write(&local_path, data.to_bytes().as_ref())?;
                     outcome.local_version = Some(hash_bytes(data.to_bytes().as_ref()));
                 }
-                PlannedOp::PushFile {
-                    path,
-                    local_version,
-                } => {
+                PlannedOp::PushFile { path } => {
                     let local_path = self.local_root.join(path);
                     let data = fs::read(&local_path)?;
                     ensure_remote_parent_dirs(self.rt, &self.operator, path)?;
                     self.rt.block_on(self.operator.write(path, data))?;
-                    outcome.remote_version = local_version.clone();
+                    let meta = self.rt.block_on(self.operator.stat(path))?;
+                    outcome.remote_version = remote_file_token(&meta);
                 }
                 PlannedOp::DeleteLocal { path, kind } => {
                     delete_local_entry(&self.local_root, path, *kind)?;
@@ -179,7 +180,6 @@ mod tests {
             path: "notes.txt".to_string(),
             ops: vec![PlannedOp::PushFile {
                 path: "notes.txt".to_string(),
-                local_version: Some("ignored".to_string()),
             }],
             record_spec: PlannedRecordSpec::Remove,
             events: Vec::new(),

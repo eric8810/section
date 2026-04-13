@@ -184,6 +184,12 @@ pub fn compare_path(
         .as_ref()
         .and_then(|record| record.base_remote_version.clone());
     let stale = stored.as_ref().map(|record| record.stale).unwrap_or(false);
+    let (local_matches_base, local_matches_current_remote) = compare_match_flags(
+        &local_version,
+        &base_remote_version,
+        &current_remote_version,
+        stored.as_ref(),
+    );
 
     Ok(PathCompareSnapshot {
         source_id: source_id.to_string(),
@@ -197,9 +203,8 @@ pub fn compare_path(
         local_version: local_version.clone(),
         base_remote_version: base_remote_version.clone(),
         current_remote_version: current_remote_version.clone(),
-        local_matches_base: local_version.is_some() && local_version == base_remote_version,
-        local_matches_current_remote: local_version.is_some()
-            && local_version == current_remote_version,
+        local_matches_base,
+        local_matches_current_remote,
         stale,
     })
 }
@@ -339,6 +344,17 @@ fn materialize_record(
     match record_spec {
         PlannedRecordSpec::Remove => Ok(None),
         PlannedRecordSpec::Static(record) => Ok(Some(record.clone())),
+        PlannedRecordSpec::ReadyFromPushedLocal {
+            kind,
+            local_version,
+        } => Ok(Some(ready_record(
+            source_id,
+            source_path,
+            *kind,
+            local_version.clone(),
+            outcome.remote_version.or_else(|| local_version.clone()),
+            true,
+        ))),
         PlannedRecordSpec::ReadyFromPulledRemote {
             kind,
             remote_version,
@@ -641,14 +657,42 @@ fn remote_file_version(
     source_path: &str,
     meta: &Metadata,
 ) -> Result<String> {
-    if let Some(etag) = meta.etag() {
-        if !etag.is_empty() {
-            return Ok(etag.to_string());
-        }
+    if let Some(version) = remote_file_token(meta) {
+        return Ok(version);
     }
 
     let data = rt.block_on(operator.read(source_path))?;
     Ok(hash_bytes(data.to_bytes().as_ref()))
+}
+
+fn remote_file_token(meta: &Metadata) -> Option<String> {
+    meta.etag()
+        .filter(|etag| !etag.is_empty())
+        .map(|etag| etag.to_string())
+}
+
+fn compare_match_flags(
+    local_version: &Option<String>,
+    base_remote_version: &Option<String>,
+    current_remote_version: &Option<String>,
+    stored: Option<&PathSyncStateRecord>,
+) -> (bool, bool) {
+    match stored {
+        Some(record) => {
+            let local_matches_base =
+                local_version.is_some() && *local_version == record.last_local_version;
+            let local_matches_current_remote =
+                local_matches_base && *current_remote_version == record.current_remote_version;
+            (local_matches_base, local_matches_current_remote)
+        }
+        None => {
+            let local_matches_base =
+                local_version.is_some() && *local_version == *base_remote_version;
+            let local_matches_current_remote =
+                local_version.is_some() && *local_version == *current_remote_version;
+            (local_matches_base, local_matches_current_remote)
+        }
+    }
 }
 
 fn push_local_entry(
@@ -668,7 +712,8 @@ fn push_local_entry(
             let data = fs::read(&local_path)?;
             ensure_remote_parent_dirs(rt, operator, source_path)?;
             rt.block_on(operator.write(source_path, data))?;
-            Ok(local.version.clone())
+            let meta = rt.block_on(operator.stat(source_path))?;
+            Ok(remote_file_token(&meta).or_else(|| local.version.clone()))
         }
     }
 }
@@ -822,4 +867,41 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("clock drift")
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_match_flags;
+    use section_provider::PathSyncStateRecord;
+
+    fn ready_record_with_versions() -> PathSyncStateRecord {
+        PathSyncStateRecord {
+            source_name: "local".to_string(),
+            path: "notes.txt".to_string(),
+            entry_kind: "file".to_string(),
+            public_state: "ready".to_string(),
+            local_present: true,
+            dirty_local: false,
+            dirty_remote: false,
+            pinned: false,
+            stale: false,
+            last_local_version: Some("sha256:local".to_string()),
+            base_remote_version: Some("\"etag-v1\"".to_string()),
+            current_remote_version: Some("\"etag-v1\"".to_string()),
+        }
+    }
+
+    #[test]
+    fn compare_flags_use_stored_sync_state_for_remote_token_backends() {
+        let stored = ready_record_with_versions();
+        let (local_matches_base, local_matches_current_remote) = compare_match_flags(
+            &Some("sha256:local".to_string()),
+            &stored.base_remote_version,
+            &Some("\"etag-v1\"".to_string()),
+            Some(&stored),
+        );
+
+        assert!(local_matches_base);
+        assert!(local_matches_current_remote);
+    }
 }

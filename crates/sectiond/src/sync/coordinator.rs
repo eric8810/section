@@ -11,33 +11,22 @@ pub(crate) trait SyncCoordinator {
 
 #[derive(Debug, Clone)]
 pub(crate) enum PlannedOp {
-    CreateLocalDir {
-        path: String,
-    },
-    CreateRemoteDir {
-        path: String,
-    },
-    PullFile {
-        path: String,
-    },
-    PushFile {
-        path: String,
-        local_version: Option<String>,
-    },
-    DeleteLocal {
-        path: String,
-        kind: EntryKind,
-    },
-    DeleteRemote {
-        path: String,
-        kind: EntryKind,
-    },
+    CreateLocalDir { path: String },
+    CreateRemoteDir { path: String },
+    PullFile { path: String },
+    PushFile { path: String },
+    DeleteLocal { path: String, kind: EntryKind },
+    DeleteRemote { path: String, kind: EntryKind },
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum PlannedRecordSpec {
     Remove,
     Static(PathSyncStateRecord),
+    ReadyFromPushedLocal {
+        kind: EntryKind,
+        local_version: Option<String>,
+    },
     ReadyFromPulledRemote {
         kind: EntryKind,
         remote_version: Option<String>,
@@ -149,14 +138,7 @@ fn plan_path(source_id: &str, input: PathSyncInput) -> Result<PathSyncPlan> {
                 Ok(PathSyncPlan {
                     path: path.clone(),
                     ops: push_ops(&path, &local),
-                    record_spec: PlannedRecordSpec::Static(ready_record(
-                        source_id,
-                        &path,
-                        local.kind,
-                        local.version.clone(),
-                        local.version.clone(),
-                        true,
-                    )),
+                    record_spec: push_record_spec(source_id, &path, &local),
                     events: vec![event_for(source_id, &path, "synced_to_remote", "ready")],
                     pulled: 0,
                     pushed: 1,
@@ -269,14 +251,7 @@ fn plan_path(source_id: &str, input: PathSyncInput) -> Result<PathSyncPlan> {
                 Ok(PathSyncPlan {
                     path: path.clone(),
                     ops: push_ops(&path, &local),
-                    record_spec: PlannedRecordSpec::Static(ready_record(
-                        source_id,
-                        &path,
-                        local.kind,
-                        local.version.clone(),
-                        local.version.clone(),
-                        true,
-                    )),
+                    record_spec: push_record_spec(source_id, &path, &local),
                     events: vec![event_for(source_id, &path, "synced_to_remote", "ready")],
                     pulled: 0,
                     pushed: 1,
@@ -284,15 +259,7 @@ fn plan_path(source_id: &str, input: PathSyncInput) -> Result<PathSyncPlan> {
                 })
             }
         }
-        (None, None) => Ok(PathSyncPlan {
-            path,
-            ops: Vec::new(),
-            record_spec: PlannedRecordSpec::Remove,
-            events: Vec::new(),
-            pulled: 0,
-            pushed: 0,
-            conflicts: 0,
-        }),
+        (None, None) => unreachable!("handled above"),
     }
 }
 
@@ -314,7 +281,6 @@ fn push_ops(path: &str, local: &ObservedEntry) -> Vec<PlannedOp> {
         }],
         EntryKind::File => vec![PlannedOp::PushFile {
             path: path.to_string(),
-            local_version: local.version.clone(),
         }],
     }
 }
@@ -332,6 +298,23 @@ fn pull_record_spec(source_id: &str, path: &str, remote: &ObservedEntry) -> Plan
         EntryKind::File => PlannedRecordSpec::ReadyFromPulledRemote {
             kind: EntryKind::File,
             remote_version: remote.version.clone(),
+        },
+    }
+}
+
+fn push_record_spec(source_id: &str, path: &str, local: &ObservedEntry) -> PlannedRecordSpec {
+    match local.kind {
+        EntryKind::Dir => PlannedRecordSpec::Static(ready_record(
+            source_id,
+            path,
+            EntryKind::Dir,
+            None,
+            None,
+            true,
+        )),
+        EntryKind::File => PlannedRecordSpec::ReadyFromPushedLocal {
+            kind: EntryKind::File,
+            local_version: local.version.clone(),
         },
     }
 }
