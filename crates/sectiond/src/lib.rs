@@ -16,6 +16,6 @@ pub use runtime::{
     SectiondRuntime, SourceOrigin, SourceSnapshot, SourceStatusSnapshot, StatusSnapshot,
 };
 pub use sync::{
-    compare_path, list_watch_events, resolve_path, sync_source, PathCompareSnapshot,
-    PathResolveResult, PathResolveStrategy, SourceSyncResult,
+    compare_path, list_watch_events, resolve_path, sync_source, LocalScanStats,
+    PathCompareSnapshot, PathResolveResult, PathResolveStrategy, RemoteScanStats, SourceSyncResult,
 };

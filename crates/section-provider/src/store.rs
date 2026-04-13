@@ -38,6 +38,24 @@ pub struct SyncEventRecord {
     pub created_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalScanCacheRecord {
+    pub path: String,
+    pub entry_kind: String,
+    pub version: Option<String>,
+    pub size: Option<u64>,
+    pub mtime_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteManifestRecord {
+    pub path: String,
+    pub entry_kind: String,
+    pub version: Option<String>,
+    pub size: Option<u64>,
+    pub mtime_ms: Option<i64>,
+}
+
 /// Persistent store for sources and their credentials.
 pub struct ProviderStore {
     conn: Connection,
@@ -103,6 +121,24 @@ impl ProviderStore {
                 kind TEXT NOT NULL,
                 state TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS local_scan_cache (
+                source_name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                entry_kind TEXT NOT NULL DEFAULT 'file',
+                version TEXT,
+                size_bytes INTEGER,
+                mtime_ms INTEGER,
+                PRIMARY KEY (source_name, path)
+            );
+            CREATE TABLE IF NOT EXISTS remote_manifest (
+                source_name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                entry_kind TEXT NOT NULL DEFAULT 'file',
+                version TEXT,
+                size_bytes INTEGER,
+                mtime_ms INTEGER,
+                PRIMARY KEY (source_name, path)
             );",
         )?;
 
@@ -193,6 +229,12 @@ impl ProviderStore {
         )?;
         self.conn
             .execute("DELETE FROM path_sync_state WHERE source_name = ?1", [name])?;
+        self.conn.execute(
+            "DELETE FROM local_scan_cache WHERE source_name = ?1",
+            [name],
+        )?;
+        self.conn
+            .execute("DELETE FROM remote_manifest WHERE source_name = ?1", [name])?;
         Ok(())
     }
 
@@ -383,6 +425,148 @@ impl ProviderStore {
         })?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_local_scan_cache(
+        &self,
+        source_name: &str,
+    ) -> anyhow::Result<Vec<LocalScanCacheRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, entry_kind, version, size_bytes, mtime_ms
+             FROM local_scan_cache
+             WHERE source_name = ?1
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map([source_name], |row| {
+            Ok(LocalScanCacheRecord {
+                path: row.get(0)?,
+                entry_kind: row.get(1)?,
+                version: row.get(2)?,
+                size: row.get::<_, Option<i64>>(3)?.map(|size| size as u64),
+                mtime_ms: row.get(4)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn replace_local_scan_cache(
+        &self,
+        source_name: &str,
+        records: &[LocalScanCacheRecord],
+    ) -> anyhow::Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> anyhow::Result<()> {
+            self.conn.execute(
+                "DELETE FROM local_scan_cache WHERE source_name = ?1",
+                [source_name],
+            )?;
+            let mut stmt = self.conn.prepare(
+                "INSERT INTO local_scan_cache (
+                    source_name,
+                    path,
+                    entry_kind,
+                    version,
+                    size_bytes,
+                    mtime_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+
+            for record in records {
+                stmt.execute(rusqlite::params![
+                    source_name,
+                    record.path,
+                    record.entry_kind,
+                    record.version,
+                    record.size.map(|size| size as i64),
+                    record.mtime_ms,
+                ])?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    pub fn list_remote_manifest(
+        &self,
+        source_name: &str,
+    ) -> anyhow::Result<Vec<RemoteManifestRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, entry_kind, version, size_bytes, mtime_ms
+             FROM remote_manifest
+             WHERE source_name = ?1
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map([source_name], |row| {
+            Ok(RemoteManifestRecord {
+                path: row.get(0)?,
+                entry_kind: row.get(1)?,
+                version: row.get(2)?,
+                size: row.get::<_, Option<i64>>(3)?.map(|size| size as u64),
+                mtime_ms: row.get(4)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn replace_remote_manifest(
+        &self,
+        source_name: &str,
+        records: &[RemoteManifestRecord],
+    ) -> anyhow::Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> anyhow::Result<()> {
+            self.conn.execute(
+                "DELETE FROM remote_manifest WHERE source_name = ?1",
+                [source_name],
+            )?;
+            let mut stmt = self.conn.prepare(
+                "INSERT INTO remote_manifest (
+                    source_name,
+                    path,
+                    entry_kind,
+                    version,
+                    size_bytes,
+                    mtime_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+
+            for record in records {
+                stmt.execute(rusqlite::params![
+                    source_name,
+                    record.path,
+                    record.entry_kind,
+                    record.version,
+                    record.size.map(|size| size as i64),
+                    record.mtime_ms,
+                ])?;
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
     }
 
     pub fn append_sync_event(
@@ -685,5 +869,58 @@ mod tests {
         assert_eq!(events[0].path, "a.txt");
         assert_eq!(events[0].state, "syncing");
         assert_eq!(events[1].state, "ready");
+    }
+
+    #[test]
+    fn local_scan_cache_round_trips() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+        let records = vec![
+            LocalScanCacheRecord {
+                path: "docs".to_string(),
+                entry_kind: "dir".to_string(),
+                version: None,
+                size: None,
+                mtime_ms: Some(10),
+            },
+            LocalScanCacheRecord {
+                path: "docs/readme.txt".to_string(),
+                entry_kind: "file".to_string(),
+                version: Some("sha256:v1".to_string()),
+                size: Some(42),
+                mtime_ms: Some(11),
+            },
+        ];
+
+        store
+            .replace_local_scan_cache("local", &records)
+            .expect("replace local scan cache");
+
+        let loaded = store
+            .list_local_scan_cache("local")
+            .expect("list local scan cache");
+        assert_eq!(loaded, records);
+    }
+
+    #[test]
+    fn remote_manifest_round_trips() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+        let records = vec![RemoteManifestRecord {
+            path: "docs/readme.txt".to_string(),
+            entry_kind: "file".to_string(),
+            version: Some("\"etag-v1\"".to_string()),
+            size: Some(42),
+            mtime_ms: Some(12),
+        }];
+
+        store
+            .replace_remote_manifest("local", &records)
+            .expect("replace remote manifest");
+
+        let loaded = store
+            .list_remote_manifest("local")
+            .expect("list remote manifest");
+        assert_eq!(loaded, records);
     }
 }

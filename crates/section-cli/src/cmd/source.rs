@@ -110,12 +110,17 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
                 println!("{}", serde_json::to_string(&result)?);
             } else {
                 println!(
-                    "Source '{name}' synced. local_root={}, pulled={}, pushed={}, conflicts={}, events={}",
+                    "Source '{name}' synced. local_root={}, pulled={}, pushed={}, conflicts={}, events={}, local_cache_hits={}/{}, remote_metadata_hits={}, remote_stat_fallbacks={}, remote_body_fallbacks={}",
                     result.local_root.display(),
                     result.pulled,
                     result.pushed,
                     result.conflicts,
                     result.events_emitted,
+                    result.local_scan.cache_hits,
+                    result.local_scan.files,
+                    result.remote_scan.metadata_hits,
+                    result.remote_scan.stat_fallbacks,
+                    result.remote_scan.body_fallbacks,
                 );
             }
 

@@ -1,4 +1,7 @@
 pub mod crypto;
 pub mod store;
 
-pub use store::{PathSyncStateRecord, ProviderStore, SourceLocalRootBinding, SyncEventRecord};
+pub use store::{
+    LocalScanCacheRecord, PathSyncStateRecord, ProviderStore, RemoteManifestRecord,
+    SourceLocalRootBinding, SyncEventRecord,
+};

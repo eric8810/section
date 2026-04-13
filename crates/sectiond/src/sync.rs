@@ -9,7 +9,9 @@ use coordinator::{
 };
 use opendal::{EntryMode, Metadata, Operator};
 use ring::digest::{digest, SHA256};
-use section_provider::{PathSyncStateRecord, ProviderStore, SyncEventRecord};
+use section_provider::{
+    LocalScanCacheRecord, PathSyncStateRecord, ProviderStore, RemoteManifestRecord, SyncEventRecord,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -19,6 +21,8 @@ use transport::{OpenDalTransport, Transport, TransportConfig, TransportOutcome};
 
 use crate::SectiondRuntime;
 
+pub use collector::{LocalScanStats, RemoteScanStats};
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SourceSyncResult {
     pub source_id: String,
@@ -27,6 +31,8 @@ pub struct SourceSyncResult {
     pub pushed: usize,
     pub conflicts: usize,
     pub events_emitted: usize,
+    pub local_scan: LocalScanStats,
+    pub remote_scan: RemoteScanStats,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -67,7 +73,7 @@ pub struct PathResolveResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EntryKind {
+pub(crate) enum EntryKind {
     File,
     Dir,
 }
@@ -111,11 +117,39 @@ pub fn sync_source(
         .into_iter()
         .map(|record| (record.path.clone(), record))
         .collect::<HashMap<_, _>>();
+    let local_cache = store
+        .list_local_scan_cache(source_id)?
+        .into_iter()
+        .map(|record| (record.path.clone(), record))
+        .collect::<HashMap<String, LocalScanCacheRecord>>();
+    let remote_manifest = store
+        .list_remote_manifest(source_id)?
+        .into_iter()
+        .map(|record| (record.path.clone(), record))
+        .collect::<HashMap<String, RemoteManifestRecord>>();
 
     let collector = DefaultSnapshotCollector::new(&rt);
-    let local = collector.collect_local(local_root, &existing)?;
-    let remote = collector.collect_remote(operator, &existing)?;
+    let local_snapshot = collector.collect_local(local_root, &local_cache)?;
+    let remote_snapshot = collector.collect_remote(operator, &remote_manifest)?;
+    let collector::LocalSnapshot {
+        entries: local,
+        cache_records: refreshed_local_cache,
+        stats: local_scan,
+    } = local_snapshot;
+    let collector::RemoteSnapshot {
+        entries: remote,
+        manifest_records: refreshed_remote_manifest,
+        stats: remote_scan,
+    } = remote_snapshot;
     let inputs = collector.build_inputs(existing, local, remote);
+    let mut refreshed_local_cache = refreshed_local_cache
+        .into_iter()
+        .map(|record| (record.path.clone(), record))
+        .collect::<HashMap<String, LocalScanCacheRecord>>();
+    let mut refreshed_remote_manifest = refreshed_remote_manifest
+        .into_iter()
+        .map(|record| (record.path.clone(), record))
+        .collect::<HashMap<String, RemoteManifestRecord>>();
 
     let coordinator = DefaultSyncCoordinator::default();
     let SyncPlan { paths } = coordinator.plan(source_id, inputs)?;
@@ -134,11 +168,28 @@ pub fn sync_source(
 
     for path_plan in paths {
         let outcome = transport.execute(&path_plan)?;
+        refresh_cached_snapshots(
+            &rt,
+            operator,
+            local_root,
+            &path_plan,
+            &outcome,
+            &mut refreshed_local_cache,
+            &mut refreshed_remote_manifest,
+        )?;
         persist_path_plan(store, source_id, &path_plan, outcome, &mut events_emitted)?;
         pulled += path_plan.pulled;
         pushed += path_plan.pushed;
         conflicts += path_plan.conflicts;
     }
+
+    let mut refreshed_local_cache = refreshed_local_cache.into_values().collect::<Vec<_>>();
+    refreshed_local_cache.sort_by(|left, right| left.path.cmp(&right.path));
+    store.replace_local_scan_cache(source_id, &refreshed_local_cache)?;
+
+    let mut refreshed_remote_manifest = refreshed_remote_manifest.into_values().collect::<Vec<_>>();
+    refreshed_remote_manifest.sort_by(|left, right| left.path.cmp(&right.path));
+    store.replace_remote_manifest(source_id, &refreshed_remote_manifest)?;
 
     Ok(SourceSyncResult {
         source_id: source_id.to_string(),
@@ -147,6 +198,8 @@ pub fn sync_source(
         pushed,
         conflicts,
         events_emitted,
+        local_scan,
+        remote_scan,
     })
 }
 
@@ -333,6 +386,188 @@ fn persist_path_plan(
     }
 
     Ok(())
+}
+
+fn refresh_cached_snapshots(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    local_root: &Path,
+    path_plan: &PathSyncPlan,
+    outcome: &TransportOutcome,
+    local_cache: &mut HashMap<String, LocalScanCacheRecord>,
+    remote_manifest: &mut HashMap<String, RemoteManifestRecord>,
+) -> Result<()> {
+    for op in &path_plan.ops {
+        match op {
+            coordinator::PlannedOp::CreateLocalDir { path } => {
+                upsert_local_cache_record(local_root, path, None, local_cache)?;
+            }
+            coordinator::PlannedOp::CreateRemoteDir { path } => {
+                upsert_remote_manifest_dir_record(rt, operator, path, remote_manifest)?;
+            }
+            coordinator::PlannedOp::PullFile { path } => {
+                upsert_local_cache_record(
+                    local_root,
+                    path,
+                    outcome.local_version.clone(),
+                    local_cache,
+                )?;
+            }
+            coordinator::PlannedOp::PushFile { path } => {
+                let planned_version = match &path_plan.record_spec {
+                    PlannedRecordSpec::ReadyFromPushedLocal { local_version, .. } => {
+                        local_version.clone()
+                    }
+                    _ => None,
+                };
+                upsert_remote_manifest_file_record(
+                    rt,
+                    operator,
+                    path,
+                    outcome.remote_version.clone().or(planned_version),
+                    remote_manifest,
+                )?;
+            }
+            coordinator::PlannedOp::DeleteLocal { path, .. } => {
+                local_cache.remove(path);
+            }
+            coordinator::PlannedOp::DeleteRemote { path, .. } => {
+                remote_manifest.remove(path);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn upsert_local_cache_record(
+    local_root: &Path,
+    source_path: &str,
+    version: Option<String>,
+    cache: &mut HashMap<String, LocalScanCacheRecord>,
+) -> Result<()> {
+    let local_path = local_root.join(source_path);
+    let metadata = match fs::metadata(&local_path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            cache.remove(source_path);
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    if metadata.is_dir() {
+        cache.insert(
+            source_path.to_string(),
+            LocalScanCacheRecord {
+                path: source_path.to_string(),
+                entry_kind: "dir".to_string(),
+                version: None,
+                size: None,
+                mtime_ms: local_mtime_ms(&metadata),
+            },
+        );
+        return Ok(());
+    }
+
+    if !metadata.is_file() {
+        bail!("unsupported local entry type for {}", local_path.display());
+    }
+
+    let version = match version {
+        Some(version) => Some(version),
+        None => Some(hash_bytes(&fs::read(&local_path)?)),
+    };
+
+    cache.insert(
+        source_path.to_string(),
+        LocalScanCacheRecord {
+            path: source_path.to_string(),
+            entry_kind: "file".to_string(),
+            version,
+            size: Some(metadata.len()),
+            mtime_ms: local_mtime_ms(&metadata),
+        },
+    );
+    Ok(())
+}
+
+fn upsert_remote_manifest_dir_record(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    source_path: &str,
+    manifest: &mut HashMap<String, RemoteManifestRecord>,
+) -> Result<()> {
+    let meta = stat_remote_metadata(rt, operator, source_path, EntryKind::Dir)?;
+    manifest.insert(
+        source_path.to_string(),
+        RemoteManifestRecord {
+            path: source_path.to_string(),
+            entry_kind: "dir".to_string(),
+            version: None,
+            size: None,
+            mtime_ms: meta.as_ref().and_then(remote_mtime_ms),
+        },
+    );
+    Ok(())
+}
+
+fn upsert_remote_manifest_file_record(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    source_path: &str,
+    version: Option<String>,
+    manifest: &mut HashMap<String, RemoteManifestRecord>,
+) -> Result<()> {
+    let meta = stat_remote_metadata(rt, operator, source_path, EntryKind::File)?;
+    let version = meta.as_ref().and_then(remote_file_token).or(version);
+    let size = meta.as_ref().and_then(|meta| {
+        let content_length = meta.content_length();
+        if content_length > 0 || version.is_some() {
+            Some(content_length)
+        } else {
+            None
+        }
+    });
+    let mtime_ms = meta.as_ref().and_then(remote_mtime_ms);
+
+    manifest.insert(
+        source_path.to_string(),
+        RemoteManifestRecord {
+            path: source_path.to_string(),
+            entry_kind: "file".to_string(),
+            version,
+            size,
+            mtime_ms,
+        },
+    );
+    Ok(())
+}
+
+fn stat_remote_metadata(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    source_path: &str,
+    kind: EntryKind,
+) -> Result<Option<Metadata>> {
+    let candidates = match kind {
+        EntryKind::Dir => vec![normalized_dir(source_path), source_path.to_string()],
+        EntryKind::File => vec![source_path.to_string()],
+    };
+
+    for candidate in candidates {
+        if candidate.is_empty() {
+            continue;
+        }
+
+        match rt.block_on(operator.stat(&candidate)) {
+            Ok(meta) => return Ok(Some(meta)),
+            Err(err) if err.kind() == opendal::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Ok(None)
 }
 
 fn materialize_record(
@@ -643,7 +878,7 @@ fn observe_remote_entry(
     })
 }
 
-fn metadata_entry_kind(meta: &Metadata) -> Result<EntryKind> {
+pub(crate) fn metadata_entry_kind(meta: &Metadata) -> Result<EntryKind> {
     match meta.mode() {
         EntryMode::FILE => Ok(EntryKind::File),
         EntryMode::DIR => Ok(EntryKind::Dir),
@@ -665,10 +900,15 @@ fn remote_file_version(
     Ok(hash_bytes(data.to_bytes().as_ref()))
 }
 
-fn remote_file_token(meta: &Metadata) -> Option<String> {
-    meta.etag()
-        .filter(|etag| !etag.is_empty())
-        .map(|etag| etag.to_string())
+pub(crate) fn remote_file_token(meta: &Metadata) -> Option<String> {
+    meta.version()
+        .filter(|version| !version.is_empty())
+        .map(|version| version.to_string())
+        .or_else(|| {
+            meta.etag()
+                .filter(|etag| !etag.is_empty())
+                .map(|etag| etag.to_string())
+        })
 }
 
 fn compare_match_flags(
@@ -815,7 +1055,7 @@ fn ensure_remote_dir(
     Ok(())
 }
 
-fn normalize_source_path(path: &str) -> String {
+pub(crate) fn normalize_source_path(path: &str) -> String {
     path.trim_matches('/').to_string()
 }
 
@@ -836,7 +1076,7 @@ fn display_source_path(path: &str) -> String {
     }
 }
 
-fn hash_bytes(bytes: &[u8]) -> String {
+pub(crate) fn hash_bytes(bytes: &[u8]) -> String {
     let digest = digest(&SHA256, bytes);
     digest
         .as_ref()
@@ -845,11 +1085,11 @@ fn hash_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn local_mtime_ms(metadata: &fs::Metadata) -> Option<i64> {
+pub(crate) fn local_mtime_ms(metadata: &fs::Metadata) -> Option<i64> {
     metadata.modified().ok().and_then(system_time_to_ms)
 }
 
-fn remote_mtime_ms(meta: &Metadata) -> Option<i64> {
+pub(crate) fn remote_mtime_ms(meta: &Metadata) -> Option<i64> {
     meta.last_modified().and_then(|timestamp| {
         let system_time: SystemTime = timestamp.into();
         system_time_to_ms(system_time)

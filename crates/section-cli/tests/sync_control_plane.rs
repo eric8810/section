@@ -165,3 +165,70 @@ fn source_sync_compare_resolve_and_watch_work_together() {
         "local-v2"
     );
 }
+
+#[test]
+fn source_sync_reports_cache_hits_on_second_noop_round() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let config_path = temp_dir.path().join("config.toml");
+    let source_root = temp_dir.path().join("source-root");
+    let local_root = temp_dir.path().join("bound-root");
+    let remote_file = source_root.join("docs").join("readme.txt");
+
+    fs::create_dir_all(remote_file.parent().expect("remote parent")).expect("create remote dir");
+    fs::write(&remote_file, "remote-v1").expect("write remote seed");
+    write_config(&config_path, &data_dir);
+
+    let add = run_section(
+        &config_path,
+        &[
+            "source",
+            "add",
+            "local",
+            "--provider",
+            "fs",
+            "--opt",
+            &format!("root={}", source_root.display()),
+        ],
+    );
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let bind = run_section(
+        &config_path,
+        &[
+            "source",
+            "bind",
+            "local",
+            local_root.to_str().expect("utf8 local root"),
+        ],
+    );
+    assert!(
+        bind.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bind.stderr)
+    );
+
+    let first = run_section(&config_path, &["--json", "source", "sync", "local"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let second = run_section(&config_path, &["--json", "source", "sync", "local"]);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let second: Value = serde_json::from_slice(&second.stdout).expect("second sync json");
+    assert_eq!(second["local_scan"]["files"], 1);
+    assert_eq!(second["local_scan"]["cache_hits"], 1);
+    assert_eq!(second["local_scan"]["cache_misses"], 0);
+    assert_eq!(second["remote_scan"]["body_fallbacks"], 0);
+}
