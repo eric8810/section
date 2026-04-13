@@ -1,12 +1,21 @@
+mod collector;
+mod coordinator;
+mod transport;
+
 use anyhow::{anyhow, bail, Result};
-use opendal::{Entry, EntryMode, Metadata, Operator};
+use collector::{DefaultSnapshotCollector, ObservedEntry, PathSyncInput, SnapshotCollector};
+use coordinator::{
+    DefaultSyncCoordinator, PathSyncPlan, PlannedRecordSpec, SyncCoordinator, SyncPlan,
+};
+use opendal::{EntryMode, Metadata, Operator};
 use ring::digest::{digest, SHA256};
 use section_provider::{PathSyncStateRecord, ProviderStore, SyncEventRecord};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use transport::{OpenDalTransport, Transport, TransportConfig, TransportOutcome};
 
 use crate::SectiondRuntime;
 
@@ -58,12 +67,12 @@ pub struct PathResolveResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EntryKindRepr {
+enum EntryKind {
     File,
     Dir,
 }
 
-impl EntryKindRepr {
+impl EntryKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -73,15 +82,18 @@ impl EntryKindRepr {
 }
 
 #[derive(Debug, Clone)]
-struct LocalEntrySnapshot {
-    kind: EntryKindRepr,
-    version: Option<String>,
+struct PendingSyncEvent {
+    source_name: String,
+    path: String,
+    kind: String,
+    state: String,
+    created_at_ms: i64,
 }
 
-#[derive(Debug, Clone)]
-struct RemoteEntrySnapshot {
-    kind: EntryKindRepr,
-    version: Option<String>,
+#[derive(Debug)]
+struct ResolveOutcome {
+    record: PathSyncStateRecord,
+    events: Vec<PendingSyncEvent>,
 }
 
 pub fn sync_source(
@@ -94,60 +106,38 @@ pub fn sync_source(
     let rt = tokio::runtime::Runtime::new()?;
     fs::create_dir_all(local_root)?;
 
-    let local_entries = scan_local_tree(local_root)?;
-    let remote_entries = scan_remote_tree(&rt, operator)?;
     let existing = store
         .list_path_sync_states(source_id)?
         .into_iter()
         .map(|record| (record.path.clone(), record))
         .collect::<HashMap<_, _>>();
 
-    let mut all_paths = BTreeSet::new();
-    all_paths.extend(local_entries.keys().cloned());
-    all_paths.extend(remote_entries.keys().cloned());
-    all_paths.extend(existing.keys().cloned());
+    let collector = DefaultSnapshotCollector::new(&rt);
+    let local = collector.collect_local(local_root, &existing)?;
+    let remote = collector.collect_remote(operator, &existing)?;
+    let inputs = collector.build_inputs(existing, local, remote);
+
+    let coordinator = DefaultSyncCoordinator::default();
+    let SyncPlan { paths } = coordinator.plan(source_id, inputs)?;
+
+    let transport = OpenDalTransport::new(
+        &rt,
+        operator.clone(),
+        local_root.to_path_buf(),
+        TransportConfig::default(),
+    );
 
     let mut pulled = 0;
     let mut pushed = 0;
     let mut conflicts = 0;
     let mut events_emitted = 0;
 
-    for source_path in all_paths {
-        let local = local_entries.get(&source_path);
-        let remote = remote_entries.get(&source_path);
-        let previous = existing.get(&source_path);
-
-        let outcome = reconcile_path(
-            &rt,
-            operator,
-            source_id,
-            local_root,
-            &source_path,
-            previous.cloned(),
-            local.cloned(),
-            remote.cloned(),
-        )?;
-
-        if let Some(record) = outcome.record {
-            store.upsert_path_sync_state(&record)?;
-        } else {
-            store.remove_path_sync_state(source_id, &source_path)?;
-        }
-
-        for event in outcome.events {
-            store.append_sync_event(
-                &event.source_name,
-                &event.path,
-                &event.kind,
-                &event.state,
-                event.created_at_ms,
-            )?;
-            events_emitted += 1;
-        }
-
-        pulled += outcome.pulled;
-        pushed += outcome.pushed;
-        conflicts += outcome.conflicts;
+    for path_plan in paths {
+        let outcome = transport.execute(&path_plan)?;
+        persist_path_plan(store, source_id, &path_plan, outcome, &mut events_emitted)?;
+        pulled += path_plan.pulled;
+        pushed += path_plan.pushed;
+        conflicts += path_plan.conflicts;
     }
 
     Ok(SourceSyncResult {
@@ -314,249 +304,52 @@ pub fn list_watch_events(
         .collect())
 }
 
-#[derive(Debug)]
-struct ReconcileOutcome {
-    record: Option<PathSyncStateRecord>,
-    events: Vec<PendingSyncEvent>,
-    pulled: usize,
-    pushed: usize,
-    conflicts: usize,
-}
-
-#[derive(Debug, Clone)]
-struct PendingSyncEvent {
-    source_name: String,
-    path: String,
-    kind: String,
-    state: String,
-    created_at_ms: i64,
-}
-
-#[derive(Debug)]
-struct ResolveOutcome {
-    record: PathSyncStateRecord,
-    events: Vec<PendingSyncEvent>,
-}
-
-fn reconcile_path(
-    rt: &tokio::runtime::Runtime,
-    operator: &Operator,
+fn persist_path_plan(
+    store: &ProviderStore,
     source_id: &str,
-    local_root: &Path,
+    path_plan: &PathSyncPlan,
+    outcome: TransportOutcome,
+    events_emitted: &mut usize,
+) -> Result<()> {
+    match materialize_record(source_id, &path_plan.path, &path_plan.record_spec, outcome)? {
+        Some(record) => store.upsert_path_sync_state(&record)?,
+        None => store.remove_path_sync_state(source_id, &path_plan.path)?,
+    }
+
+    for event in &path_plan.events {
+        store.append_sync_event(
+            &event.source_name,
+            &event.path,
+            &event.kind,
+            &event.state,
+            event.created_at_ms,
+        )?;
+        *events_emitted += 1;
+    }
+
+    Ok(())
+}
+
+fn materialize_record(
+    source_id: &str,
     source_path: &str,
-    previous: Option<PathSyncStateRecord>,
-    local: Option<LocalEntrySnapshot>,
-    remote: Option<RemoteEntrySnapshot>,
-) -> Result<ReconcileOutcome> {
-    if local.is_none() && remote.is_none() {
-        return Ok(ReconcileOutcome {
-            record: None,
-            events: Vec::new(),
-            pulled: 0,
-            pushed: 0,
-            conflicts: 0,
-        });
-    }
-
-    if let (Some(local), Some(remote)) = (&local, &remote) {
-        if local.kind != remote.kind {
-            let record = conflict_record(source_id, source_path, local, remote, previous.as_ref());
-            let event = event_for(source_id, source_path, "conflict_detected", "conflict");
-            return Ok(ReconcileOutcome {
-                record: Some(record),
-                events: vec![event],
-                pulled: 0,
-                pushed: 0,
-                conflicts: 1,
-            });
-        }
-    }
-
-    let prev_base_remote = previous
-        .as_ref()
-        .and_then(|record| record.base_remote_version.clone());
-    let prev_local_version = previous
-        .as_ref()
-        .and_then(|record| record.last_local_version.clone());
-    let prev_local_present = previous
-        .as_ref()
-        .map(|record| record.local_present)
-        .unwrap_or(false);
-
-    let local_changed = match &local {
-        Some(entry) => entry.version != prev_local_version || !prev_local_present,
-        None => prev_local_present,
-    };
-    let remote_version = remote.as_ref().and_then(|entry| entry.version.clone());
-    let remote_changed = remote_version != prev_base_remote;
-
-    match (local, remote) {
-        (Some(local), Some(remote)) => {
-            if !local_changed && !remote_changed {
-                Ok(ReconcileOutcome {
-                    record: Some(ready_record(
-                        source_id,
-                        source_path,
-                        local.kind,
-                        local.version.clone(),
-                        remote.version.clone(),
-                        true,
-                    )),
-                    events: Vec::new(),
-                    pulled: 0,
-                    pushed: 0,
-                    conflicts: 0,
-                })
-            } else if local_changed && !remote_changed {
-                let remote_version =
-                    push_local_entry(rt, operator, local_root, source_path, &local)?;
-                let event = event_for(source_id, source_path, "synced_to_remote", "ready");
-                Ok(ReconcileOutcome {
-                    record: Some(ready_record(
-                        source_id,
-                        source_path,
-                        local.kind,
-                        local.version.clone(),
-                        remote_version,
-                        true,
-                    )),
-                    events: vec![event],
-                    pulled: 0,
-                    pushed: 1,
-                    conflicts: 0,
-                })
-            } else if !local_changed && remote_changed {
-                let local_version =
-                    pull_remote_entry(rt, operator, local_root, source_path, &remote)?;
-                let event = event_for(source_id, source_path, "synced_from_remote", "ready");
-                Ok(ReconcileOutcome {
-                    record: Some(ready_record(
-                        source_id,
-                        source_path,
-                        remote.kind,
-                        local_version,
-                        remote.version.clone(),
-                        true,
-                    )),
-                    events: vec![event],
-                    pulled: 1,
-                    pushed: 0,
-                    conflicts: 0,
-                })
-            } else {
-                let record =
-                    conflict_record(source_id, source_path, &local, &remote, previous.as_ref());
-                let event = event_for(source_id, source_path, "conflict_detected", "conflict");
-                Ok(ReconcileOutcome {
-                    record: Some(record),
-                    events: vec![event],
-                    pulled: 0,
-                    pushed: 0,
-                    conflicts: 1,
-                })
-            }
-        }
-        (None, Some(remote)) => {
-            if prev_local_present {
-                if remote_changed {
-                    let record = absent_conflict_record(
-                        source_id,
-                        source_path,
-                        remote.kind,
-                        false,
-                        remote.version.clone(),
-                        previous.as_ref(),
-                    );
-                    let event = event_for(source_id, source_path, "conflict_detected", "conflict");
-                    Ok(ReconcileOutcome {
-                        record: Some(record),
-                        events: vec![event],
-                        pulled: 0,
-                        pushed: 0,
-                        conflicts: 1,
-                    })
-                } else {
-                    delete_remote_entry(rt, operator, source_path, remote.kind)?;
-                    let event = event_for(source_id, source_path, "synced_to_remote", "ready");
-                    Ok(ReconcileOutcome {
-                        record: None,
-                        events: vec![event],
-                        pulled: 0,
-                        pushed: 1,
-                        conflicts: 0,
-                    })
-                }
-            } else {
-                let local_version =
-                    pull_remote_entry(rt, operator, local_root, source_path, &remote)?;
-                let event = event_for(source_id, source_path, "synced_from_remote", "ready");
-                Ok(ReconcileOutcome {
-                    record: Some(ready_record(
-                        source_id,
-                        source_path,
-                        remote.kind,
-                        local_version,
-                        remote.version.clone(),
-                        true,
-                    )),
-                    events: vec![event],
-                    pulled: 1,
-                    pushed: 0,
-                    conflicts: 0,
-                })
-            }
-        }
-        (Some(local), None) => {
-            if prev_base_remote.is_some() {
-                if local_changed {
-                    let record = absent_conflict_record(
-                        source_id,
-                        source_path,
-                        local.kind,
-                        true,
-                        None,
-                        previous.as_ref(),
-                    );
-                    let event = event_for(source_id, source_path, "conflict_detected", "conflict");
-                    Ok(ReconcileOutcome {
-                        record: Some(record),
-                        events: vec![event],
-                        pulled: 0,
-                        pushed: 0,
-                        conflicts: 1,
-                    })
-                } else {
-                    delete_local_entry(local_root, source_path, local.kind)?;
-                    let event = event_for(source_id, source_path, "synced_from_remote", "ready");
-                    Ok(ReconcileOutcome {
-                        record: None,
-                        events: vec![event],
-                        pulled: 1,
-                        pushed: 0,
-                        conflicts: 0,
-                    })
-                }
-            } else {
-                let remote_version =
-                    push_local_entry(rt, operator, local_root, source_path, &local)?;
-                let event = event_for(source_id, source_path, "synced_to_remote", "ready");
-                Ok(ReconcileOutcome {
-                    record: Some(ready_record(
-                        source_id,
-                        source_path,
-                        local.kind,
-                        local.version.clone(),
-                        remote_version,
-                        true,
-                    )),
-                    events: vec![event],
-                    pulled: 0,
-                    pushed: 1,
-                    conflicts: 0,
-                })
-            }
-        }
-        (None, None) => unreachable!("handled above"),
+    record_spec: &PlannedRecordSpec,
+    outcome: TransportOutcome,
+) -> Result<Option<PathSyncStateRecord>> {
+    match record_spec {
+        PlannedRecordSpec::Remove => Ok(None),
+        PlannedRecordSpec::Static(record) => Ok(Some(record.clone())),
+        PlannedRecordSpec::ReadyFromPulledRemote {
+            kind,
+            remote_version,
+        } => Ok(Some(ready_record(
+            source_id,
+            source_path,
+            *kind,
+            outcome.local_version,
+            remote_version.clone(),
+            true,
+        ))),
     }
 }
 
@@ -566,8 +359,8 @@ fn apply_use_local(
     source_id: &str,
     local_root: &Path,
     source_path: &str,
-    local: Option<LocalEntrySnapshot>,
-    remote: Option<RemoteEntrySnapshot>,
+    local: Option<ObservedEntry>,
+    remote: Option<ObservedEntry>,
 ) -> Result<ResolveOutcome> {
     let now = now_ms();
     match local {
@@ -616,8 +409,8 @@ fn apply_use_remote(
     local_root: &Path,
     source_path: &str,
     local_path: &Path,
-    _local: Option<LocalEntrySnapshot>,
-    remote: Option<RemoteEntrySnapshot>,
+    _local: Option<ObservedEntry>,
+    remote: Option<ObservedEntry>,
 ) -> Result<ResolveOutcome> {
     let now = now_ms();
     match remote {
@@ -666,7 +459,7 @@ fn apply_use_remote(
 fn ready_record(
     source_id: &str,
     source_path: &str,
-    kind: EntryKindRepr,
+    kind: EntryKind,
     local_version: Option<String>,
     remote_version: Option<String>,
     local_present: bool,
@@ -707,8 +500,8 @@ fn ready_absent_record(source_id: &str, source_path: &str) -> PathSyncStateRecor
 fn conflict_record(
     source_id: &str,
     source_path: &str,
-    local: &LocalEntrySnapshot,
-    remote: &RemoteEntrySnapshot,
+    local: &ObservedEntry,
+    remote: &ObservedEntry,
     previous: Option<&PathSyncStateRecord>,
 ) -> PathSyncStateRecord {
     PathSyncStateRecord {
@@ -730,7 +523,7 @@ fn conflict_record(
 fn absent_conflict_record(
     source_id: &str,
     source_path: &str,
-    kind: EntryKindRepr,
+    kind: EntryKind,
     local_present: bool,
     current_remote_version: Option<String>,
     previous: Option<&PathSyncStateRecord>,
@@ -762,119 +555,19 @@ fn event_for(source_id: &str, source_path: &str, kind: &str, state: &str) -> Pen
     }
 }
 
-fn scan_local_tree(local_root: &Path) -> Result<HashMap<String, LocalEntrySnapshot>> {
-    let mut entries = HashMap::new();
-
-    fn walk(
-        current: &Path,
-        root: &Path,
-        entries: &mut HashMap<String, LocalEntrySnapshot>,
-    ) -> Result<()> {
-        let mut dir_entries = fs::read_dir(current)?.collect::<std::result::Result<Vec<_>, _>>()?;
-        dir_entries.sort_by_key(|entry| entry.file_name());
-
-        for entry in dir_entries {
-            let path = entry.path();
-            if current == root && entry.file_name() == ".section" {
-                continue;
-            }
-
-            let metadata = entry.metadata()?;
-            let relative = path.strip_prefix(root).map_err(|err| {
-                anyhow!(
-                    "failed to derive relative path for {}: {err}",
-                    path.display()
-                )
-            })?;
-            let source_path = relative
-                .iter()
-                .map(|segment| segment.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-
-            if metadata.is_dir() {
-                entries.insert(
-                    source_path.clone(),
-                    LocalEntrySnapshot {
-                        kind: EntryKindRepr::Dir,
-                        version: None,
-                    },
-                );
-                walk(&path, root, entries)?;
-            } else if metadata.is_file() {
-                entries.insert(
-                    source_path,
-                    LocalEntrySnapshot {
-                        kind: EntryKindRepr::File,
-                        version: Some(hash_bytes(&fs::read(&path)?)),
-                    },
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    if local_root.exists() {
-        walk(local_root, local_root, &mut entries)?;
-    }
-
-    Ok(entries)
-}
-
-fn scan_remote_tree(
-    rt: &tokio::runtime::Runtime,
-    operator: &Operator,
-) -> Result<HashMap<String, RemoteEntrySnapshot>> {
-    let entries: Vec<Entry> =
-        rt.block_on(async { operator.list_with("").recursive(true).await })?;
-    let mut result = HashMap::new();
-
-    for entry in entries {
-        let path = normalize_source_path(entry.path());
-        if path.is_empty() {
-            continue;
-        }
-
-        let kind = metadata_entry_kind(entry.metadata())?;
-        let version = match kind {
-            EntryKindRepr::File => {
-                Some(remote_file_version(rt, operator, &path, entry.metadata())?)
-            }
-            EntryKindRepr::Dir => None,
-        };
-        result.insert(path.clone(), RemoteEntrySnapshot { kind, version });
-    }
-
-    Ok(result)
-}
-
-fn inspect_local_entry(local_path: &Path) -> Result<Option<LocalEntrySnapshot>> {
+fn inspect_local_entry(local_path: &Path) -> Result<Option<ObservedEntry>> {
     if !local_path.exists() {
         return Ok(None);
     }
 
-    let metadata = fs::metadata(local_path)?;
-    if metadata.is_dir() {
-        Ok(Some(LocalEntrySnapshot {
-            kind: EntryKindRepr::Dir,
-            version: None,
-        }))
-    } else if metadata.is_file() {
-        Ok(Some(LocalEntrySnapshot {
-            kind: EntryKindRepr::File,
-            version: Some(hash_bytes(&fs::read(local_path)?)),
-        }))
-    } else {
-        bail!("unsupported local entry type for {}", local_path.display());
-    }
+    observe_local_entry(local_path).map(Some)
 }
 
 fn inspect_remote_entry(
     rt: &tokio::runtime::Runtime,
     operator: &Operator,
     source_path: &str,
-) -> Result<Option<RemoteEntrySnapshot>> {
+) -> Result<Option<ObservedEntry>> {
     if source_path.is_empty() {
         return Ok(None);
     }
@@ -885,21 +578,59 @@ fn inspect_remote_entry(
             Err(err) if err.kind() == opendal::ErrorKind::NotFound => continue,
             Err(err) => return Err(err.into()),
         };
-        let kind = metadata_entry_kind(&meta)?;
-        let version = match kind {
-            EntryKindRepr::File => Some(remote_file_version(rt, operator, source_path, &meta)?),
-            EntryKindRepr::Dir => None,
-        };
-        return Ok(Some(RemoteEntrySnapshot { kind, version }));
+        return observe_remote_entry(rt, operator, source_path, &meta).map(Some);
     }
 
     Ok(None)
 }
 
-fn metadata_entry_kind(meta: &Metadata) -> Result<EntryKindRepr> {
+fn observe_local_entry(local_path: &Path) -> Result<ObservedEntry> {
+    let metadata = fs::metadata(local_path)?;
+    if metadata.is_dir() {
+        Ok(ObservedEntry {
+            kind: EntryKind::Dir,
+            version: None,
+            size: None,
+            mtime_ms: local_mtime_ms(&metadata),
+        })
+    } else if metadata.is_file() {
+        Ok(ObservedEntry {
+            kind: EntryKind::File,
+            version: Some(hash_bytes(&fs::read(local_path)?)),
+            size: Some(metadata.len()),
+            mtime_ms: local_mtime_ms(&metadata),
+        })
+    } else {
+        bail!("unsupported local entry type for {}", local_path.display());
+    }
+}
+
+fn observe_remote_entry(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    source_path: &str,
+    meta: &Metadata,
+) -> Result<ObservedEntry> {
+    let kind = metadata_entry_kind(meta)?;
+    let version = match kind {
+        EntryKind::File => Some(remote_file_version(rt, operator, source_path, meta)?),
+        EntryKind::Dir => None,
+    };
+    Ok(ObservedEntry {
+        kind,
+        version,
+        size: match kind {
+            EntryKind::File => Some(meta.content_length()),
+            EntryKind::Dir => None,
+        },
+        mtime_ms: remote_mtime_ms(meta),
+    })
+}
+
+fn metadata_entry_kind(meta: &Metadata) -> Result<EntryKind> {
     match meta.mode() {
-        EntryMode::FILE => Ok(EntryKindRepr::File),
-        EntryMode::DIR => Ok(EntryKindRepr::Dir),
+        EntryMode::FILE => Ok(EntryKind::File),
+        EntryMode::DIR => Ok(EntryKind::Dir),
         _ => bail!("unsupported entry mode {:?}", meta.mode()),
     }
 }
@@ -925,14 +656,14 @@ fn push_local_entry(
     operator: &Operator,
     local_root: &Path,
     source_path: &str,
-    local: &LocalEntrySnapshot,
+    local: &ObservedEntry,
 ) -> Result<Option<String>> {
     match local.kind {
-        EntryKindRepr::Dir => {
+        EntryKind::Dir => {
             ensure_remote_dir(rt, operator, source_path)?;
             Ok(None)
         }
-        EntryKindRepr::File => {
+        EntryKind::File => {
             let local_path = local_root.join(source_path);
             let data = fs::read(&local_path)?;
             ensure_remote_parent_dirs(rt, operator, source_path)?;
@@ -947,16 +678,16 @@ fn pull_remote_entry(
     operator: &Operator,
     local_root: &Path,
     source_path: &str,
-    remote: &RemoteEntrySnapshot,
+    remote: &ObservedEntry,
 ) -> Result<Option<String>> {
     let local_path = local_root.join(source_path);
 
     match remote.kind {
-        EntryKindRepr::Dir => {
+        EntryKind::Dir => {
             fs::create_dir_all(&local_path)?;
             Ok(None)
         }
-        EntryKindRepr::File => {
+        EntryKind::File => {
             if let Some(parent) = local_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -971,38 +702,38 @@ fn delete_remote_entry(
     rt: &tokio::runtime::Runtime,
     operator: &Operator,
     source_path: &str,
-    kind: EntryKindRepr,
+    kind: EntryKind,
 ) -> Result<()> {
     match kind {
-        EntryKindRepr::Dir => {
+        EntryKind::Dir => {
             rt.block_on(operator.remove_all(&normalized_dir(source_path)))?;
         }
-        EntryKindRepr::File => {
+        EntryKind::File => {
             rt.block_on(operator.delete(source_path))?;
         }
     }
     Ok(())
 }
 
-fn delete_local_entry(local_root: &Path, source_path: &str, kind: EntryKindRepr) -> Result<()> {
+fn delete_local_entry(local_root: &Path, source_path: &str, kind: EntryKind) -> Result<()> {
     let local_path = local_root.join(source_path);
     if !local_path.exists() {
         return Ok(());
     }
 
     match kind {
-        EntryKindRepr::Dir => fs::remove_dir_all(local_path)?,
-        EntryKindRepr::File => fs::remove_file(local_path)?,
+        EntryKind::Dir => fs::remove_dir_all(local_path)?,
+        EntryKind::File => fs::remove_file(local_path)?,
     }
     Ok(())
 }
 
-fn infer_local_kind_from_path(path: &Path) -> Result<EntryKindRepr> {
+fn infer_local_kind_from_path(path: &Path) -> Result<EntryKind> {
     let metadata = fs::metadata(path)?;
     if metadata.is_dir() {
-        Ok(EntryKindRepr::Dir)
+        Ok(EntryKind::Dir)
     } else if metadata.is_file() {
-        Ok(EntryKindRepr::File)
+        Ok(EntryKind::File)
     } else {
         bail!("unsupported local entry type for {}", path.display())
     }
@@ -1067,6 +798,23 @@ fn hash_bytes(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn local_mtime_ms(metadata: &fs::Metadata) -> Option<i64> {
+    metadata.modified().ok().and_then(system_time_to_ms)
+}
+
+fn remote_mtime_ms(meta: &Metadata) -> Option<i64> {
+    meta.last_modified().and_then(|timestamp| {
+        let system_time: SystemTime = timestamp.into();
+        system_time_to_ms(system_time)
+    })
+}
+
+fn system_time_to_ms(time: SystemTime) -> Option<i64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as i64)
 }
 
 fn now_ms() -> i64 {

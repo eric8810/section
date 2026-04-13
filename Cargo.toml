@@ -22,7 +22,7 @@ section-provider = { path = "crates/section-provider" }
 sectiond = { path = "crates/sectiond" }
 
 # Storage abstraction
-opendal = { version = "0.55", features = ["services-fs", "services-s3", "services-webdav"] }
+opendal = { version = "0.55", features = ["services-fs", "services-s3", "services-webdav", "layers-tracing"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
