@@ -1,28 +1,8 @@
+mod support;
+
+use crate::support::{run_section, write_config};
 use serde_json::Value;
 use std::fs;
-use std::path::Path;
-use std::process::Command;
-
-fn write_config(path: &Path, data_dir: &Path) {
-    fs::write(
-        path,
-        format!(
-            "data_dir = {:?}\nmount_point = \"/tmp/section-mount-test\"\n",
-            data_dir.to_string_lossy()
-        ),
-    )
-    .expect("write config");
-}
-
-fn run_section(config_path: &Path, args: &[&str]) -> std::process::Output {
-    let bin = env!("CARGO_BIN_EXE_section");
-    Command::new(bin)
-        .arg("--config")
-        .arg(config_path)
-        .args(args)
-        .output()
-        .expect("run section")
-}
 
 #[test]
 fn source_sync_compare_resolve_and_watch_work_together() {
