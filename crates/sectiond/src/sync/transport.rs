@@ -1,6 +1,7 @@
 use super::{delete_local_entry, normalized_dir, remote_file_token};
 use crate::sync::coordinator::{PathSyncPlan, PlannedOp};
 use anyhow::Result;
+use bytes::Bytes;
 use futures::TryStreamExt;
 use opendal::layers::{ConcurrentLimitLayer, RetryLayer, TracingLayer};
 use opendal::Operator;
@@ -82,9 +83,8 @@ impl OpenDalTransport {
                     .with_max_times(config.max_retries)
                     .with_notify(log_retry),
             )
-            // sync_source still executes one PathSyncPlan at a time.
-            // The layer is wired here now so transport remains the only layer
-            // mount point; Issue #002 can make path execution parallel later.
+            // Path plans are now executed concurrently, so keep transport as the
+            // single mount point for OpenDAL concurrency and retry policy.
             .layer(
                 ConcurrentLimitLayer::new(config.concurrency)
                     .with_http_concurrent_limit(config.http_concurrency),
@@ -188,7 +188,7 @@ impl Transport for OpenDalTransport {
                         }
 
                         self.handle
-                            .block_on(writer.write(buffer[..read].to_vec()))?;
+                            .block_on(writer.write(Bytes::copy_from_slice(&buffer[..read])))?;
                         bytes_complete += read as u64;
                         emit_progress(
                             progress.as_ref(),
@@ -207,7 +207,12 @@ impl Transport for OpenDalTransport {
                         bytes_total,
                         true,
                     );
-                    outcome.remote_version = remote_file_token(&meta);
+                    let mut remote_version = remote_file_token(&meta);
+                    if remote_version.is_none() {
+                        let stat_meta = self.handle.block_on(self.operator.stat(path))?;
+                        remote_version = remote_file_token(&stat_meta);
+                    }
+                    outcome.remote_version = remote_version;
                 }
                 PlannedOp::DeleteLocal { path, kind } => {
                     delete_local_entry(&self.local_root, path, *kind)?;

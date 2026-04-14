@@ -158,6 +158,22 @@ struct ResolveOutcome {
     events: Vec<PendingSyncEvent>,
 }
 
+#[derive(Debug)]
+struct MaterializedPathPlan {
+    source_id: String,
+    path: String,
+    record: Option<PathSyncStateRecord>,
+    events: Vec<PendingSyncEvent>,
+}
+
+#[derive(Debug, Default)]
+struct AppliedSyncTotals {
+    pulled: usize,
+    pushed: usize,
+    conflicts: usize,
+    events_emitted: usize,
+}
+
 pub type SyncLifecycleObserver = Arc<dyn Fn(SyncLifecycleEvent) + Send + Sync + 'static>;
 
 pub fn sync_source(
@@ -244,9 +260,6 @@ pub fn sync_source_with_options(
         options.transport_config(),
     );
 
-    let mut pulled = 0;
-    let mut pushed = 0;
-    let mut conflicts = 0;
     let mut events_emitted = 0;
 
     for path_plan in &paths {
@@ -281,62 +294,24 @@ pub fn sync_source_with_options(
         options.path_concurrency.max(1),
         lifecycle,
     )?;
-    let mut first_error = None;
-
-    for (path_plan, outcome) in executed {
-        match outcome {
-            Ok(outcome) => {
-                refresh_cached_snapshots(
-                    &rt,
-                    operator,
-                    local_root,
-                    &path_plan,
-                    &outcome,
-                    &mut refreshed_local_cache,
-                    &mut refreshed_remote_manifest,
-                )?;
-                persist_path_plan(store, source_id, &path_plan, outcome, &mut events_emitted)?;
-            }
-            Err(err) => {
-                store.append_sync_event(
-                    source_id,
-                    &path_plan.path,
-                    "state_changed",
-                    "error",
-                    now_ms(),
-                )?;
-                events_emitted += 1;
-                if first_error.is_none() {
-                    first_error = Some(anyhow!(
-                        "sync transport failed for {}: {err}",
-                        path_plan.path
-                    ));
-                }
-            }
-        }
-        pulled += path_plan.pulled;
-        pushed += path_plan.pushed;
-        conflicts += path_plan.conflicts;
-    }
-
-    let mut refreshed_local_cache = refreshed_local_cache.into_values().collect::<Vec<_>>();
-    refreshed_local_cache.sort_by(|left, right| left.path.cmp(&right.path));
-    store.replace_local_scan_cache(source_id, &refreshed_local_cache)?;
-
-    let mut refreshed_remote_manifest = refreshed_remote_manifest.into_values().collect::<Vec<_>>();
-    refreshed_remote_manifest.sort_by(|left, right| left.path.cmp(&right.path));
-    store.replace_remote_manifest(source_id, &refreshed_remote_manifest)?;
-
-    if let Some(err) = first_error {
-        return Err(err);
-    }
+    let totals = apply_executed_path_plans(
+        &rt,
+        operator,
+        store,
+        source_id,
+        local_root,
+        executed,
+        &mut refreshed_local_cache,
+        &mut refreshed_remote_manifest,
+    )?;
+    events_emitted += totals.events_emitted;
 
     Ok(SourceSyncResult {
         source_id: source_id.to_string(),
         local_root: local_root.to_path_buf(),
-        pulled,
-        pushed,
-        conflicts,
+        pulled: totals.pulled,
+        pushed: totals.pushed,
+        conflicts: totals.conflicts,
         events_emitted,
         local_scan,
         remote_scan,
@@ -420,11 +395,16 @@ fn execute_path_plans(
         PathSyncPlan,
         Result<TransportOutcome>,
     )>::new()));
-    let worker_count = path_concurrency
-        .max(1)
-        .min(queue.lock().expect("queue lock").len().max(1));
+    let worker_count = path_concurrency.max(1).min(
+        queue
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .len()
+            .max(1),
+    );
 
-    thread::scope(|scope| {
+    thread::scope(|scope| -> Result<()> {
+        let mut handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let queue = Arc::clone(&queue);
             let results = Arc::clone(&results);
@@ -432,9 +412,9 @@ fn execute_path_plans(
             let lifecycle = lifecycle.clone();
             let source_id = source_id.to_string();
 
-            scope.spawn(move || loop {
+            handles.push(scope.spawn(move || loop {
                 let next = {
-                    let mut queue = queue.lock().expect("queue lock");
+                    let mut queue = queue.lock().unwrap_or_else(|err| err.into_inner());
                     queue.pop_front()
                 };
                 let Some((index, path_plan)) = next else {
@@ -473,21 +453,38 @@ fn execute_path_plans(
 
                 results
                     .lock()
-                    .expect("results lock")
+                    .unwrap_or_else(|err| err.into_inner())
                     .push((index, path_plan, outcome));
-            });
+            }));
         }
-    });
 
-    let mut results = Arc::try_unwrap(results)
-        .expect("results still referenced")
-        .into_inner()
-        .expect("results mutex poisoned");
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|panic| anyhow!("sync worker panicked: {}", panic_message(panic)))?;
+        }
+        Ok(())
+    })?;
+
+    let mut results = {
+        let mut guard = results.lock().unwrap_or_else(|err| err.into_inner());
+        std::mem::take(&mut *guard)
+    };
     results.sort_by_key(|(index, _, _)| *index);
     Ok(results
         .into_iter()
         .map(|(_, path_plan, outcome)| (path_plan, outcome))
         .collect())
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 fn emit_lifecycle_event(
@@ -628,19 +625,95 @@ pub fn list_watch_events(
         .collect())
 }
 
-fn persist_path_plan(
+fn apply_executed_path_plans(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
     store: &ProviderStore,
+    source_id: &str,
+    local_root: &Path,
+    executed: Vec<(PathSyncPlan, Result<TransportOutcome>)>,
+    local_cache: &mut HashMap<String, LocalScanCacheRecord>,
+    remote_manifest: &mut HashMap<String, RemoteManifestRecord>,
+) -> Result<AppliedSyncTotals> {
+    let mut totals = AppliedSyncTotals::default();
+    let mut transport_failures = Vec::new();
+    let mut successful = Vec::new();
+
+    for (path_plan, outcome) in executed {
+        totals.pulled += path_plan.pulled;
+        totals.pushed += path_plan.pushed;
+        totals.conflicts += path_plan.conflicts;
+
+        match outcome {
+            Ok(outcome) => successful.push((path_plan, outcome)),
+            Err(err) => {
+                store.append_sync_event(
+                    source_id,
+                    &path_plan.path,
+                    "state_changed",
+                    "error",
+                    now_ms(),
+                )?;
+                totals.events_emitted += 1;
+                transport_failures.push(format!("{}: {err}", path_plan.path));
+            }
+        }
+    }
+
+    if !transport_failures.is_empty() {
+        return Err(anyhow!(
+            "sync transport failed for {} path(s): {}",
+            transport_failures.len(),
+            transport_failures.join("; ")
+        ));
+    }
+
+    let mut materialized = Vec::with_capacity(successful.len());
+    for (path_plan, outcome) in successful {
+        refresh_cached_snapshots(
+            rt,
+            operator,
+            local_root,
+            &path_plan,
+            &outcome,
+            local_cache,
+            remote_manifest,
+        )?;
+        materialized.push(materialize_path_plan(source_id, &path_plan, outcome)?);
+    }
+
+    for update in materialized {
+        persist_materialized_path_plan(store, update, &mut totals.events_emitted)?;
+    }
+    replace_scan_snapshots(store, source_id, local_cache, remote_manifest)?;
+
+    Ok(totals)
+}
+
+fn materialize_path_plan(
     source_id: &str,
     path_plan: &PathSyncPlan,
     outcome: TransportOutcome,
+) -> Result<MaterializedPathPlan> {
+    Ok(MaterializedPathPlan {
+        source_id: source_id.to_string(),
+        path: path_plan.path.clone(),
+        record: materialize_record(source_id, &path_plan.path, &path_plan.record_spec, outcome)?,
+        events: path_plan.events.clone(),
+    })
+}
+
+fn persist_materialized_path_plan(
+    store: &ProviderStore,
+    update: MaterializedPathPlan,
     events_emitted: &mut usize,
 ) -> Result<()> {
-    match materialize_record(source_id, &path_plan.path, &path_plan.record_spec, outcome)? {
+    match update.record {
         Some(record) => store.upsert_path_sync_state(&record)?,
-        None => store.remove_path_sync_state(source_id, &path_plan.path)?,
+        None => store.remove_path_sync_state(&update.source_id, &update.path)?,
     }
 
-    for event in &path_plan.events {
+    for event in &update.events {
         store.append_sync_event(
             &event.source_name,
             &event.path,
@@ -651,6 +724,22 @@ fn persist_path_plan(
         *events_emitted += 1;
     }
 
+    Ok(())
+}
+
+fn replace_scan_snapshots(
+    store: &ProviderStore,
+    source_id: &str,
+    local_cache: &HashMap<String, LocalScanCacheRecord>,
+    remote_manifest: &HashMap<String, RemoteManifestRecord>,
+) -> Result<()> {
+    let mut local_cache = local_cache.values().cloned().collect::<Vec<_>>();
+    local_cache.sort_by(|left, right| left.path.cmp(&right.path));
+    store.replace_local_scan_cache(source_id, &local_cache)?;
+
+    let mut remote_manifest = remote_manifest.values().cloned().collect::<Vec<_>>();
+    remote_manifest.sort_by(|left, right| left.path.cmp(&right.path));
+    store.replace_remote_manifest(source_id, &remote_manifest)?;
     Ok(())
 }
 
@@ -1377,8 +1466,21 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::compare_match_flags;
-    use section_provider::PathSyncStateRecord;
+    use super::{
+        apply_executed_path_plans, compare_match_flags, event_for, ready_record, EntryKind,
+    };
+    use crate::sync::coordinator::{PathSyncPlan, PlannedOp, PlannedRecordSpec};
+    use crate::sync::transport::TransportOutcome;
+    use anyhow::anyhow;
+    use opendal::services;
+    use opendal::Operator;
+    use section_provider::{PathSyncStateRecord, ProviderStore};
+    use std::collections::HashMap;
+
+    fn fs_operator(root: &std::path::Path) -> Operator {
+        let builder = services::Fs::default().root(root.to_str().expect("utf8 path"));
+        Operator::new(builder).expect("operator").finish()
+    }
 
     fn ready_record_with_versions() -> PathSyncStateRecord {
         PathSyncStateRecord {
@@ -1409,5 +1511,80 @@ mod tests {
 
         assert!(local_matches_base);
         assert!(local_matches_current_remote);
+    }
+
+    #[test]
+    fn apply_executed_path_plans_skips_success_persistence_after_transport_error() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let local_root = tempfile::tempdir().expect("local root");
+        let remote_root = tempfile::tempdir().expect("remote root");
+        let store = ProviderStore::open(data_dir.path()).expect("open store");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let operator = fs_operator(remote_root.path());
+
+        let successful_plan = PathSyncPlan {
+            path: "a.txt".to_string(),
+            ops: Vec::new(),
+            record_spec: PlannedRecordSpec::Static(ready_record(
+                "local",
+                "a.txt",
+                EntryKind::File,
+                Some("local-a".to_string()),
+                Some("remote-a".to_string()),
+                true,
+            )),
+            events: vec![event_for("local", "a.txt", "synced_to_remote", "ready")],
+            pulled: 0,
+            pushed: 1,
+            conflicts: 0,
+        };
+        let failed_plan = PathSyncPlan {
+            path: "b.txt".to_string(),
+            ops: vec![PlannedOp::PushFile {
+                path: "b.txt".to_string(),
+            }],
+            record_spec: PlannedRecordSpec::Remove,
+            events: vec![event_for("local", "b.txt", "synced_to_remote", "ready")],
+            pulled: 0,
+            pushed: 1,
+            conflicts: 0,
+        };
+
+        let err = apply_executed_path_plans(
+            &rt,
+            &operator,
+            &store,
+            "local",
+            local_root.path(),
+            vec![
+                (successful_plan, Ok(TransportOutcome::default())),
+                (failed_plan, Err(anyhow!("boom"))),
+            ],
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .expect_err("transport error should abort commit");
+
+        assert!(err.to_string().contains("b.txt: boom"));
+        assert!(store
+            .list_path_sync_states("local")
+            .expect("list states")
+            .is_empty());
+        assert!(store
+            .list_local_scan_cache("local")
+            .expect("list local cache")
+            .is_empty());
+        assert!(store
+            .list_remote_manifest("local")
+            .expect("list remote manifest")
+            .is_empty());
+
+        let events = store
+            .list_sync_events_after("local", 0)
+            .expect("list sync events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "b.txt");
+        assert_eq!(events[0].kind, "state_changed");
+        assert_eq!(events[0].state, "error");
     }
 }

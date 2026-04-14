@@ -60,6 +60,7 @@ libc = "0.2"
 dirs = "6"
 xattr = "1"
 notify = "6"
+bytes = "1"
 
 # Testing
 cucumber = "0.22"

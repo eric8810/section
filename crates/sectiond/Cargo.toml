@@ -24,6 +24,7 @@ xattr.workspace = true
 libc.workspace = true
 ring.workspace = true
 futures.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

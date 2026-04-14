@@ -268,6 +268,7 @@ impl DefaultSnapshotCollector<'_> {
         let data = self.rt.block_on(op.read(inventory_manifest_path))?;
         let mut inventory_entries = parse_inventory_manifest(data.to_bytes().as_ref())?;
         inventory_entries.sort_by(|left, right| left.path.cmp(&right.path));
+        let manifest_path = normalize_source_path(inventory_manifest_path);
 
         let mut entries = HashMap::new();
         let mut manifest_records = Vec::new();
@@ -278,7 +279,7 @@ impl DefaultSnapshotCollector<'_> {
 
         for inventory_entry in inventory_entries {
             let path = normalize_source_path(&inventory_entry.path);
-            if path.is_empty() {
+            if path.is_empty() || path == manifest_path {
                 continue;
             }
 
@@ -754,6 +755,31 @@ mod tests {
                 .and_then(|entry| entry.version.clone()),
             Some("inventory-v1".to_string())
         );
+    }
+
+    #[test]
+    fn collect_remote_inventory_manifest_skips_manifest_object() {
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        fs::write(remote.path().join("notes.txt"), "hello").expect("write remote");
+        fs::write(
+            remote.path().join("inventory.jsonl"),
+            concat!(
+                r#"{"path":"notes.txt","kind":"file","version":"inventory-v1","size":5,"mtime_ms":1}"#,
+                "\n",
+                r#"{"path":"inventory.jsonl","kind":"file","version":"inventory-self","size":2,"mtime_ms":1}"#
+            ),
+        )
+        .expect("write inventory");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let collector = DefaultSnapshotCollector::new(&rt, Some("inventory.jsonl".to_string()));
+
+        let snapshot = collector
+            .collect_remote(&fs_operator(remote.path()), &HashMap::new())
+            .expect("collect remote via inventory");
+
+        assert_eq!(snapshot.stats.accelerated_entries, 1);
+        assert!(snapshot.entries.contains_key("notes.txt"));
+        assert!(!snapshot.entries.contains_key("inventory.jsonl"));
     }
 
     #[test]
