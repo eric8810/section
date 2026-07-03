@@ -1,3 +1,4 @@
+use crate::support::environment::SourceSpec;
 use crate::support::{assert_success, run_section};
 use serde_json::Value;
 use std::fs;
@@ -28,17 +29,18 @@ impl Actor {
         self.local_root.join(relative_path)
     }
 
-    pub fn add_fs_source(&self, remote_root: &Path) -> Output {
-        let root_opt = format!("root={}", remote_root.display());
-        let args = vec![
+    pub fn add_source(&self, source: &SourceSpec) -> Output {
+        let mut args = vec![
             "source".to_string(),
             "add".to_string(),
             self.source_name.clone(),
             "--provider".to_string(),
-            "fs".to_string(),
-            "--opt".to_string(),
-            root_opt,
+            source.provider.clone(),
         ];
+        for (key, value) in &source.options {
+            args.push("--opt".to_string());
+            args.push(format!("{key}={value}"));
+        }
         self.run_owned(args)
     }
 
@@ -53,8 +55,8 @@ impl Actor {
         self.run_owned(args)
     }
 
-    pub fn connect_fs(&self, remote_root: &Path) {
-        let add = self.add_fs_source(remote_root);
+    pub fn connect(&self, source: &SourceSpec) {
+        let add = self.add_source(source);
         assert_success(&add, "source add");
         let bind = self.bind();
         assert_success(&bind, "source bind");

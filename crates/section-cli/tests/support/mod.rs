@@ -2,7 +2,9 @@
 
 pub mod actor;
 pub mod check;
+pub mod environment;
 pub mod fixture;
+pub mod scenario;
 
 use std::fs;
 use std::path::Path;
