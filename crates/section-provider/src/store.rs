@@ -5,6 +5,15 @@ use section_core::config::{CacheConfig, SourceConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentIdentityRecord {
+    pub agent_id: String,
+    pub name: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocalRootBinding {
@@ -139,6 +148,13 @@ impl ProviderStore {
                 size_bytes INTEGER,
                 mtime_ms INTEGER,
                 PRIMARY KEY (source_name, path)
+            );
+            CREATE TABLE IF NOT EXISTS agent_identity (
+                scope TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
             );",
         )?;
 
@@ -152,6 +168,68 @@ impl ProviderStore {
         self.add_column_if_missing("path_sync_state", "last_local_version", "TEXT")?;
 
         Ok(())
+    }
+
+    pub fn get_agent_identity(&self) -> anyhow::Result<Option<AgentIdentityRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT agent_id, name, created_at_ms, updated_at_ms
+             FROM agent_identity
+             WHERE scope = 'default'",
+        )?;
+        let row = stmt.query_row([], |row| {
+            Ok(AgentIdentityRecord {
+                agent_id: row.get(0)?,
+                name: row.get(1)?,
+                created_at_ms: row.get(2)?,
+                updated_at_ms: row.get(3)?,
+            })
+        });
+
+        match row {
+            Ok(record) => Ok(Some(record)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn register_agent_identity(&self, name: &str) -> anyhow::Result<AgentIdentityRecord> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("agent name must not be empty");
+        }
+
+        let now = now_ms();
+        if let Some(mut existing) = self.get_agent_identity()? {
+            existing.name = trimmed.to_string();
+            existing.updated_at_ms = now;
+            self.conn.execute(
+                "UPDATE agent_identity
+                 SET name = ?1, updated_at_ms = ?2
+                 WHERE scope = 'default'",
+                rusqlite::params![existing.name, existing.updated_at_ms],
+            )?;
+            return Ok(existing);
+        }
+
+        let record = AgentIdentityRecord {
+            agent_id: format!("agt_{}", random_hex(16)?),
+            name: trimmed.to_string(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+
+        self.conn.execute(
+            "INSERT INTO agent_identity (scope, agent_id, name, created_at_ms, updated_at_ms)
+             VALUES ('default', ?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                record.agent_id,
+                record.name,
+                record.created_at_ms,
+                record.updated_at_ms,
+            ],
+        )?;
+
+        Ok(record)
     }
 
     /// Idempotently add a column to an existing table (SQLite has no IF NOT EXISTS for columns).
@@ -243,10 +321,45 @@ impl ProviderStore {
         source_name: &str,
         local_root: &Path,
     ) -> anyhow::Result<()> {
+        let local_root_value = local_root.to_string_lossy();
+        let existing = self.conn.query_row(
+            "SELECT source_name FROM source_local_roots
+             WHERE local_root = ?1 AND source_name != ?2",
+            rusqlite::params![local_root_value.as_ref(), source_name],
+            |row| row.get::<_, String>(0),
+        );
+        match existing {
+            Ok(existing_source) => {
+                anyhow::bail!(
+                    "local root {} is already bound to source {}",
+                    local_root.display(),
+                    existing_source
+                );
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(err) => return Err(err.into()),
+        }
+
         self.conn.execute(
             "INSERT OR REPLACE INTO source_local_roots (source_name, local_root)
              VALUES (?1, ?2)",
-            rusqlite::params![source_name, local_root.to_string_lossy().as_ref()],
+            rusqlite::params![source_name, local_root_value.as_ref()],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_source_sync_state(&self, source_name: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "DELETE FROM path_sync_state WHERE source_name = ?1",
+            [source_name],
+        )?;
+        self.conn.execute(
+            "DELETE FROM local_scan_cache WHERE source_name = ?1",
+            [source_name],
+        )?;
+        self.conn.execute(
+            "DELETE FROM remote_manifest WHERE source_name = ?1",
+            [source_name],
         )?;
         Ok(())
     }
@@ -682,6 +795,23 @@ impl ProviderStore {
     }
 }
 
+fn random_hex(byte_len: usize) -> anyhow::Result<String> {
+    use ring::rand::{SecureRandom, SystemRandom};
+
+    let rng = SystemRandom::new();
+    let mut bytes = vec![0_u8; byte_len];
+    rng.fill(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("failed to generate random bytes"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock drift")
+        .as_millis() as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,6 +946,61 @@ mod tests {
                 .expect("get local root after remove"),
             None
         );
+    }
+
+    #[test]
+    fn source_local_root_binding_rejects_cross_source_root_collision() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+        let local_root = temp_dir.path().join("bound");
+
+        store
+            .set_source_local_root("first", &local_root)
+            .expect("set first root");
+        let collision = store.set_source_local_root("second", &local_root);
+        assert!(
+            collision.is_err(),
+            "second source must not replace first source binding"
+        );
+
+        let bindings = store
+            .list_source_local_roots()
+            .expect("list source local roots");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].source_name, "first");
+        assert_eq!(bindings[0].local_root, local_root);
+    }
+
+    #[test]
+    fn agent_identity_registers_and_updates_display_name() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+
+        assert_eq!(
+            store
+                .get_agent_identity()
+                .expect("identify before register"),
+            None
+        );
+
+        let first = store
+            .register_agent_identity("agent-a")
+            .expect("register agent");
+        assert!(first.agent_id.starts_with("agt_"));
+        assert_eq!(first.agent_id.len(), 36);
+        assert_eq!(first.name, "agent-a");
+
+        let second = store
+            .register_agent_identity("agent-a-renamed")
+            .expect("update agent");
+        assert_eq!(second.agent_id, first.agent_id);
+        assert_eq!(second.name, "agent-a-renamed");
+
+        let loaded = store
+            .get_agent_identity()
+            .expect("get identity")
+            .expect("identity exists");
+        assert_eq!(loaded, second);
     }
 
     #[test]

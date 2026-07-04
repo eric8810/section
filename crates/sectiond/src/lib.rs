@@ -1,3 +1,4 @@
+pub mod agentfs;
 pub mod contract;
 pub mod control_plane;
 pub mod data_plane;
@@ -5,6 +6,11 @@ pub mod permission;
 pub mod runtime;
 pub mod sync;
 
+pub use agentfs::{
+    AgentFsCapability, AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsError,
+    AgentFsErrorPayload, AgentFsEventRecord, AgentFsGrantRecord, AgentFsHeadRecord,
+    AgentFsMaterializationState, AgentFsRecord, AgentFsRole,
+};
 pub use contract::{ResponsibilityBoundary, SectiondContract};
 pub use control_plane::{
     PathDetailSnapshot, PathInspectSnapshot, RefreshResult, RootDiscoveryMarker,

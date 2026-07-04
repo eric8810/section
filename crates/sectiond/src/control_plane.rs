@@ -4,13 +4,20 @@ use crate::sync::{
     PathCompareSnapshot, PathResolveResult, PathResolveStrategy, SourceSyncOptions,
     SourceSyncResult, SyncLifecycleObserver,
 };
+use crate::{
+    agentfs, AgentFsCapability, AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsError,
+    AgentFsGrantRecord, AgentFsHeadRecord, AgentFsMaterializationState, AgentFsRecord, AgentFsRole,
+};
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
+use opendal::{EntryMode, Operator};
+use ring::digest::{digest, SHA256};
 use section_core::config::{CacheConfig, SourceConfig};
 use section_core::SectionConfig;
-use section_provider::{PathSyncStateRecord, ProviderStore, SyncEventRecord};
+use section_provider::{AgentIdentityRecord, PathSyncStateRecord, ProviderStore, SyncEventRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -30,9 +37,17 @@ pub struct SourceRegistryEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RootDiscoveryMarker {
+    #[serde(default = "default_root_marker_schema_version")]
+    pub schema_version: u32,
     pub source_id: String,
     pub local_root: PathBuf,
     pub control_plane_endpoint: String,
+    #[serde(default)]
+    pub fs_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub base_commit_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -62,6 +77,43 @@ pub struct RefreshResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentFsAttachResult {
+    pub fs: AgentFsRecord,
+    pub source: SourceRegistryEntry,
+    pub head: AgentFsHeadRecord,
+    pub local_root: PathBuf,
+    pub sync: SourceSyncResult,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentFsStatusSnapshot {
+    pub fs: AgentFsRecord,
+    pub head: AgentFsHeadRecord,
+    pub materialization_state: Option<AgentFsMaterializationState>,
+    pub local_root: Option<PathBuf>,
+    pub agent_id: Option<String>,
+    pub role: Option<AgentFsRole>,
+    pub base_commit_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentFsCommitStatus {
+    pub fs: AgentFsRecord,
+    pub source_name: String,
+    pub local_root: PathBuf,
+    pub base_commit_id: Option<String>,
+    pub current_head_commit_id: Option<String>,
+    pub stale: bool,
+    pub dirty_paths: Vec<AgentFsCommitPathRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentFsCommitApplyResult {
+    pub commit: AgentFsCommitRecord,
+    pub sync: SourceSyncResult,
+}
+
 pub struct SectiondControlPlane {
     config: SectionConfig,
     store: ProviderStore,
@@ -73,6 +125,556 @@ impl SectiondControlPlane {
         config.ensure_dirs()?;
         let store = ProviderStore::open(&config.data_dir)?;
         Ok(Self { config, store })
+    }
+
+    pub fn agent_register(&self, name: &str) -> Result<AgentIdentityRecord> {
+        self.store.register_agent_identity(name)
+    }
+
+    pub fn agent_identify(&self) -> Result<Option<AgentIdentityRecord>> {
+        self.store.get_agent_identity()
+    }
+
+    pub fn fs_create(
+        &self,
+        name: &str,
+        provider: &str,
+        options: HashMap<String, String>,
+    ) -> Result<AgentFsRecord> {
+        let agent = self.require_agent_identity()?;
+        if self.find_source(name)?.is_some() {
+            bail!("source {name} already exists; fs create will not overwrite existing sources");
+        }
+        let source = self.source_add(name, provider, options)?;
+        let runtime = self.runtime()?;
+        let operator = runtime.router().get_operator(&source.name)?;
+        let rt = tokio::runtime::Runtime::new()?;
+
+        if agentfs::read_optional_json::<AgentFsRecord>(&rt, operator, agentfs::FS_PATH)?.is_some()
+        {
+            bail!("source {} already contains AgentFS metadata", source.name);
+        }
+
+        let fs = AgentFsRecord {
+            schema_version: agentfs::SCHEMA_VERSION,
+            fs_id: agentfs::new_fs_id()?,
+            name: name.to_string(),
+            owner_agent_id: agent.agent_id.clone(),
+            source_name: source.name.clone(),
+            created_at_ms: agentfs::now_ms(),
+        };
+
+        agentfs::initialize_fs_metadata(&rt, operator, &fs, &agent)?;
+        Ok(fs)
+    }
+
+    pub fn fs_list(&self) -> Result<Vec<AgentFsRecord>> {
+        let runtime = self.runtime()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let mut records = Vec::new();
+
+        for source in self.list_sources()? {
+            let operator = runtime.router().get_operator(&source.name)?;
+            if let Some(fs) =
+                agentfs::read_optional_json::<AgentFsRecord>(&rt, operator, agentfs::FS_PATH)?
+            {
+                records.push(fs);
+            }
+        }
+
+        records.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(records)
+    }
+
+    pub fn fs_grant(
+        &self,
+        fs_ref: &str,
+        agent_id: &str,
+        role: AgentFsRole,
+    ) -> Result<AgentFsGrantRecord> {
+        let actor = self.require_agent_identity()?;
+        agentfs::validate_agent_id(agent_id)?;
+        if role == AgentFsRole::Owner {
+            anyhow::bail!(AgentFsError::grant_denied(
+                "owner grants are not supported in the MVP"
+            ));
+        }
+
+        let runtime = self.runtime()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let resolved = self.find_agentfs(&rt, &runtime, fs_ref)?;
+        let lock = agentfs::acquire_head_lock(
+            &rt,
+            &resolved.operator,
+            &resolved.fs.fs_id,
+            &actor.agent_id,
+        )?;
+        let result = (|| -> Result<AgentFsGrantRecord> {
+            let grants = agentfs::list_grants(&rt, &resolved.operator)?;
+            agentfs::ensure_capability(
+                &resolved.fs,
+                &grants,
+                &actor.agent_id,
+                AgentFsCapability::Manage,
+            )?;
+            if actor.agent_id == agent_id
+                && role.has_capability(AgentFsCapability::Commit)
+                && !agentfs::has_capability(
+                    &resolved.fs,
+                    &grants,
+                    &actor.agent_id,
+                    AgentFsCapability::Commit,
+                )
+            {
+                anyhow::bail!(AgentFsError::grant_denied(
+                    "manager cannot grant commit access to itself"
+                ));
+            }
+            if agent_id == resolved.fs.owner_agent_id {
+                anyhow::bail!(AgentFsError::grant_denied(
+                    "owner grant cannot be replaced in the MVP"
+                ));
+            }
+
+            let now = agentfs::now_ms();
+            for mut existing in grants
+                .into_iter()
+                .filter(|grant| grant.agent_id == agent_id && grant.is_active())
+            {
+                if existing.role == AgentFsRole::Owner {
+                    anyhow::bail!(AgentFsError::grant_denied(
+                        "owner grant cannot be replaced in the MVP"
+                    ));
+                }
+                existing.revoked_at_ms = Some(now);
+                existing.revoked_by = Some(actor.agent_id.clone());
+                agentfs::write_grant(&rt, &resolved.operator, &existing)?;
+                let revoked_event = agentfs::event_record(
+                    &resolved.fs.fs_id,
+                    "grant.revoked",
+                    &actor.agent_id,
+                    &existing.grant_id,
+                    None,
+                    serde_json::json!({
+                        "agent_id": existing.agent_id,
+                        "reason": "replaced",
+                    }),
+                )?;
+                agentfs::write_event(&rt, &resolved.operator, &revoked_event)?;
+            }
+
+            let grant = agentfs::grant_record(&resolved.fs, agent_id, role, &actor.agent_id)?;
+            agentfs::write_grant(&rt, &resolved.operator, &grant)?;
+            let event = agentfs::event_record(
+                &resolved.fs.fs_id,
+                "grant.created",
+                &actor.agent_id,
+                &grant.grant_id,
+                None,
+                serde_json::json!({
+                    "agent_id": grant.agent_id,
+                    "role": grant.role,
+                }),
+            )?;
+            agentfs::write_event(&rt, &resolved.operator, &event)?;
+            Ok(grant)
+        })();
+        agentfs::release_head_lock(&rt, &resolved.operator, &lock)?;
+        result
+    }
+
+    pub fn fs_revoke(&self, fs_ref: &str, agent_id: &str) -> Result<Vec<AgentFsGrantRecord>> {
+        let actor = self.require_agent_identity()?;
+        agentfs::validate_agent_id(agent_id)?;
+        let runtime = self.runtime()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let resolved = self.find_agentfs(&rt, &runtime, fs_ref)?;
+        let lock = agentfs::acquire_head_lock(
+            &rt,
+            &resolved.operator,
+            &resolved.fs.fs_id,
+            &actor.agent_id,
+        )?;
+        let result = (|| -> Result<Vec<AgentFsGrantRecord>> {
+            let grants = agentfs::list_grants(&rt, &resolved.operator)?;
+            agentfs::ensure_capability(
+                &resolved.fs,
+                &grants,
+                &actor.agent_id,
+                AgentFsCapability::Manage,
+            )?;
+
+            if agent_id == resolved.fs.owner_agent_id {
+                anyhow::bail!(AgentFsError::grant_denied(
+                    "owner grant cannot be revoked in the MVP"
+                ));
+            }
+
+            let now = agentfs::now_ms();
+            let mut revoked = Vec::new();
+            for mut grant in grants
+                .into_iter()
+                .filter(|grant| grant.agent_id == agent_id && grant.is_active())
+            {
+                if grant.role == AgentFsRole::Owner {
+                    anyhow::bail!(AgentFsError::grant_denied(
+                        "owner grant cannot be revoked in the MVP"
+                    ));
+                }
+                grant.revoked_at_ms = Some(now);
+                grant.revoked_by = Some(actor.agent_id.clone());
+                agentfs::write_grant(&rt, &resolved.operator, &grant)?;
+                let event = agentfs::event_record(
+                    &resolved.fs.fs_id,
+                    "grant.revoked",
+                    &actor.agent_id,
+                    &grant.grant_id,
+                    None,
+                    serde_json::json!({ "agent_id": grant.agent_id }),
+                )?;
+                agentfs::write_event(&rt, &resolved.operator, &event)?;
+                revoked.push(grant);
+            }
+
+            if revoked.is_empty() {
+                anyhow::bail!(AgentFsError::grant_denied(format!(
+                    "agent {agent_id} has no active grant on fs {}",
+                    resolved.fs.fs_id
+                )));
+            }
+
+            Ok(revoked)
+        })();
+        agentfs::release_head_lock(&rt, &resolved.operator, &lock)?;
+        result
+    }
+
+    pub fn fs_attach(&self, fs_ref: &str, local_root: &Path) -> Result<AgentFsAttachResult> {
+        let actor = self.require_agent_identity()?;
+        let runtime = self.runtime()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let resolved = self.find_agentfs(&rt, &runtime, fs_ref)?;
+        agentfs::ensure_capability(
+            &resolved.fs,
+            &resolved.grants,
+            &actor.agent_id,
+            AgentFsCapability::Read,
+        )?;
+        ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
+
+        let local_root = absolutize_path(local_root)?;
+        ensure_attach_root_is_empty(&local_root)?;
+        let previous_root = self.store.get_source_local_root(&resolved.source.name)?;
+        self.store
+            .set_source_local_root(&resolved.source.name, &local_root)?;
+        write_root_marker_for_agentfs(
+            &resolved.source.name,
+            &local_root,
+            &resolved.fs.fs_id,
+            &actor.agent_id,
+            resolved.head.commit_id.clone(),
+        )?;
+
+        self.store.clear_source_sync_state(&resolved.source.name)?;
+        let sync = match self.source_sync(&resolved.source.name) {
+            Ok(sync) if sync.conflicts == 0 => sync,
+            Ok(sync) => {
+                self.rollback_failed_attach(
+                    &resolved.source.name,
+                    &local_root,
+                    previous_root.as_deref(),
+                )?;
+                anyhow::bail!(
+                    "fs attach could not materialize a clean working copy: {} conflict(s)",
+                    sync.conflicts
+                );
+            }
+            Err(err) => {
+                self.rollback_failed_attach(
+                    &resolved.source.name,
+                    &local_root,
+                    previous_root.as_deref(),
+                )?;
+                return Err(err);
+            }
+        };
+
+        if let Some(previous_root) = previous_root {
+            if previous_root != local_root {
+                remove_root_marker(&previous_root)?;
+            }
+        }
+
+        let event = agentfs::event_record(
+            &resolved.fs.fs_id,
+            "fs.attached",
+            &actor.agent_id,
+            &resolved.fs.fs_id,
+            None,
+            serde_json::json!({}),
+        )?;
+        agentfs::write_event(&rt, &resolved.operator, &event)?;
+
+        Ok(AgentFsAttachResult {
+            fs: resolved.fs,
+            source: self
+                .find_source(&resolved.source.name)?
+                .ok_or_else(|| anyhow::anyhow!("source disappeared after attach"))?,
+            head: resolved.head,
+            local_root,
+            sync,
+        })
+    }
+
+    pub fn fs_status(&self, fs_ref: &str) -> Result<AgentFsStatusSnapshot> {
+        let runtime = self.runtime()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let resolved = self.find_agentfs(&rt, &runtime, fs_ref)?;
+        let materialization_state =
+            head_materialization_state(&rt, &resolved.operator, &resolved.head)?;
+        let agent = self.agent_identify()?;
+        let role = agent.as_ref().and_then(|agent| {
+            resolved
+                .grants
+                .iter()
+                .find(|grant| grant.agent_id == agent.agent_id && grant.is_active())
+                .map(|grant| grant.role)
+                .or_else(|| {
+                    (resolved.fs.owner_agent_id == agent.agent_id).then_some(AgentFsRole::Owner)
+                })
+        });
+        let local_root = self.store.get_source_local_root(&resolved.source.name)?;
+        let base_commit_id = local_root
+            .as_ref()
+            .and_then(|root| read_root_marker_at_root(root).ok())
+            .and_then(|marker| marker.base_commit_id);
+
+        Ok(AgentFsStatusSnapshot {
+            fs: resolved.fs,
+            head: resolved.head,
+            materialization_state,
+            local_root,
+            agent_id: agent.map(|agent| agent.agent_id),
+            role,
+            base_commit_id,
+        })
+    }
+
+    pub fn commit_status(&self, input_path: &Path) -> Result<AgentFsCommitStatus> {
+        let actor = self.require_agent_identity()?;
+        let runtime = self.runtime()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let marker = discover_root_marker(&absolutize_path(input_path)?)?;
+        let fs_id = marker
+            .fs_id
+            .clone()
+            .ok_or_else(|| AgentFsError::unknown_fs(&marker.source_id))?;
+        let resolved = self.find_agentfs(&rt, &runtime, &fs_id)?;
+        agentfs::ensure_capability(
+            &resolved.fs,
+            &resolved.grants,
+            &actor.agent_id,
+            AgentFsCapability::Read,
+        )?;
+        ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
+
+        let local_root = self
+            .store
+            .get_source_local_root(&resolved.source.name)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("source {} has no bound local root", resolved.source.name)
+            })?;
+        let dirty_paths = collect_dirty_paths(&rt, &resolved.operator, &local_root)?;
+        let stale = marker.base_commit_id != resolved.head.commit_id;
+
+        Ok(AgentFsCommitStatus {
+            fs: resolved.fs,
+            source_name: resolved.source.name,
+            local_root,
+            base_commit_id: marker.base_commit_id,
+            current_head_commit_id: resolved.head.commit_id,
+            stale,
+            dirty_paths,
+        })
+    }
+
+    pub fn commit_apply(
+        &self,
+        input_path: &Path,
+        message: &str,
+    ) -> Result<AgentFsCommitApplyResult> {
+        let summary = message.trim();
+        if summary.is_empty() {
+            bail!("commit summary must not be empty");
+        }
+
+        let actor = self.require_agent_identity()?;
+        let runtime = self.runtime()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let marker = discover_root_marker(&absolutize_path(input_path)?)?;
+        let fs_id = marker
+            .fs_id
+            .clone()
+            .ok_or_else(|| AgentFsError::unknown_fs(&marker.source_id))?;
+        let resolved = self.find_agentfs(&rt, &runtime, &fs_id)?;
+        agentfs::ensure_capability(
+            &resolved.fs,
+            &resolved.grants,
+            &actor.agent_id,
+            AgentFsCapability::Commit,
+        )?;
+        ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
+
+        if marker.base_commit_id != resolved.head.commit_id {
+            anyhow::bail!(AgentFsError::stale_base(
+                &resolved.fs.fs_id,
+                marker.base_commit_id.as_deref(),
+                resolved.head.commit_id.as_deref(),
+            ));
+        }
+
+        let local_root = self
+            .store
+            .get_source_local_root(&resolved.source.name)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("source {} has no bound local root", resolved.source.name)
+            })?;
+        let dirty_paths = collect_dirty_paths(&rt, &resolved.operator, &local_root)?;
+        if dirty_paths.is_empty() {
+            bail!(
+                "empty commit: no dirty paths under {}",
+                local_root.display()
+            );
+        }
+
+        let lock = agentfs::acquire_head_lock(
+            &rt,
+            &resolved.operator,
+            &resolved.fs.fs_id,
+            &actor.agent_id,
+        )?;
+        let accepted = (|| -> Result<AgentFsCommitRecord> {
+            let current_head = agentfs::read_json::<AgentFsHeadRecord>(
+                &rt,
+                &resolved.operator,
+                agentfs::HEAD_PATH,
+            )?;
+            let grants = agentfs::list_grants(&rt, &resolved.operator)?;
+            agentfs::ensure_capability(
+                &resolved.fs,
+                &grants,
+                &actor.agent_id,
+                AgentFsCapability::Commit,
+            )?;
+            ensure_head_is_materialized(
+                &rt,
+                &resolved.operator,
+                &current_head,
+                &resolved.fs.fs_id,
+            )?;
+            if marker.base_commit_id != current_head.commit_id {
+                anyhow::bail!(AgentFsError::stale_base(
+                    &resolved.fs.fs_id,
+                    marker.base_commit_id.as_deref(),
+                    current_head.commit_id.as_deref(),
+                ));
+            }
+
+            let commit = AgentFsCommitRecord {
+                schema_version: agentfs::SCHEMA_VERSION,
+                commit_id: agentfs::new_commit_id()?,
+                fs_id: resolved.fs.fs_id.clone(),
+                parent_commit_id: current_head.commit_id.clone(),
+                agent_id: actor.agent_id.clone(),
+                summary: summary.to_string(),
+                paths: dirty_paths,
+                created_at_ms: agentfs::now_ms(),
+                materialization_state: AgentFsMaterializationState::Pending,
+                materialized_at_ms: None,
+                error: None,
+            };
+
+            agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+            agentfs::write_json(
+                &rt,
+                &resolved.operator,
+                agentfs::HEAD_PATH,
+                &agentfs::head_record(&resolved.fs.fs_id, Some(commit.commit_id.clone())),
+            )?;
+            let accepted_event = agentfs::event_record(
+                &resolved.fs.fs_id,
+                "commit.accepted",
+                &actor.agent_id,
+                &commit.commit_id,
+                None,
+                serde_json::json!({ "summary": commit.summary, "paths": commit.paths }),
+            )?;
+            agentfs::write_event(&rt, &resolved.operator, &accepted_event)?;
+            Ok(commit)
+        })();
+        agentfs::release_head_lock(&rt, &resolved.operator, &lock)?;
+        let mut commit = accepted?;
+
+        match self.source_sync(&resolved.source.name) {
+            Ok(sync) if sync.conflicts == 0 => {
+                commit.materialization_state = AgentFsMaterializationState::Materialized;
+                commit.materialized_at_ms = Some(agentfs::now_ms());
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+                let materialized_event = agentfs::event_record(
+                    &resolved.fs.fs_id,
+                    "commit.materialized",
+                    &actor.agent_id,
+                    &commit.commit_id,
+                    None,
+                    serde_json::json!({ "pushed": sync.pushed, "pulled": sync.pulled }),
+                )?;
+                agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
+                write_root_marker_for_agentfs(
+                    &resolved.source.name,
+                    &local_root,
+                    &resolved.fs.fs_id,
+                    &actor.agent_id,
+                    Some(commit.commit_id.clone()),
+                )?;
+                Ok(AgentFsCommitApplyResult { commit, sync })
+            }
+            Ok(sync) => {
+                commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
+                commit.error = Some(format!(
+                    "source sync reported {} conflict(s)",
+                    sync.conflicts
+                ));
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+                write_materialization_failed_event(
+                    &rt,
+                    &resolved.operator,
+                    &resolved.fs.fs_id,
+                    &actor.agent_id,
+                    &commit,
+                )?;
+                anyhow::bail!(AgentFsError::materialization_failed(
+                    &resolved.fs.fs_id,
+                    commit.error.as_deref().unwrap_or("source sync failed"),
+                ));
+            }
+            Err(err) => {
+                commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
+                commit.error = Some(err.to_string());
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+                write_materialization_failed_event(
+                    &rt,
+                    &resolved.operator,
+                    &resolved.fs.fs_id,
+                    &actor.agent_id,
+                    &commit,
+                )?;
+                Err(AgentFsError::materialization_failed(
+                    &resolved.fs.fs_id,
+                    commit.error.as_deref().unwrap_or("source sync failed"),
+                )
+                .into())
+            }
+        }
     }
 
     pub fn source_add(
@@ -166,6 +768,9 @@ impl SectiondControlPlane {
         let local_root = absolutize_path(local_root)?;
         let previous_root = self.store.get_source_local_root(name)?;
         self.store.set_source_local_root(name, &local_root)?;
+        if previous_root.as_ref() != Some(&local_root) {
+            self.store.clear_source_sync_state(name)?;
+        }
         write_root_marker(name, &local_root)?;
 
         if let Some(previous_root) = previous_root {
@@ -358,6 +963,309 @@ impl SectiondControlPlane {
 
         Ok(())
     }
+
+    fn require_agent_identity(&self) -> Result<AgentIdentityRecord> {
+        self.store
+            .get_agent_identity()?
+            .ok_or_else(|| AgentFsError::unknown_agent().into())
+    }
+
+    fn find_agentfs(
+        &self,
+        rt: &tokio::runtime::Runtime,
+        runtime: &SectiondRuntime,
+        fs_ref: &str,
+    ) -> Result<ResolvedAgentFs> {
+        for source in self.list_sources()? {
+            let operator = runtime.router().get_operator(&source.name)?;
+            let Some(fs) =
+                agentfs::read_optional_json::<AgentFsRecord>(rt, operator, agentfs::FS_PATH)?
+            else {
+                continue;
+            };
+
+            if fs.fs_id != fs_ref && fs.name != fs_ref && fs.source_name != fs_ref {
+                continue;
+            }
+
+            let head = agentfs::read_json::<AgentFsHeadRecord>(rt, operator, agentfs::HEAD_PATH)?;
+            let grants = agentfs::list_grants(rt, operator)?;
+            return Ok(ResolvedAgentFs {
+                source,
+                fs,
+                head,
+                grants,
+                operator: operator.clone(),
+            });
+        }
+
+        Err(AgentFsError::unknown_fs(fs_ref).into())
+    }
+
+    fn rollback_failed_attach(
+        &self,
+        source_name: &str,
+        local_root: &Path,
+        previous_root: Option<&Path>,
+    ) -> Result<()> {
+        remove_root_marker(local_root)?;
+        match previous_root {
+            Some(previous_root) => {
+                self.store
+                    .set_source_local_root(source_name, previous_root)?;
+            }
+            None => {
+                self.store.remove_source_local_root(source_name)?;
+            }
+        }
+        self.store.clear_source_sync_state(source_name)?;
+        Ok(())
+    }
+}
+
+struct ResolvedAgentFs {
+    source: SourceRegistryEntry,
+    fs: AgentFsRecord,
+    head: AgentFsHeadRecord,
+    grants: Vec<AgentFsGrantRecord>,
+    operator: opendal::Operator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentPathObservation {
+    kind: String,
+    version: Option<String>,
+}
+
+fn ensure_head_is_materialized(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    head: &AgentFsHeadRecord,
+    fs_id: &str,
+) -> Result<()> {
+    let Some(commit_id) = &head.commit_id else {
+        return Ok(());
+    };
+
+    let commit: AgentFsCommitRecord = agentfs::read_json(
+        rt,
+        operator,
+        &format!("{}/commits/{}.json", agentfs::METADATA_ROOT, commit_id),
+    )?;
+    if commit.materialization_state == AgentFsMaterializationState::Materialized {
+        return Ok(());
+    }
+
+    anyhow::bail!(AgentFsError::materialization_failed(
+        fs_id,
+        format!(
+            "head commit {commit_id} is {:?}",
+            commit.materialization_state
+        ),
+    ));
+}
+
+fn head_materialization_state(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    head: &AgentFsHeadRecord,
+) -> Result<Option<AgentFsMaterializationState>> {
+    let Some(commit_id) = &head.commit_id else {
+        return Ok(None);
+    };
+
+    let commit: AgentFsCommitRecord = agentfs::read_json(
+        rt,
+        operator,
+        &format!("{}/commits/{}.json", agentfs::METADATA_ROOT, commit_id),
+    )?;
+    Ok(Some(commit.materialization_state))
+}
+
+fn write_materialization_failed_event(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    fs_id: &str,
+    actor_agent_id: &str,
+    commit: &AgentFsCommitRecord,
+) -> Result<()> {
+    let event = agentfs::event_record(
+        fs_id,
+        "commit.materialization_failed",
+        actor_agent_id,
+        &commit.commit_id,
+        None,
+        serde_json::json!({ "error": commit.error }),
+    )?;
+    agentfs::write_event(rt, operator, &event)
+}
+
+fn collect_dirty_paths(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    local_root: &Path,
+) -> Result<Vec<AgentFsCommitPathRecord>> {
+    let local = collect_local_agent_paths(local_root)?;
+    let remote = collect_remote_agent_paths(rt, operator)?;
+    let mut paths = BTreeSet::new();
+    paths.extend(local.keys().cloned());
+    paths.extend(remote.keys().cloned());
+
+    let mut dirty = Vec::new();
+    for path in paths {
+        agentfs::validate_source_relative_path(&path)?;
+        let local_entry = local.get(&path);
+        let remote_entry = remote.get(&path);
+        if local_entry == remote_entry {
+            continue;
+        }
+
+        let op = match (local_entry, remote_entry) {
+            (Some(_), None) => "create",
+            (Some(_), Some(_)) => "update",
+            (None, Some(_)) => "delete",
+            (None, None) => continue,
+        };
+        let kind = local_entry
+            .or(remote_entry)
+            .map(|entry| entry.kind.clone())
+            .unwrap_or_else(|| "file".to_string());
+        dirty.push(AgentFsCommitPathRecord {
+            path,
+            kind,
+            op: op.to_string(),
+            local_version: local_entry.and_then(|entry| entry.version.clone()),
+            previous_version: remote_entry.and_then(|entry| entry.version.clone()),
+        });
+    }
+
+    Ok(dirty)
+}
+
+fn collect_local_agent_paths(root: &Path) -> Result<BTreeMap<String, AgentPathObservation>> {
+    let mut entries = BTreeMap::new();
+
+    fn walk(
+        current: &Path,
+        root: &Path,
+        entries: &mut BTreeMap<String, AgentPathObservation>,
+    ) -> Result<()> {
+        if !current.exists() {
+            return Ok(());
+        }
+
+        let mut dir_entries = fs::read_dir(current)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        dir_entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in dir_entries {
+            let path = entry.path();
+            if current == root && entry.file_name() == ".section" {
+                continue;
+            }
+
+            let relative = normalize_local_relative_path(root, &path)?;
+            let metadata = fs::metadata(&path)?;
+            if metadata.is_dir() {
+                entries.insert(
+                    relative.clone(),
+                    AgentPathObservation {
+                        kind: "dir".to_string(),
+                        version: None,
+                    },
+                );
+                walk(&path, root, entries)?;
+            } else if metadata.is_file() {
+                entries.insert(
+                    relative,
+                    AgentPathObservation {
+                        kind: "file".to_string(),
+                        version: Some(hash_file(&path)?),
+                    },
+                );
+            } else {
+                bail!("unsupported local entry type for {}", path.display());
+            }
+        }
+
+        Ok(())
+    }
+
+    walk(root, root, &mut entries)?;
+    Ok(entries)
+}
+
+fn collect_remote_agent_paths(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+) -> Result<BTreeMap<String, AgentPathObservation>> {
+    let mut listed = rt.block_on(async { operator.list_with("").recursive(true).await })?;
+    listed.sort_by_key(|entry| entry.path().to_string());
+    let mut entries = BTreeMap::new();
+
+    for entry in listed {
+        let path = normalize_agent_source_path(entry.path());
+        if path.is_empty() || path == ".section" || path.starts_with(".section/") {
+            continue;
+        }
+
+        match entry.metadata().mode() {
+            EntryMode::DIR => {
+                entries.insert(
+                    path,
+                    AgentPathObservation {
+                        kind: "dir".to_string(),
+                        version: None,
+                    },
+                );
+            }
+            EntryMode::FILE => {
+                let data = rt.block_on(operator.read(&path))?;
+                entries.insert(
+                    path,
+                    AgentPathObservation {
+                        kind: "file".to_string(),
+                        version: Some(hash_bytes(data.to_bytes().as_ref())),
+                    },
+                );
+            }
+            other => bail!("unsupported remote entry mode {other:?} for {path}"),
+        }
+    }
+
+    Ok(entries)
+}
+
+fn normalize_local_relative_path(root: &Path, path: &Path) -> Result<String> {
+    let relative = path.strip_prefix(root)?;
+    Ok(relative
+        .iter()
+        .map(|segment| segment.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn normalize_agent_source_path(path: &str) -> String {
+    path.trim_matches('/').to_string()
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    Ok(hash_bytes(&fs::read(path)?))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let digest = digest(&SHA256, bytes);
+    format!(
+        "sha256:{}",
+        digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn default_root_marker_schema_version() -> u32 {
+    1
 }
 
 fn absolutize_path(path: &Path) -> Result<PathBuf> {
@@ -368,12 +1276,69 @@ fn absolutize_path(path: &Path) -> Result<PathBuf> {
     }
 }
 
+fn ensure_attach_root_is_empty(local_root: &Path) -> Result<()> {
+    if !local_root.exists() {
+        return Ok(());
+    }
+    if !local_root.is_dir() {
+        bail!(
+            "fs attach target {} exists but is not a directory",
+            local_root.display()
+        );
+    }
+
+    let mut user_entries = Vec::new();
+    for entry in std::fs::read_dir(local_root)? {
+        let entry = entry?;
+        if entry.file_name() == ".section" {
+            continue;
+        }
+        user_entries.push(entry.path());
+    }
+
+    if !user_entries.is_empty() {
+        bail!(
+            "fs attach target {} must be empty so attach cannot publish local drafts",
+            local_root.display()
+        );
+    }
+
+    Ok(())
+}
+
 fn write_root_marker(source_id: &str, local_root: &Path) -> Result<()> {
     let marker = RootDiscoveryMarker {
+        schema_version: 1,
         source_id: source_id.to_string(),
         local_root: local_root.to_path_buf(),
         control_plane_endpoint: "sectiond://local".to_string(),
+        fs_id: None,
+        agent_id: None,
+        base_commit_id: None,
     };
+    write_root_marker_record(local_root, &marker)
+}
+
+fn write_root_marker_for_agentfs(
+    source_id: &str,
+    local_root: &Path,
+    fs_id: &str,
+    agent_id: &str,
+    base_commit_id: Option<String>,
+) -> Result<()> {
+    let marker = RootDiscoveryMarker {
+        schema_version: 1,
+        source_id: source_id.to_string(),
+        local_root: local_root.to_path_buf(),
+        control_plane_endpoint: "sectiond://local".to_string(),
+        fs_id: Some(fs_id.to_string()),
+        agent_id: Some(agent_id.to_string()),
+        base_commit_id,
+    };
+    write_root_marker_record(local_root, &marker)
+}
+
+fn write_root_marker_record(local_root: &Path, marker: &RootDiscoveryMarker) -> Result<()> {
     let marker_dir = local_root.join(".section");
     std::fs::create_dir_all(&marker_dir)?;
     std::fs::write(
@@ -396,6 +1361,11 @@ fn remove_root_marker(local_root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn read_root_marker_at_root(local_root: &Path) -> Result<RootDiscoveryMarker> {
+    let marker = std::fs::read(local_root.join(".section").join("root.json"))?;
+    Ok(serde_json::from_slice(&marker)?)
 }
 
 fn discover_root_marker(path: &Path) -> Result<RootDiscoveryMarker> {

@@ -25,6 +25,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Manage local agent identity
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+    /// Manage AgentFS filesystems
+    Fs {
+        #[command(subcommand)]
+        action: FsAction,
+    },
+    /// Inspect and apply AgentFS commits
+    Commit {
+        #[command(subcommand)]
+        action: CommitAction,
+    },
     /// Manage data sources
     Source {
         #[command(subcommand)]
@@ -162,6 +177,87 @@ pub enum SourceAction {
 }
 
 #[derive(Subcommand)]
+pub enum AgentAction {
+    /// Register or rename the local agent identity
+    Register {
+        /// Agent display name
+        name: String,
+    },
+    /// Show the local agent identity
+    Identify,
+}
+
+#[derive(Subcommand)]
+pub enum FsAction {
+    /// Create an agent-owned filesystem
+    Create {
+        /// Filesystem name
+        name: String,
+        /// Provider type (e.g., "fs", "s3", "webdav")
+        #[arg(long)]
+        provider: String,
+        /// Provider-specific options as key=value pairs
+        #[arg(long, value_parser = parse_key_val)]
+        opt: Vec<(String, String)>,
+    },
+    /// List AgentFS filesystems visible through local sources
+    List,
+    /// Grant another agent access to an FS
+    Grant {
+        /// FS name, fs_id, or source name
+        fs: String,
+        /// Agent id to grant
+        agent_id: String,
+        /// Role to grant
+        #[arg(long, value_enum)]
+        role: FsRoleArg,
+    },
+    /// Revoke an agent's active grants on an FS
+    Revoke {
+        /// FS name, fs_id, or source name
+        fs: String,
+        /// Agent id to revoke
+        agent_id: String,
+    },
+    /// Attach an FS to a local working directory
+    Attach {
+        /// FS name, fs_id, or source name
+        fs: String,
+        /// Local working directory
+        local_root: PathBuf,
+    },
+    /// Show AgentFS status
+    Status {
+        /// FS name, fs_id, source name, or attached local path
+        fs: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum FsRoleArg {
+    Reader,
+    Writer,
+    Manager,
+}
+
+#[derive(Subcommand)]
+pub enum CommitAction {
+    /// Show dirty paths and stale-base state for an attached AgentFS root
+    Status {
+        /// Attached local path or root
+        path: PathBuf,
+    },
+    /// Accept and materialize all dirty paths under an attached AgentFS root
+    Apply {
+        /// Attached local path or root
+        path: PathBuf,
+        /// Commit summary
+        #[arg(long)]
+        message: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum PathAction {
     /// Inspect sync state for a local path under a bound root
     Inspect {
@@ -205,6 +301,9 @@ fn main() -> Result<()> {
     let json = cli.json;
 
     match cli.command {
+        Commands::Agent { action } => cmd::agent::run(cli.config.as_deref(), action, json),
+        Commands::Fs { action } => cmd::fs::run(cli.config.as_deref(), action, json),
+        Commands::Commit { action } => cmd::commit::run(cli.config.as_deref(), action, json),
         Commands::Source { action } => cmd::source::run(cli.config.as_deref(), action, json),
         Commands::Path { action } => cmd::path::run(cli.config.as_deref(), action, json),
         Commands::Watch {

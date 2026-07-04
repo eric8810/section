@@ -21,6 +21,11 @@ Section's active product model is:
 ## Active Documents
 
 - [docs/PRODUCT.md](docs/PRODUCT.md)
+- [docs/AGENTFS_REQUIREMENTS.md](docs/AGENTFS_REQUIREMENTS.md)
+- [docs/AGENTFS_DESIGN_PROPOSAL.md](docs/AGENTFS_DESIGN_PROPOSAL.md)
+- [docs/AGENTFS_MVP_CONTRACT.md](docs/AGENTFS_MVP_CONTRACT.md)
+- [docs/AGENTFS_TEST_PLAN.md](docs/AGENTFS_TEST_PLAN.md)
+- [docs/AGENTFS_DEVELOPMENT_READINESS.md](docs/AGENTFS_DEVELOPMENT_READINESS.md)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/SYNC_MODEL.md](docs/SYNC_MODEL.md)
 - [docs/SECTIOND.md](docs/SECTIOND.md)

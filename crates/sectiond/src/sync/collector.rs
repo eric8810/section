@@ -211,7 +211,7 @@ impl SnapshotCollector for DefaultSnapshotCollector<'_> {
 
         for entry in listed_entries {
             let path = normalize_source_path(entry.path());
-            if path.is_empty() {
+            if path.is_empty() || is_reserved_section_path(&path) {
                 continue;
             }
 
@@ -279,7 +279,7 @@ impl DefaultSnapshotCollector<'_> {
 
         for inventory_entry in inventory_entries {
             let path = normalize_source_path(&inventory_entry.path);
-            if path.is_empty() || path == manifest_path {
+            if path.is_empty() || path == manifest_path || is_reserved_section_path(&path) {
                 continue;
             }
 
@@ -303,6 +303,10 @@ impl DefaultSnapshotCollector<'_> {
             stats,
         })
     }
+}
+
+fn is_reserved_section_path(path: &str) -> bool {
+    path == ".section" || path.starts_with(".section/")
 }
 
 fn observe_local_entry_with_cache(

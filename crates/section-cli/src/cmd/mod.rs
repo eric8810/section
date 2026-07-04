@@ -1,4 +1,7 @@
+pub mod agent;
+pub mod commit;
 pub mod file;
+pub mod fs;
 pub mod init;
 pub mod mount;
 pub mod path;
