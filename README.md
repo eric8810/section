@@ -26,6 +26,7 @@ Section's active product model is:
 - [docs/AGENTFS_MVP_CONTRACT.md](docs/AGENTFS_MVP_CONTRACT.md)
 - [docs/AGENTFS_TEST_PLAN.md](docs/AGENTFS_TEST_PLAN.md)
 - [docs/AGENTFS_DEVELOPMENT_READINESS.md](docs/AGENTFS_DEVELOPMENT_READINESS.md)
+- [docs/issues/004-agentfs-review-triage.md](docs/issues/004-agentfs-review-triage.md)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/SYNC_MODEL.md](docs/SYNC_MODEL.md)
 - [docs/SECTIOND.md](docs/SECTIOND.md)

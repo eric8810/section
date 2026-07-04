@@ -149,6 +149,50 @@ fn fs_create_rejects_existing_source_without_overwriting_it() {
 }
 
 #[test]
+fn fs_create_rejects_non_empty_backing_source_without_registering_source() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("owner-data");
+    let config_path = temp_dir.path().join("owner.toml");
+    let remote_root = temp_dir.path().join("remote");
+
+    fs::create_dir_all(&remote_root).expect("create remote root");
+    fs::write(remote_root.join("preexisting.txt"), "not imported").expect("write remote file");
+    write_config(&config_path, &data_dir);
+
+    let register = run_section(&config_path, &["--json", "agent", "register", "owner"]);
+    assert_success(&register, "agent register");
+
+    let create = run_section(
+        &config_path,
+        &[
+            "--json",
+            "fs",
+            "create",
+            "project",
+            "--provider",
+            "fs",
+            "--opt",
+            &format!("root={}", remote_root.display()),
+        ],
+    );
+    assert!(
+        !create.status.success(),
+        "fs create unexpectedly accepted a non-empty backing source\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let source_list = run_section(&config_path, &["--json", "source", "list"]);
+    assert_success(&source_list, "source list");
+    let source_list: Value = serde_json::from_slice(&source_list.stdout).expect("source list json");
+    assert_eq!(source_list.as_array().expect("source list array").len(), 0);
+    assert!(
+        !remote_root.join(".section/agentfs/fs.json").exists(),
+        "failed fs create must not initialize AgentFS metadata"
+    );
+}
+
+#[test]
 fn granted_writer_can_attach_without_syncing_agentfs_metadata_as_content() {
     let temp_dir = tempfile::TempDir::new().expect("temp dir");
     let remote_root = temp_dir.path().join("remote");
@@ -231,6 +275,16 @@ fn granted_writer_can_attach_without_syncing_agentfs_metadata_as_content() {
     assert_success(&attach, "writer attach");
     let attach: Value = serde_json::from_slice(&attach.stdout).expect("attach json");
     assert_eq!(attach["attach"]["fs"]["fs_id"], fs_id);
+    assert!(
+        attach["attach"]["source"]["options"].is_null(),
+        "attach JSON must not expose source options"
+    );
+    assert!(
+        !serde_json::to_string(&attach)
+            .expect("attach json string")
+            .contains(remote_root.to_str().expect("utf8 remote root")),
+        "attach JSON must not expose backing source paths"
+    );
     assert_eq!(
         attach["attach"]["local_root"].as_str(),
         Some(writer_root.to_str().expect("utf8 writer root"))
@@ -424,6 +478,207 @@ fn granted_writer_can_attach_without_syncing_agentfs_metadata_as_content() {
     assert!(
         !remote_root.join("docs/after-downgrade.txt").exists(),
         "downgraded writer local draft must not materialize"
+    );
+}
+
+#[test]
+fn fs_attach_rejects_backing_source_root_as_working_root() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("owner-data");
+    let config_path = temp_dir.path().join("owner.toml");
+    let remote_root = temp_dir.path().join("remote");
+
+    fs::create_dir_all(&remote_root).expect("create remote root");
+    write_config(&config_path, &data_dir);
+
+    let register = run_section(&config_path, &["--json", "agent", "register", "owner"]);
+    assert_success(&register, "agent register");
+    let create = run_section(
+        &config_path,
+        &[
+            "--json",
+            "fs",
+            "create",
+            "project",
+            "--provider",
+            "fs",
+            "--opt",
+            &format!("root={}", remote_root.display()),
+        ],
+    );
+    assert_success(&create, "fs create");
+
+    let attach = run_section(
+        &config_path,
+        &[
+            "--json",
+            "fs",
+            "attach",
+            "project",
+            remote_root.to_str().expect("utf8 remote root"),
+        ],
+    );
+    assert!(
+        !attach.status.success(),
+        "attach unexpectedly allowed backing source root as working root\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&attach.stdout),
+        String::from_utf8_lossy(&attach.stderr)
+    );
+    assert!(
+        !remote_root.join(".section/root.json").exists(),
+        "failed attach must not write a working-root marker into the backing source"
+    );
+}
+
+#[test]
+fn commit_apply_rejects_stale_marker_local_root_mismatch() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let remote_root = temp_dir.path().join("remote");
+    let data_dir = temp_dir.path().join("owner-data");
+    let config_path = temp_dir.path().join("owner.toml");
+    let first_root = temp_dir.path().join("first-root");
+    let second_root = temp_dir.path().join("second-root");
+
+    fs::create_dir_all(&remote_root).expect("create remote root");
+    write_config(&config_path, &data_dir);
+
+    let register = run_section(&config_path, &["--json", "agent", "register", "owner"]);
+    assert_success(&register, "agent register");
+    let create = run_section(
+        &config_path,
+        &[
+            "--json",
+            "fs",
+            "create",
+            "project",
+            "--provider",
+            "fs",
+            "--opt",
+            &format!("root={}", remote_root.display()),
+        ],
+    );
+    assert_success(&create, "fs create");
+
+    let first_attach = run_section(
+        &config_path,
+        &[
+            "--json",
+            "fs",
+            "attach",
+            "project",
+            first_root.to_str().expect("utf8 first root"),
+        ],
+    );
+    assert_success(&first_attach, "first attach");
+    let first_marker = fs::read(first_root.join(".section/root.json")).expect("read first marker");
+
+    let second_attach = run_section(
+        &config_path,
+        &[
+            "--json",
+            "fs",
+            "attach",
+            "project",
+            second_root.to_str().expect("utf8 second root"),
+        ],
+    );
+    assert_success(&second_attach, "second attach");
+
+    fs::create_dir_all(first_root.join(".section")).expect("restore stale marker dir");
+    fs::write(first_root.join(".section/root.json"), first_marker).expect("restore stale marker");
+    fs::write(
+        second_root.join("should-not-commit.txt"),
+        "store-root draft",
+    )
+    .expect("write second root draft");
+
+    let commit = run_section(
+        &config_path,
+        &[
+            "--json",
+            "commit",
+            "apply",
+            first_root.to_str().expect("utf8 first root"),
+            "--message",
+            "must not commit from current store root",
+        ],
+    );
+    assert!(
+        !commit.status.success(),
+        "commit unexpectedly used store root after discovering a stale marker\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&commit.stdout),
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    assert!(
+        !remote_root.join("should-not-commit.txt").exists(),
+        "commit from stale marker must not materialize current store-root content"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn commit_apply_rejects_symlink_paths() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let remote_root = temp_dir.path().join("remote");
+    let data_dir = temp_dir.path().join("owner-data");
+    let config_path = temp_dir.path().join("owner.toml");
+    let local_root = temp_dir.path().join("local-root");
+    let outside_file = temp_dir.path().join("outside-secret.txt");
+
+    fs::create_dir_all(&remote_root).expect("create remote root");
+    fs::write(&outside_file, "must not leak").expect("write outside file");
+    write_config(&config_path, &data_dir);
+
+    let register = run_section(&config_path, &["--json", "agent", "register", "owner"]);
+    assert_success(&register, "agent register");
+    let create = run_section(
+        &config_path,
+        &[
+            "--json",
+            "fs",
+            "create",
+            "project",
+            "--provider",
+            "fs",
+            "--opt",
+            &format!("root={}", remote_root.display()),
+        ],
+    );
+    assert_success(&create, "fs create");
+
+    let attach = run_section(
+        &config_path,
+        &[
+            "--json",
+            "fs",
+            "attach",
+            "project",
+            local_root.to_str().expect("utf8 local root"),
+        ],
+    );
+    assert_success(&attach, "attach");
+
+    std::os::unix::fs::symlink(&outside_file, local_root.join("leak.txt")).expect("create symlink");
+    let commit = run_section(
+        &config_path,
+        &[
+            "--json",
+            "commit",
+            "apply",
+            local_root.to_str().expect("utf8 local root"),
+            "--message",
+            "must reject symlink",
+        ],
+    );
+    assert!(
+        !commit.status.success(),
+        "commit unexpectedly followed a symlink\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&commit.stdout),
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    assert!(
+        !remote_root.join("leak.txt").exists(),
+        "symlink target must not materialize as remote content"
     );
 }
 

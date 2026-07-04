@@ -457,12 +457,13 @@ pub fn write_event(
     op: &Operator,
     event: &AgentFsEventRecord,
 ) -> Result<()> {
-    write_json(
-        rt,
-        op,
-        &format!("{METADATA_ROOT}/events/{}.json", event.event_id),
-        event,
-    )
+    let path = format!("{METADATA_ROOT}/events/{}.json", event.event_id);
+    match rt.block_on(op.stat(&path)) {
+        Ok(_) => anyhow::bail!(AgentFsError::metadata_write_conflict(&event.fs_id)),
+        Err(err) if err.kind() == opendal::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    write_json(rt, op, &path, event)
 }
 
 pub fn write_commit(

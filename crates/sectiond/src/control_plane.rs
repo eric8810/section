@@ -10,7 +10,7 @@ use crate::{
 };
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
-use opendal::{EntryMode, Operator};
+use opendal::{EntryMode, Operator, Scheme};
 use ring::digest::{digest, SHA256};
 use section_core::config::{CacheConfig, SourceConfig};
 use section_core::SectionConfig;
@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 
 const REFRESH_XATTR_NAME: &str = "section.refresh";
 const REFRESH_XATTR_NAME_LINUX: &str = "user.section.refresh";
@@ -80,10 +81,18 @@ pub struct RefreshResult {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentFsAttachResult {
     pub fs: AgentFsRecord,
-    pub source: SourceRegistryEntry,
+    pub source: AgentFsAttachedSource,
     pub head: AgentFsHeadRecord,
     pub local_root: PathBuf,
     pub sync: SourceSyncResult,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentFsAttachedSource {
+    pub name: String,
+    pub provider: String,
+    pub origin: SourceOrigin,
+    pub local_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -145,15 +154,16 @@ impl SectiondControlPlane {
         if self.find_source(name)?.is_some() {
             bail!("source {name} already exists; fs create will not overwrite existing sources");
         }
-        let source = self.source_add(name, provider, options)?;
-        let runtime = self.runtime()?;
-        let operator = runtime.router().get_operator(&source.name)?;
+        let operator = build_operator(provider, &options)?;
         let rt = tokio::runtime::Runtime::new()?;
 
-        if agentfs::read_optional_json::<AgentFsRecord>(&rt, operator, agentfs::FS_PATH)?.is_some()
+        if agentfs::read_optional_json::<AgentFsRecord>(&rt, &operator, agentfs::FS_PATH)?.is_some()
         {
-            bail!("source {} already contains AgentFS metadata", source.name);
+            bail!("source {name} already contains AgentFS metadata");
         }
+        ensure_backing_source_is_empty(&rt, &operator, name)?;
+
+        let source = self.source_add(name, provider, options)?;
 
         let fs = AgentFsRecord {
             schema_version: agentfs::SCHEMA_VERSION,
@@ -164,7 +174,10 @@ impl SectiondControlPlane {
             created_at_ms: agentfs::now_ms(),
         };
 
-        agentfs::initialize_fs_metadata(&rt, operator, &fs, &agent)?;
+        if let Err(err) = agentfs::initialize_fs_metadata(&rt, &operator, &fs, &agent) {
+            let _ = self.source_remove(&source.name);
+            return Err(err);
+        }
         Ok(fs)
     }
 
@@ -363,6 +376,7 @@ impl SectiondControlPlane {
         ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
 
         let local_root = absolutize_path(local_root)?;
+        ensure_attach_root_does_not_overlap_backing_root(&resolved.source, &local_root)?;
         ensure_attach_root_is_empty(&local_root)?;
         let previous_root = self.store.get_source_local_root(&resolved.source.name)?;
         self.store
@@ -417,9 +431,11 @@ impl SectiondControlPlane {
 
         Ok(AgentFsAttachResult {
             fs: resolved.fs,
-            source: self
-                .find_source(&resolved.source.name)?
-                .ok_or_else(|| anyhow::anyhow!("source disappeared after attach"))?,
+            source: attached_source_summary(
+                &self
+                    .find_source(&resolved.source.name)?
+                    .ok_or_else(|| anyhow::anyhow!("source disappeared after attach"))?,
+            ),
             head: resolved.head,
             local_root,
             sync,
@@ -478,12 +494,7 @@ impl SectiondControlPlane {
         )?;
         ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
 
-        let local_root = self
-            .store
-            .get_source_local_root(&resolved.source.name)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("source {} has no bound local root", resolved.source.name)
-            })?;
+        let local_root = local_root_from_marker(&self.store, &resolved.source.name, &marker)?;
         let dirty_paths = collect_dirty_paths(&rt, &resolved.operator, &local_root)?;
         let stale = marker.base_commit_id != resolved.head.commit_id;
 
@@ -533,12 +544,7 @@ impl SectiondControlPlane {
             ));
         }
 
-        let local_root = self
-            .store
-            .get_source_local_root(&resolved.source.name)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("source {} has no bound local root", resolved.source.name)
-            })?;
+        let local_root = local_root_from_marker(&self.store, &resolved.source.name, &marker)?;
         let dirty_paths = collect_dirty_paths(&rt, &resolved.operator, &local_root)?;
         if dirty_paths.is_empty() {
             bail!(
@@ -1031,6 +1037,120 @@ struct ResolvedAgentFs {
     operator: opendal::Operator,
 }
 
+fn attached_source_summary(source: &SourceRegistryEntry) -> AgentFsAttachedSource {
+    AgentFsAttachedSource {
+        name: source.name.clone(),
+        provider: source.provider.clone(),
+        origin: source.origin,
+        local_root: source.local_root.clone(),
+    }
+}
+
+fn build_operator(provider: &str, options: &HashMap<String, String>) -> Result<Operator> {
+    let mut options = options.clone();
+    options.retain(|key, _| !key.starts_with("section."));
+    if provider == "webdav" {
+        if let Some(endpoint) = options.get_mut("endpoint") {
+            *endpoint = endpoint.trim_end_matches('/').to_string();
+        }
+    }
+
+    Operator::via_iter(
+        Scheme::from_str(provider)
+            .map_err(|err| anyhow::anyhow!("unknown provider '{provider}': {err}"))?,
+        options.into_iter(),
+    )
+    .map_err(|err| anyhow::anyhow!("failed to build operator for '{provider}': {err}"))
+}
+
+fn ensure_backing_source_is_empty(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    source_name: &str,
+) -> Result<()> {
+    let entries = rt.block_on(async { operator.list_with("").recursive(true).await })?;
+    let first_path = entries
+        .into_iter()
+        .map(|entry| normalize_agent_source_path(entry.path()))
+        .find(|path| !path.is_empty());
+    if let Some(path) = first_path {
+        bail!(
+            "fs create requires an empty backing source; source {source_name} already contains {path}"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_attach_root_does_not_overlap_backing_root(
+    source: &SourceRegistryEntry,
+    local_root: &Path,
+) -> Result<()> {
+    if source.provider != "fs" {
+        return Ok(());
+    }
+
+    let Some(backing_root) = source.options.get("root") else {
+        return Ok(());
+    };
+    let backing_root = canonicalize_existing_or_future_path(Path::new(backing_root))?;
+    let local_root = canonicalize_existing_or_future_path(local_root)?;
+
+    if local_root == backing_root
+        || local_root.starts_with(&backing_root)
+        || backing_root.starts_with(&local_root)
+    {
+        bail!(
+            "fs attach target {} must not overlap backing source root {}",
+            local_root.display(),
+            backing_root.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn canonicalize_existing_or_future_path(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return Ok(path.canonicalize()?);
+    }
+
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    while !current.exists() {
+        let Some(name) = current.file_name().map(|name| name.to_os_string()) else {
+            bail!("cannot canonicalize {}", path.display());
+        };
+        missing.push(name);
+        if !current.pop() {
+            bail!("cannot canonicalize {}", path.display());
+        }
+    }
+
+    let mut canonical = current.canonicalize()?;
+    for segment in missing.into_iter().rev() {
+        canonical.push(segment);
+    }
+    Ok(canonical)
+}
+
+fn local_root_from_marker(
+    store: &ProviderStore,
+    source_name: &str,
+    marker: &RootDiscoveryMarker,
+) -> Result<PathBuf> {
+    let store_root = store
+        .get_source_local_root(source_name)?
+        .ok_or_else(|| anyhow::anyhow!("source {source_name} has no bound local root"))?;
+    if store_root != marker.local_root {
+        bail!(
+            "local marker root {} does not match current source binding {}",
+            marker.local_root.display(),
+            store_root.display()
+        );
+    }
+    Ok(marker.local_root.clone())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgentPathObservation {
     kind: String,
@@ -1164,7 +1284,13 @@ fn collect_local_agent_paths(root: &Path) -> Result<BTreeMap<String, AgentPathOb
             }
 
             let relative = normalize_local_relative_path(root, &path)?;
-            let metadata = fs::metadata(&path)?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                bail!(
+                    "AgentFS commit does not support symlink paths: {}",
+                    path.display()
+                );
+            }
             if metadata.is_dir() {
                 entries.insert(
                     relative.clone(),
