@@ -286,22 +286,350 @@ Expected:
 - AgentFS events are identifiable by kind or stream,
 - `commit.accepted` is observable after commit.
 
-## End-To-End MVP Proof
+## End-To-End Product Definition
 
-This is the minimum product proof:
+End-to-end tests are product proofs, not control-plane unit tests. They must
+exercise the system from an agent's point of view and prove this product model:
+
+```text
+agent creates FS
+agent owns FS
+agent grants other agents access
+agents attach FS as normal files
+agents edit locally
+agents commit through policy
+accepted commits become shared truth
+all agents can observe accepted FS mutations
+```
+
+An AgentFS E2E passes only when it proves the difference between local work and
+shared truth:
+
+```text
+local edit != shared truth
+accepted commit == shared truth mutation
+```
+
+### E2E Test Boundary
+
+E2E tests must use the released CLI shape and filesystem behavior:
+
+- run the `section` binary through the CLI test harness,
+- use separate config files and `data_dir` values for each agent,
+- use one shared backing source for the FS,
+- use separate local roots for each attached agent,
+- perform user work through ordinary file operations under local roots,
+- avoid calling `sectiond` Rust APIs directly.
+
+E2E tests may inspect shared metadata files under `.section/agentfs/` as an
+oracle, but the primary assertions should be made through CLI output and
+observable filesystem state.
+
+Until AgentFS event replay/watch is implemented, E2E tests may verify events by
+reading `.section/agentfs/events/`. The final E2E gate must replace that fallback
+with `section watch` or an AgentFS event replay command.
+
+### Product Questions Covered By E2E
+
+Each complete E2E suite must answer these questions from the agent perspective:
+
+| Product Question | E2E Evidence |
+| --- | --- |
+| Which FS do I own? | owner can create, list, status, attach, grant |
+| Which FS can I access? | granted writer/reader can attach; ungranted agent cannot |
+| What files can I read? | attached roots materialize accepted shared truth |
+| What files can I change locally? | agents can edit local files with ordinary filesystem operations |
+| What changes am I allowed to commit? | commit succeeds or fails according to active grant capability |
+| What changed while I was away? | second agent can observe a newer accepted commit and materialized file |
+| Which mutation affected truth? | commit record and head identify the accepted mutation |
+| Which agent changed it? | commit record and event actor identify the committing agent |
+| Which policy allowed it? | MVP checks active grant role/capabilities; final proof records the authorizing grant or owner authority |
+| What happens to rejected work? | local draft remains local and backing source/head remain unchanged |
+
+### Required E2E Fixtures
+
+Every AgentFS E2E should start from an isolated fixture:
+
+```text
+temp/
+  remote/
+  owner-data/
+  writer-data/
+  reader-data/
+  stranger-data/
+  owner.toml
+  writer.toml
+  reader.toml
+  stranger.toml
+  owner-root/
+  writer-root/
+  reader-root/
+  stranger-root/
+```
+
+All agents use the same backing `remote/` through the local filesystem provider.
+Each agent has a distinct `data_dir` so identity, grants observed by commands,
+and local root bindings cannot accidentally share local state.
+
+### Required E2E Scenarios
+
+#### 1. Owner Creates A Governed FS
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
-| 1 | agent-a | register | agent identity persisted |
-| 2 | agent-a | create FS `project` | owner grant and `fs.created` event |
-| 3 | agent-a | attach owner root | root marker with null base head |
-| 4 | agent-b | register | distinct identity |
-| 5 | agent-a | grant writer to agent-b | writer grant and event |
-| 6 | agent-b | attach writer root | materialized files synced |
-| 7 | agent-b | edit normal file | local dirty draft only |
-| 8 | agent-b | commit apply | commit accepted, head advances |
-| 9 | agent-a | watch or event replay | sees `commit.accepted` |
-| 10 | agent-a | sync/attach | materialized file appears |
+| 1 | owner | `agent register owner` | persisted `agt_` identity |
+| 2 | owner | `fs create project --provider fs --opt root=remote` | `fs_` created; owner grant exists |
+| 3 | owner | `fs list` and `fs status project` | owner can discover and inspect FS |
+| 4 | owner | inspect `remote/.section/agentfs/` | `fs.json`, head, owner grant, `fs.created` event exist |
+
+This proves agent-owned filesystem creation and initial governance metadata.
+
+#### 2. Writer Commit Becomes Shared Truth
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | `fs attach project owner-root` | owner root marker records null base head |
+| 2 | writer | `agent register writer` | distinct `agt_` identity |
+| 3 | owner | `fs grant project <writer_id> --role writer` | writer has `read` and `commit` capability |
+| 4 | writer | add backing source for `project` | writer can resolve the shared FS source |
+| 5 | writer | `fs attach project writer-root` | writer root materializes current shared truth |
+| 6 | writer | write `writer-root/docs/note.txt` | remote file does not exist yet |
+| 7 | writer | `commit status writer-root` | dirty path reports `docs/note.txt` as create |
+| 8 | writer | `commit apply writer-root --message "add note"` | commit id returned; materialization succeeds |
+| 9 | test | inspect head and commit metadata | head points to commit; commit actor is writer |
+| 10 | test | inspect remote file | `remote/docs/note.txt` exists with writer content |
+| 11 | owner | attach a fresh root or sync existing root | owner observes writer's accepted content |
+
+This proves the core product statement: local draft is not shared truth until a
+policy-accepted commit advances the FS head.
+
+#### 3. Reader Can Read But Cannot Commit
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | grant reader to `reader` | reader has `read` only |
+| 2 | reader | attach `reader-root` | attach succeeds |
+| 3 | reader | edit `reader-root/draft.txt` | edit stays local |
+| 4 | reader | `commit apply reader-root --message "reader draft"` | `grant_denied` |
+| 5 | test | inspect head, commits, remote file | no accepted commit; remote unchanged |
+
+This proves grants govern acceptance into shared truth, not local write syscalls.
+
+#### 4. Ungranted Agent Cannot Attach
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | stranger | register and add backing source | local identity exists |
+| 2 | stranger | `fs attach project stranger-root` | `grant_denied` |
+| 3 | test | inspect `stranger-root` | no AgentFS root marker is written |
+
+This proves access to an FS is not implicit from knowing the backing source.
+
+#### 5. Grant Revocation Or Downgrade Takes Effect
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | grant writer to `writer` | writer can attach and commit |
+| 2 | owner | grant reader to same `writer`, or revoke writer | active commit capability removed |
+| 3 | writer | edit an already attached root | local draft can exist |
+| 4 | writer | `commit apply` | `grant_denied` |
+| 5 | test | inspect remote and head | draft did not become shared truth |
+
+This proves current active grants, not historical local access, authorize
+commits.
+
+#### 6. Stale Writer Cannot Overwrite New Truth
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | grant writer to `writer-a` and `writer-b` | both can attach |
+| 2 | writer-a | attach at head `H0` | marker base is `H0` |
+| 3 | writer-b | attach at head `H0` | marker base is `H0` |
+| 4 | writer-a | edit and commit | head advances to `H1` |
+| 5 | writer-b | edit and commit from stale root | `stale_base` |
+| 6 | test | inspect remote/head | writer-a content remains current truth |
+
+This proves accepted commits are based on the current FS head and stale local
+work cannot silently replace newer truth.
+
+#### 7. Shared Metadata Is Not User Content
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | writer | attach FS | local root created |
+| 2 | writer | inspect user-visible local root | `.section/agentfs/**` is not materialized as ordinary content |
+| 3 | writer | create normal files and commit | commit paths exclude AgentFS metadata |
+| 4 | owner | attach fresh root | owner sees only user files plus local root marker |
+
+This proves governance metadata is shared control state, not ordinary FS user
+content.
+
+#### 8. Observable Mutation Trail
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | create FS | `fs.created` observable |
+| 2 | owner | grant writer | `grant.created` observable |
+| 3 | writer | commit | `commit.accepted` and `commit.materialized` observable |
+| 4 | observer | replay events or watch | events identify kind, actor, subject, and FS |
+
+This proves accepted mutations are observable. The current implementation may
+verify event files directly; the final product gate requires CLI event replay or
+watch.
+
+#### 9. Governance Boundary Hardening
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | `fs create` over a non-empty backing source | rejected; no source registration |
+| 2 | owner | attach backing source root as working root | rejected; no local marker |
+| 3 | writer | commit symlink path | rejected; target outside root does not materialize |
+| 4 | writer | inspect `fs attach --json` | source options and credentials are not exposed |
+
+This proves common filesystem edge cases do not collapse the product boundary.
+
+#### 10. Manager Can Manage But Cannot Commit
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | grant manager to `manager` | manager has `read` and `manage` capability |
+| 2 | manager | grant reader or writer to another agent | grant succeeds and event is emitted |
+| 3 | manager | attach and edit local root | local draft can exist |
+| 4 | manager | `commit apply` | `grant_denied` |
+| 5 | test | inspect head and remote | manager draft did not become shared truth |
+
+This proves manage authority is distinct from commit authority.
+
+#### 11. Backing Source Drift Does Not Become Silent Truth
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | create, attach, and commit baseline file | head points to baseline commit |
+| 2 | external process | mutate backing file directly outside AgentFS | backing source now differs from governed base |
+| 3 | writer | `commit status` or `commit apply` from old local root | drift/conflict/stale state is surfaced |
+| 4 | test | inspect head and commit records | no accepted commit silently blesses external drift |
+
+This proves external backing-source changes are not governed commits. The exact
+CLI error may evolve, but the E2E must prove the mutation is not silently
+accepted as AgentFS truth.
+
+#### 12. Commit Snapshot Matches Materialized Bytes
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | writer | edit local file to version A | dirty path reports version A |
+| 2 | writer | start commit flow | commit preflight records intended path/version |
+| 3 | writer or test harness | mutate the local file to version B during commit window | commit either uses a frozen snapshot or rejects |
+| 4 | test | compare commit record and remote bytes | accepted commit metadata matches materialized bytes |
+
+This proves the accepted commit record describes what actually became shared
+truth. If the implementation cannot create this race deterministically, the E2E
+can use a test hook or slow provider later; until then this remains a required
+product-complete scenario.
+
+#### 13. Materialization Failure Blocks New Commits
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | writer | commit a dirty path while backing source fails materialization | commit remains accepted with `failed_to_materialize` |
+| 2 | writer | attempt another commit | command fails before accepting a new commit |
+| 3 | owner or writer | inspect status | FS reports non-ready materialization state |
+| 4 | test | inspect head | head remains on the failed accepted commit |
+
+This proves governance truth can advance independently from file
+materialization, and that the system does not accept follow-up mutations while
+the head is not materialized.
+
+#### 14. Granted Agent Bootstrap Is Product-Visible
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | grant writer to `writer` | writer is authorized on the FS |
+| 2 | writer | discover or accept access to the FS | writer can learn enough to attach without out-of-band source setup |
+| 3 | writer | attach | attach succeeds using granted access path |
+| 4 | test | inspect writer local store | source/bootstrap metadata is present without leaking credentials unnecessarily |
+
+This proves grants lead to usable access from the grantee's perspective. The
+current implementation still requires manual backing source setup, so this is a
+required product-complete E2E after invite/source bootstrap/discovery is
+designed.
+
+#### 15. Local Root Identity Is Stable
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | writer | attach using one spelling of a path | root marker and local binding are written |
+| 2 | writer | run commit/status using an equivalent canonical path | command resolves the same attached root |
+| 3 | writer | try overlapping parent/child roots | attach or bind rejects ambiguous overlap |
+| 4 | test | inspect local bindings | one FS cannot accidentally treat another root marker as user content |
+
+This proves local root identity does not depend on fragile path spelling or
+overlapping directory layouts.
+
+### Deferred E2E Scenarios
+
+These belong in the product E2E suite, but require implementation that is not
+part of the current MVP slice.
+
+| Scenario | Required Feature | Expected Product Proof |
+| --- | --- | --- |
+| AgentFS watch/replay from CLI | AgentFS event replay/watch integration | a passive agent sees `commit.accepted` without reading metadata files directly |
+| Authorizing grant audit | commit/event records grant id or owner authority | observer can identify which grant allowed an accepted mutation |
+| Materialization repair | retry materialization command | accepted failed commit is repaired with the same commit id |
+| Granted agent bootstrap | invite/source bootstrap/discovery design | grantee can attach without manual backing source setup |
+| Commit snapshot isolation | frozen commit snapshot or equivalent preflight guard | commit metadata cannot diverge from materialized bytes |
+| Hook-gated commit | hooks trust model and execution | hook result can allow or block commit acceptance |
+| `AGENTS.md` rule enforcement | FS-local rule parser and policy engine | FS-local rules affect commit decisions |
+| Proposal/approval commit | proposal workflow | direct commit is replaced or augmented by approval policy |
+
+### Product-Complete E2E Coverage Gaps
+
+The E2E definition above is broader than the current implementation. Before
+calling AgentFS product-complete, the suite must close these gaps:
+
+| Gap | Why It Matters | Current Status |
+| --- | --- | --- |
+| Granted-agent bootstrap | A grant should be usable from the grantee perspective, not only from the owner's local setup. | Open design: invite token, source export, shared source URI, or discovery service. |
+| AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a test fallback. | Open implementation: no AgentFS replay/watch command yet. |
+| Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | Open implementation: commit/event do not record grant id. |
+| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | Open implementation issue: base snapshot/path sync state needs tightening. |
+| Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | Open implementation issue: TOCTOU between commit record and sync materialization. |
+| Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | Partial: failed heads block; retry/repair command is missing. |
+| Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | Partial: exact collision and backing-root overlap are guarded; canonical/overlap semantics remain open. |
+| Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | Open product decision: official escape hatch or guarded management surface. |
+| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | Partial: schema validation and backend-level append-only semantics remain open. |
+
+### Current E2E Implementation
+
+The current CLI E2E implementation lives in
+`crates/section-cli/tests/agentfs_e2e.rs`.
+
+It covers the product behaviors that are implemented today:
+
+| Test | E2E Scenarios Covered |
+| --- | --- |
+| `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; events and commit metadata exist |
+| `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit |
+| `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head |
+| `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
+| `e2e_hardening_rejects_symlink_commit_paths` | symlink paths cannot materialize files outside the working root |
+
+It intentionally does not mark the product-complete coverage gaps above as
+passing tests until those product capabilities exist.
+
+### E2E Non-Goals
+
+The E2E suite must not claim unsupported products:
+
+- no Messages workflow,
+- no AgentDB, AgentGit, or AgentOps behavior,
+- no path-scoped grant enforcement,
+- no hook execution,
+- no `AGENTS.md` enforcement,
+- no guarantee that low-level `source` commands preserve governance.
+
+Low-level source/path tests remain regression tests for the sync substrate. They
+are not proof of AgentFS governance.
 
 ## Regression Tests
 
