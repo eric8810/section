@@ -6,3 +6,15 @@ data_dir = "~/.local/share/section"
 
 # FUSE 挂载点
 mount_point = "/mnt/section"
+
+# AgentFS Section Control Service file-backed harness.
+# Multiple agent configs can point at the same SQLite file to share the
+# service-side management plane in tests or local development.
+# [control_service]
+# path = "/tmp/section-control-service.sqlite"
+#
+# [control_service.source_profiles."test-profile"]
+# provider = "fs"
+#
+# [control_service.source_profiles."test-profile".options]
+# root = "/tmp/section-agentfs-remote"

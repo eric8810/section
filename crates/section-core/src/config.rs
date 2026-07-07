@@ -16,6 +16,10 @@ pub struct SectionConfig {
     /// Registered sources (name -> config).
     #[serde(default)]
     pub sources: HashMap<String, SourceConfig>,
+
+    /// Section Control Service configuration for AgentFS governance.
+    #[serde(default)]
+    pub control_service: ControlServiceConfig,
 }
 
 /// A source is an instance of a provider with bound credentials.
@@ -32,6 +36,17 @@ pub struct SourceConfig {
     /// Cache settings for this source.
     #[serde(default)]
     pub cache: CacheConfig,
+}
+
+/// File-backed Section Control Service configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ControlServiceConfig {
+    /// SQLite database path for the file-backed control service harness.
+    pub path: Option<PathBuf>,
+
+    /// Server-managed backing source profiles available to AgentFS.
+    #[serde(default)]
+    pub source_profiles: HashMap<String, SourceConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +126,7 @@ impl Default for SectionConfig {
             mount_point: default_mount_point(),
             data_dir: default_data_dir(),
             sources: HashMap::new(),
+            control_service: ControlServiceConfig::default(),
         }
     }
 }

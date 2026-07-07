@@ -1,279 +1,529 @@
 mod support;
 
-use crate::support::{assert_success, run_section, write_config};
+use crate::support::{assert_success, run_section, write_agentfs_config, write_config};
 use serde_json::Value;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Output;
 
-#[test]
-fn agent_register_and_fs_create_write_shared_metadata() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let data_dir = temp_dir.path().join("owner-data");
-    let config_path = temp_dir.path().join("owner.toml");
-    let remote_root = temp_dir.path().join("remote");
+const FS_NAME: &str = "project";
+const SOURCE_PROFILE: &str = "test-profile";
 
-    fs::create_dir_all(&remote_root).expect("create remote root");
-    write_config(&config_path, &data_dir);
+struct Fixture {
+    _temp_dir: tempfile::TempDir,
+    root: PathBuf,
+    remote_root: PathBuf,
+    control_service_path: PathBuf,
+}
 
-    let register = run_section(&config_path, &["--json", "agent", "register", "agent-a"]);
-    assert_success(&register, "agent register");
-    let register: Value = serde_json::from_slice(&register.stdout).expect("register json");
-    let owner_id = register["agent"]["agent_id"]
-        .as_str()
-        .expect("owner id")
-        .to_string();
-    assert!(owner_id.starts_with("agt_"));
+impl Fixture {
+    fn new() -> Self {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let root = temp_dir.path().to_path_buf();
+        let remote_root = root.join("remote");
+        let control_service_path = root.join("control-service.sqlite");
+        fs::create_dir_all(&remote_root).expect("create remote root");
+        Self {
+            _temp_dir: temp_dir,
+            root,
+            remote_root,
+            control_service_path,
+        }
+    }
 
-    let create = run_section(
-        &config_path,
-        &[
-            "--json",
-            "fs",
-            "create",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
+    fn agent(&self, name: &str) -> Actor {
+        self.agent_with_remote(name, &self.remote_root)
+    }
+
+    fn agent_with_remote(&self, name: &str, remote_root: &Path) -> Actor {
+        let data_dir = self.root.join(format!("{name}-data"));
+        let config_path = self.root.join(format!("{name}.toml"));
+        write_agentfs_config(
+            &config_path,
+            &data_dir,
+            &self.control_service_path,
+            SOURCE_PROFILE,
+            remote_root,
+        );
+        Actor {
+            config_path,
+            local_root: self.root.join(format!("{name}-root")),
+        }
+    }
+
+    fn remote_path(&self, path: &str) -> PathBuf {
+        self.remote_root.join(path)
+    }
+}
+
+struct Actor {
+    config_path: PathBuf,
+    local_root: PathBuf,
+}
+
+impl Actor {
+    fn login_output(&self, name: &str) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "agent".to_string(),
+            "login".to_string(),
+            name.to_string(),
+        ])
+    }
+
+    fn login(&self, name: &str) -> Value {
+        let output = self.login_output(name);
+        assert_success(&output, "agent login");
+        serde_json::from_slice(&output.stdout).expect("login json")
+    }
+
+    fn identify(&self) -> Value {
+        self.json(&["--json", "agent", "identify"], "agent identify")
+    }
+
+    fn create_fs(&self) -> Value {
+        let output = self.create_fs_output();
+        assert_success(&output, "fs create");
+        serde_json::from_slice(&output.stdout).expect("fs create json")
+    }
+
+    fn create_fs_output(&self) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "create".to_string(),
+            FS_NAME.to_string(),
+            "--source-profile".to_string(),
+            SOURCE_PROFILE.to_string(),
+        ])
+    }
+
+    fn list_fs(&self) -> Value {
+        self.json(&["--json", "fs", "list"], "fs list")
+    }
+
+    fn source_list(&self) -> Value {
+        self.json(&["--json", "source", "list"], "source list")
+    }
+
+    fn runtime_status(&self) -> Value {
+        self.json(&["--json", "status"], "section status")
+    }
+
+    fn source_sync_output(&self, source_name: &str) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "source".to_string(),
+            "sync".to_string(),
+            source_name.to_string(),
+        ])
+    }
+
+    fn status(&self, fs: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "status".to_string(),
+            fs.to_string(),
+        ])
+    }
+
+    fn grant(&self, agent_id: &str, role: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "grant".to_string(),
+            FS_NAME.to_string(),
+            agent_id.to_string(),
+            "--role".to_string(),
+            role.to_string(),
+        ])
+    }
+
+    fn share(&self, agent_id: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "share".to_string(),
+            FS_NAME.to_string(),
+            agent_id.to_string(),
+        ])
+    }
+
+    fn available(&self) -> Value {
+        self.json(&["--json", "fs", "available"], "fs available")
+    }
+
+    fn accept(&self, share_id: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "accept".to_string(),
+            share_id.to_string(),
+        ])
+    }
+
+    fn attach(&self) -> Value {
+        self.attach_to(&self.local_root)
+    }
+
+    fn attach_to(&self, local_root: &Path) -> Value {
+        let output = self.attach_output(local_root);
+        assert_success(&output, "fs attach");
+        serde_json::from_slice(&output.stdout).expect("attach json")
+    }
+
+    fn attach_output(&self, local_root: &Path) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "attach".to_string(),
+            FS_NAME.to_string(),
+            local_root.to_str().expect("utf8 local root").to_string(),
+        ])
+    }
+
+    fn commit_status(&self) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "commit".to_string(),
+            "status".to_string(),
+            self.local_root
+                .to_str()
+                .expect("utf8 local root")
+                .to_string(),
+        ])
+    }
+
+    fn commit_apply_output(&self, message: &str) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "commit".to_string(),
+            "apply".to_string(),
+            self.local_root
+                .to_str()
+                .expect("utf8 local root")
+                .to_string(),
+            "--message".to_string(),
+            message.to_string(),
+        ])
+    }
+
+    fn write_output(&self, path: &str) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "write".to_string(),
+            path.to_string(),
+        ])
+    }
+
+    fn path_inspect_output(&self) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "path".to_string(),
+            "inspect".to_string(),
+            self.local_root
+                .to_str()
+                .expect("utf8 local root")
+                .to_string(),
+        ])
+    }
+
+    fn append_config_source(&self, source_name: &str, source_root: &Path) {
+        let mut config = fs::read_to_string(&self.config_path).expect("read config");
+        config.push_str(&format!(
+            "\n[sources.{source_name:?}]\nprovider = \"fs\"\n\n[sources.{source_name:?}.options]\nroot = {:?}\n",
+            source_root.to_string_lossy(),
+        ));
+        fs::write(&self.config_path, config).expect("append config source");
+    }
+
+    fn commit_apply(&self, message: &str) -> Value {
+        let output = self.commit_apply_output(message);
+        assert_success(&output, "commit apply");
+        serde_json::from_slice(&output.stdout).expect("commit apply json")
+    }
+
+    fn write_local(&self, path: &str, content: &str) {
+        let path = self.local_root.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create local parent");
+        }
+        fs::write(path, content).expect("write local file");
+    }
+
+    fn run_owned(&self, args: Vec<String>) -> Output {
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        run_section(&self.config_path, &refs)
+    }
+
+    fn json(&self, args: &[&str], context: &str) -> Value {
+        let output = run_section(&self.config_path, args);
+        assert_success(&output, context);
+        serde_json::from_slice(&output.stdout).expect("json output")
+    }
+
+    fn json_owned(&self, args: Vec<String>) -> Value {
+        let output = self.run_owned(args);
+        assert_success(&output, "json command");
+        serde_json::from_slice(&output.stdout).expect("json output")
+    }
+}
+
+fn assert_json_error(output: &Output, code: &str) {
+    assert!(
+        !output.status.success(),
+        "command unexpectedly succeeded\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert_success(&create, "fs create");
-    let create: Value = serde_json::from_slice(&create.stdout).expect("create json");
-    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
-    assert!(fs_id.starts_with("fs_"));
-    assert_eq!(create["fs"]["owner_agent_id"], owner_id);
-    assert_eq!(create["fs"]["source_name"], "project");
+    let error: Value = serde_json::from_slice(&output.stdout).expect("error json");
+    assert_eq!(error["error"]["code"], code);
+}
 
-    let fs_json = fs::read(remote_root.join(".section/agentfs/fs.json")).expect("read fs.json");
-    let fs_json: Value = serde_json::from_slice(&fs_json).expect("parse fs.json");
-    assert_eq!(fs_json["fs_id"], fs_id);
-    assert_eq!(fs_json["owner_agent_id"], owner_id);
+fn read_json(path: impl AsRef<Path>) -> Value {
+    serde_json::from_slice(&fs::read(path).expect("read json")).expect("json")
+}
 
-    let head_json =
-        fs::read(remote_root.join(".section/agentfs/heads/current.json")).expect("read head");
-    let head_json: Value = serde_json::from_slice(&head_json).expect("parse head");
-    assert_eq!(head_json["fs_id"], fs_id);
-    assert!(head_json["commit_id"].is_null());
-
-    let grant_count = fs::read_dir(remote_root.join(".section/agentfs/grants"))
-        .expect("grants dir")
-        .count();
-    assert_eq!(grant_count, 1);
-    let events = fs::read_dir(remote_root.join(".section/agentfs/events"))
+fn agentfs_event_kinds(remote_root: &Path) -> Vec<String> {
+    let mut kinds = fs::read_dir(remote_root.join(".section/agentfs/events"))
         .expect("events dir")
         .map(|entry| {
             let entry = entry.expect("event entry");
-            let event: Value = serde_json::from_slice(&fs::read(entry.path()).expect("read event"))
-                .expect("event json");
-            event["kind"].as_str().expect("kind").to_string()
+            let event = read_json(entry.path());
+            event["kind"].as_str().expect("event kind").to_string()
         })
         .collect::<Vec<_>>();
-    assert!(events.contains(&"fs.created".to_string()));
+    kinds.sort();
+    kinds
+}
 
-    let list = run_section(&config_path, &["--json", "fs", "list"]);
-    assert_success(&list, "fs list");
-    let list: Value = serde_json::from_slice(&list.stdout).expect("list json");
+fn share_and_accept(owner: &Actor, target: &Actor, target_id: &str) {
+    let share = owner.share(target_id);
+    let share_id = share["share"]["share_id"].as_str().expect("share id");
+    let available = target.available();
+    assert!(available["available"]
+        .as_array()
+        .expect("available shares")
+        .iter()
+        .any(|entry| entry["share"]["share_id"] == share_id));
+    target.accept(share_id);
+}
+
+fn login_agent_id(login: &Value) -> String {
+    login["agent"]["agent_id"]
+        .as_str()
+        .expect("agent id")
+        .to_string()
+}
+
+fn assert_json_output_omits(output: &Output, forbidden: &[&str], context: &str) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for value in forbidden {
+        assert!(
+            !stdout.contains(value),
+            "{context} JSON leaked {value:?}\nstdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn agent_login_and_fs_create_write_service_backed_metadata() {
+    let fixture = Fixture::new();
+    let owner = fixture.agent("owner");
+
+    let login = owner.login("owner");
+    let owner_id = login["agent"]["agent_id"].as_str().expect("owner id");
+    let installation_id = login["installation"]["installation_id"]
+        .as_str()
+        .expect("installation id");
+    assert!(owner_id.starts_with("agt_"));
+    assert!(installation_id.starts_with("ins_"));
+    assert!(
+        !serde_json::to_string(&login)
+            .expect("login json string")
+            .contains("auth_"),
+        "login JSON must not expose the local auth token"
+    );
+    assert_eq!(
+        owner.identify()["installation"]["installation_id"],
+        installation_id
+    );
+
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id");
+    let source_profile_id = create["fs"]["source_profile_id"]
+        .as_str()
+        .expect("source profile id");
+    assert!(fs_id.starts_with("fs_"));
+    assert!(source_profile_id.starts_with("srcp_"));
+    assert_eq!(create["fs"]["owner_agent_id"], owner_id);
+    assert_eq!(create["fs"]["source_name"], fs_id);
+
+    let fs_json = read_json(fixture.remote_root.join(".section/agentfs/fs.json"));
+    assert_eq!(fs_json["fs_id"], fs_id);
+    assert_eq!(fs_json["source_profile_id"], source_profile_id);
+
+    let head_json = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    assert_eq!(head_json["fs_id"], fs_id);
+    assert!(head_json["commit_id"].is_null());
+
+    assert_eq!(
+        fs::read_dir(fixture.remote_root.join(".section/agentfs/grants"))
+            .expect("grants dir")
+            .count(),
+        1
+    );
+    assert!(agentfs_event_kinds(&fixture.remote_root).contains(&"fs.created".to_string()));
+
+    let list = owner.list_fs();
     let filesystems = list.as_array().expect("fs list array");
     assert_eq!(filesystems.len(), 1);
     assert_eq!(filesystems[0]["fs_id"], fs_id);
 
-    let status = run_section(&config_path, &["--json", "fs", "status", "project"]);
-    assert_success(&status, "fs status");
-    let status: Value = serde_json::from_slice(&status.stdout).expect("status json");
+    let status = owner.status(FS_NAME);
     assert_eq!(status["status"]["role"], "owner");
     assert_eq!(status["status"]["head"]["commit_id"], Value::Null);
 }
 
 #[test]
-fn fs_create_rejects_existing_source_without_overwriting_it() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let data_dir = temp_dir.path().join("owner-data");
-    let config_path = temp_dir.path().join("owner.toml");
-    let original_root = temp_dir.path().join("original-remote");
-    let attempted_root = temp_dir.path().join("attempted-remote");
+fn fresh_data_dir_cannot_claim_existing_agent_name_without_token() {
+    let fixture = Fixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
 
-    fs::create_dir_all(&original_root).expect("create original remote root");
-    fs::create_dir_all(&attempted_root).expect("create attempted remote root");
+    let imposter = fixture.agent("imposter");
+    let login = imposter.login_output("owner");
+    assert!(
+        !login.status.success(),
+        "fresh data dir unexpectedly logged in as existing owner\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&login.stdout),
+        String::from_utf8_lossy(&login.stderr)
+    );
+}
+
+#[test]
+fn source_json_outputs_omit_raw_options_roots_and_secrets() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let config_path = temp_dir.path().join("config.toml");
+    let source_root = temp_dir.path().join("remote-source-root");
+    let local_root = temp_dir.path().join("local-bind-root");
+    fs::create_dir_all(&source_root).expect("create source root");
     write_config(&config_path, &data_dir);
 
-    let register = run_section(&config_path, &["--json", "agent", "register", "owner"]);
-    assert_success(&register, "agent register");
+    let source_root_string = source_root.to_str().expect("utf8 source root").to_string();
+    let secret = "super-secret-token";
+    let root_opt = format!("root={source_root_string}");
+    let secret_opt = format!("secret_access_key={secret}");
 
-    let source_add = run_section(
+    let add = run_section(
         &config_path,
         &[
+            "--json",
             "source",
             "add",
-            "project",
+            "leaky",
             "--provider",
             "fs",
             "--opt",
-            &format!("root={}", original_root.display()),
+            &root_opt,
+            "--opt",
+            &secret_opt,
         ],
     );
-    assert_success(&source_add, "source add");
+    assert_success(&add, "source add json");
+    assert_json_output_omits(
+        &add,
+        &[
+            &source_root_string,
+            secret,
+            "secret_access_key",
+            "\"options\"",
+        ],
+        "source add",
+    );
+    let add_json: Value = serde_json::from_slice(&add.stdout).expect("add json");
+    assert!(add_json["source"]["options"].is_null());
 
-    let create = run_section(
+    let bind = run_section(
         &config_path,
         &[
             "--json",
-            "fs",
-            "create",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", attempted_root.display()),
+            "source",
+            "bind",
+            "leaky",
+            local_root.to_str().expect("utf8 local root"),
         ],
     );
-    assert!(
-        !create.status.success(),
-        "fs create unexpectedly overwrote an existing source\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&create.stdout),
-        String::from_utf8_lossy(&create.stderr)
+    assert_success(&bind, "source bind json");
+    assert_json_output_omits(
+        &bind,
+        &[
+            &source_root_string,
+            secret,
+            "secret_access_key",
+            "\"options\"",
+        ],
+        "source bind",
     );
+    let bind_json: Value = serde_json::from_slice(&bind.stdout).expect("bind json");
+    assert!(bind_json["source"]["options"].is_null());
 
-    let source_list = run_section(&config_path, &["--json", "source", "list"]);
-    assert_success(&source_list, "source list");
-    let source_list: Value = serde_json::from_slice(&source_list.stdout).expect("source list json");
-    let sources = source_list.as_array().expect("source list array");
-    assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0]["name"], "project");
-    assert_eq!(
-        sources[0]["options"]["root"].as_str(),
-        Some(original_root.to_str().expect("utf8 original root"))
+    let list = run_section(&config_path, &["--json", "source", "list"]);
+    assert_success(&list, "source list json");
+    assert_json_output_omits(
+        &list,
+        &[
+            &source_root_string,
+            secret,
+            "secret_access_key",
+            "\"options\"",
+        ],
+        "source list",
     );
-    assert!(
-        !attempted_root.join(".section/agentfs/fs.json").exists(),
-        "failed fs create must not initialize attempted remote metadata"
-    );
+    let list_json: Value = serde_json::from_slice(&list.stdout).expect("list json");
+    assert!(list_json[0]["options"].is_null());
 }
 
 #[test]
-fn fs_create_rejects_non_empty_backing_source_without_registering_source() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let data_dir = temp_dir.path().join("owner-data");
-    let config_path = temp_dir.path().join("owner.toml");
-    let remote_root = temp_dir.path().join("remote");
+fn writer_share_accept_attach_commit_and_owner_observes_truth() {
+    let fixture = Fixture::new();
+    let owner = fixture.agent("owner");
+    let writer = fixture.agent("writer");
 
-    fs::create_dir_all(&remote_root).expect("create remote root");
-    fs::write(remote_root.join("preexisting.txt"), "not imported").expect("write remote file");
-    write_config(&config_path, &data_dir);
-
-    let register = run_section(&config_path, &["--json", "agent", "register", "owner"]);
-    assert_success(&register, "agent register");
-
-    let create = run_section(
-        &config_path,
-        &[
-            "--json",
-            "fs",
-            "create",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
-    );
-    assert!(
-        !create.status.success(),
-        "fs create unexpectedly accepted a non-empty backing source\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&create.stdout),
-        String::from_utf8_lossy(&create.stderr)
-    );
-
-    let source_list = run_section(&config_path, &["--json", "source", "list"]);
-    assert_success(&source_list, "source list");
-    let source_list: Value = serde_json::from_slice(&source_list.stdout).expect("source list json");
-    assert_eq!(source_list.as_array().expect("source list array").len(), 0);
-    assert!(
-        !remote_root.join(".section/agentfs/fs.json").exists(),
-        "failed fs create must not initialize AgentFS metadata"
-    );
-}
-
-#[test]
-fn granted_writer_can_attach_without_syncing_agentfs_metadata_as_content() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let remote_root = temp_dir.path().join("remote");
-    let owner_data = temp_dir.path().join("owner-data");
-    let writer_data = temp_dir.path().join("writer-data");
-    let owner_config = temp_dir.path().join("owner.toml");
-    let writer_config = temp_dir.path().join("writer.toml");
-    let owner_root = temp_dir.path().join("owner-root");
-    let writer_root = temp_dir.path().join("writer-root");
-    let writer_second_root = temp_dir.path().join("writer-second-root");
-
-    fs::create_dir_all(&remote_root).expect("create remote root");
-    write_config(&owner_config, &owner_data);
-    write_config(&writer_config, &writer_data);
-
-    let owner_register = run_section(&owner_config, &["--json", "agent", "register", "owner"]);
-    assert_success(&owner_register, "owner register");
-
-    let create = run_section(
-        &owner_config,
-        &[
-            "--json",
-            "fs",
-            "create",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
-    );
-    assert_success(&create, "owner fs create");
-    let create: Value = serde_json::from_slice(&create.stdout).expect("create json");
-    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
-
-    let writer_register = run_section(&writer_config, &["--json", "agent", "register", "writer"]);
-    assert_success(&writer_register, "writer register");
-    let writer_register: Value =
-        serde_json::from_slice(&writer_register.stdout).expect("writer register json");
-    let writer_id = writer_register["agent"]["agent_id"]
+    let owner_id = owner.login("owner")["agent"]["agent_id"]
         .as_str()
-        .expect("writer id")
+        .expect("owner id")
         .to_string();
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
+    let source_profile_id = create["fs"]["source_profile_id"]
+        .as_str()
+        .expect("source profile id")
+        .to_string();
+    owner.attach();
 
-    let writer_source = run_section(
-        &writer_config,
-        &[
-            "source",
-            "add",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
-    );
-    assert_success(&writer_source, "writer backing source add");
+    let writer_login = writer.login("writer");
+    let writer_id = login_agent_id(&writer_login);
+    let writer_installation_id = writer_login["installation"]["installation_id"]
+        .as_str()
+        .expect("writer installation id")
+        .to_string();
+    let grant = owner.grant(&writer_id, "writer");
+    let grant_id = grant["grant"]["grant_id"]
+        .as_str()
+        .expect("grant id")
+        .to_string();
+    share_and_accept(&owner, &writer, &writer_id);
 
-    let grant = run_section(
-        &owner_config,
-        &[
-            "--json", "fs", "grant", "project", &writer_id, "--role", "writer",
-        ],
-    );
-    assert_success(&grant, "grant writer");
-    let grant: Value = serde_json::from_slice(&grant.stdout).expect("grant json");
-    assert_eq!(grant["grant"]["agent_id"], writer_id);
-    assert_eq!(grant["grant"]["role"], "writer");
-
-    let attach = run_section(
-        &writer_config,
-        &[
-            "--json",
-            "fs",
-            "attach",
-            "project",
-            writer_root.to_str().expect("utf8 writer root"),
-        ],
-    );
-    assert_success(&attach, "writer attach");
-    let attach: Value = serde_json::from_slice(&attach.stdout).expect("attach json");
+    let attach = writer.attach();
     assert_eq!(attach["attach"]["fs"]["fs_id"], fs_id);
     assert!(
         attach["attach"]["source"]["options"].is_null(),
@@ -282,595 +532,398 @@ fn granted_writer_can_attach_without_syncing_agentfs_metadata_as_content() {
     assert!(
         !serde_json::to_string(&attach)
             .expect("attach json string")
-            .contains(remote_root.to_str().expect("utf8 remote root")),
+            .contains(fixture.remote_root.to_str().expect("utf8 remote root")),
         "attach JSON must not expose backing source paths"
     );
-    assert_eq!(
-        attach["attach"]["local_root"].as_str(),
-        Some(writer_root.to_str().expect("utf8 writer root"))
+    let source_list = writer.source_list();
+    assert!(
+        !serde_json::to_string(&source_list)
+            .expect("source list json string")
+            .contains(&fs_id),
+        "AgentFS-backed source must not be exposed through source list"
+    );
+    assert!(
+        !serde_json::to_string(&source_list)
+            .expect("source list json string")
+            .contains(fixture.remote_root.to_str().expect("utf8 remote root")),
+        "source list JSON must not expose AgentFS backing root"
+    );
+    let public_status = writer.runtime_status();
+    let public_status_json = serde_json::to_string(&public_status).expect("runtime status json");
+    assert!(
+        !public_status_json.contains(&fs_id),
+        "section status JSON must not expose AgentFS-backed source"
+    );
+    assert!(
+        !public_status_json.contains(fixture.remote_root.to_str().expect("utf8 remote root")),
+        "section status JSON must not expose AgentFS backing root"
     );
 
-    let marker = fs::read(writer_root.join(".section/root.json")).expect("read writer root marker");
-    let marker: Value = serde_json::from_slice(&marker).expect("marker json");
+    let marker = read_json(writer.local_root.join(".section/root.json"));
     assert_eq!(marker["schema_version"], 1);
+    assert_eq!(marker["source_id"], fs_id);
     assert_eq!(marker["fs_id"], fs_id);
-    assert_eq!(marker["source_id"], "project");
+    assert_eq!(marker["source_profile_id"], source_profile_id);
     assert_eq!(marker["agent_id"], writer_id);
+    assert_eq!(marker["installation_id"], writer_installation_id);
     assert!(marker["base_commit_id"].is_null());
-
+    assert!(marker["control_plane_endpoint"]
+        .as_str()
+        .expect("endpoint")
+        .contains("section-control-service:file:"));
     assert!(
-        !writer_root.join(".section/agentfs").exists(),
-        "AgentFS shared metadata must not sync into the working copy as content"
+        !writer.local_root.join(".section/agentfs").exists(),
+        "AgentFS metadata mirror must not sync as user content"
     );
 
-    let status = run_section(&writer_config, &["--json", "fs", "status", "project"]);
-    assert_success(&status, "writer fs status");
-    let status: Value = serde_json::from_slice(&status.stdout).expect("status json");
-    assert_eq!(status["status"]["role"], "writer");
-    assert_eq!(status["status"]["base_commit_id"], Value::Null);
-
-    let writer_file = writer_root.join("docs").join("note.txt");
-    fs::create_dir_all(writer_file.parent().expect("writer file parent"))
-        .expect("create writer docs");
-    fs::write(&writer_file, "hello from writer").expect("write writer file");
-
-    let commit_status = run_section(
-        &writer_config,
-        &[
-            "--json",
-            "commit",
-            "status",
-            writer_root.to_str().expect("utf8 writer root"),
-        ],
+    writer.write_local("docs/note.txt", "hello from writer");
+    fs::create_dir_all(writer.local_root.join(".section/agentfs")).expect("create local metadata");
+    fs::write(
+        writer.local_root.join(".section/agentfs/fs.json"),
+        r#"{"malicious":true}"#,
+    )
+    .expect("write local metadata draft");
+    assert!(
+        !fixture.remote_path("docs/note.txt").exists(),
+        "local draft must not be shared truth before commit"
     );
-    assert_success(&commit_status, "commit status");
-    let commit_status: Value =
-        serde_json::from_slice(&commit_status.stdout).expect("commit status json");
-    assert_eq!(commit_status["status"]["stale"], false);
-    let dirty_paths = commit_status["status"]["dirty_paths"]
+
+    let status = writer.commit_status();
+    assert_eq!(status["status"]["stale"], false);
+    assert!(status["status"]["dirty_paths"]
         .as_array()
-        .expect("dirty paths");
-    assert!(
-        dirty_paths
-            .iter()
-            .any(|path| path["path"] == "docs/note.txt" && path["op"] == "create"),
-        "dirty paths should include created writer file: {dirty_paths:?}"
-    );
+        .expect("dirty paths")
+        .iter()
+        .any(|path| path["path"] == "docs/note.txt" && path["op"] == "create"));
 
-    let commit = run_section(
-        &writer_config,
-        &[
-            "--json",
-            "commit",
-            "apply",
-            writer_root.to_str().expect("utf8 writer root"),
-            "--message",
-            "add writer note",
-        ],
-    );
-    assert_success(&commit, "commit apply");
-    let commit: Value = serde_json::from_slice(&commit.stdout).expect("commit json");
+    let commit = writer.commit_apply("add writer note");
     let commit_id = commit["commit"]["commit_id"]
         .as_str()
         .expect("commit id")
         .to_string();
-    assert!(commit_id.starts_with("cmt_"));
+    assert_eq!(commit["commit"]["agent_id"], writer_id);
+    assert_eq!(commit["commit"]["authorized_by"]["grant_id"], grant_id);
     assert_eq!(commit["commit"]["materialization_state"], "materialized");
     assert!(commit["commit"]["paths"]
         .as_array()
         .expect("commit paths")
         .iter()
-        .any(|path| path["path"] == "docs/note.txt" && path["op"] == "create"));
+        .all(|path| !path["path"]
+            .as_str()
+            .expect("path")
+            .starts_with(".section/")));
     assert_eq!(
-        fs::read_to_string(remote_root.join("docs/note.txt")).expect("read remote writer file"),
+        fs::read_to_string(fixture.remote_path("docs/note.txt")).expect("remote file"),
         "hello from writer"
     );
 
-    let marker =
-        fs::read(writer_root.join(".section/root.json")).expect("read writer marker after commit");
-    let marker: Value = serde_json::from_slice(&marker).expect("marker after commit json");
-    assert_eq!(marker["base_commit_id"], commit_id);
-
-    let head_json =
-        fs::read(remote_root.join(".section/agentfs/heads/current.json")).expect("read head");
-    let head_json: Value = serde_json::from_slice(&head_json).expect("head json");
-    assert_eq!(head_json["commit_id"], commit_id);
-
-    let commit_json = fs::read(
-        remote_root
+    let commit_record = read_json(
+        fixture
+            .remote_root
             .join(".section/agentfs/commits")
             .join(format!("{commit_id}.json")),
-    )
-    .expect("read commit metadata");
-    let commit_json: Value = serde_json::from_slice(&commit_json).expect("commit metadata json");
-    assert_eq!(commit_json["materialization_state"], "materialized");
-
-    let events = fs::read_dir(remote_root.join(".section/agentfs/events"))
-        .expect("events dir")
-        .map(|entry| {
-            let entry = entry.expect("event entry");
-            let event: Value = serde_json::from_slice(&fs::read(entry.path()).expect("read event"))
-                .expect("event json");
-            event["kind"].as_str().expect("kind").to_string()
-        })
-        .collect::<Vec<_>>();
+    );
+    assert_eq!(commit_record["authorized_by"]["grant_id"], grant_id);
+    let fs_json = read_json(fixture.remote_root.join(".section/agentfs/fs.json"));
+    assert_eq!(fs_json["fs_id"], fs_id);
+    assert!(fs_json["malicious"].is_null());
+    let events = agentfs_event_kinds(&fixture.remote_root);
     assert!(events.contains(&"commit.accepted".to_string()));
     assert!(events.contains(&"commit.materialized".to_string()));
 
-    let owner_attach = run_section(
-        &owner_config,
-        &[
-            "--json",
-            "fs",
-            "attach",
-            "project",
-            owner_root.to_str().expect("utf8 owner root"),
-        ],
-    );
-    assert_success(&owner_attach, "owner attach after writer commit");
+    let owner_fresh_root = fixture.root.join("owner-fresh-root");
+    owner.attach_to(&owner_fresh_root);
     assert_eq!(
-        fs::read_to_string(owner_root.join("docs/note.txt"))
-            .expect("owner reads materialized file"),
+        fs::read_to_string(owner_fresh_root.join("docs/note.txt"))
+            .expect("owner observes materialized file"),
         "hello from writer"
+    );
+    let owner_commit = owner.status(FS_NAME);
+    assert_eq!(owner_commit["status"]["agent_id"], owner_id);
+}
+
+#[test]
+fn client_seed_cannot_overwrite_existing_source_profile() {
+    let fixture = Fixture::new();
+    let alternate_remote = fixture.root.join("alternate-remote");
+    fs::create_dir_all(&alternate_remote).expect("create alternate remote");
+    let owner = fixture.agent("owner");
+    let writer = fixture.agent_with_remote("writer", &alternate_remote);
+
+    owner.login("owner");
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
+
+    let writer_id = login_agent_id(&writer.login("writer"));
+    owner.grant(&writer_id, "writer");
+    let share = owner.share(&writer_id);
+    let share_id = share["share"]["share_id"].as_str().expect("share id");
+    let available = writer.available();
+    assert!(
+        !serde_json::to_string(&available)
+            .expect("available json")
+            .contains(alternate_remote.to_str().expect("utf8 alternate remote")),
+        "available JSON must not expose client-seeded backing root"
+    );
+    let accept = writer.accept(share_id);
+    assert!(
+        !serde_json::to_string(&accept)
+            .expect("accept json")
+            .contains(alternate_remote.to_str().expect("utf8 alternate remote")),
+        "accept JSON must not expose client-seeded backing root"
     );
 
-    let writer_reattach = run_section(
-        &writer_config,
-        &[
-            "--json",
-            "fs",
-            "attach",
-            "project",
-            writer_second_root
-                .to_str()
-                .expect("utf8 second writer root"),
-        ],
-    );
-    assert_success(&writer_reattach, "writer reattach to second empty root");
+    writer.attach();
+    writer.write_local("from-writer.txt", "must use service profile");
+    writer.commit_apply("service profile remains authoritative");
     assert_eq!(
-        fs::read_to_string(writer_second_root.join("docs/note.txt"))
-            .expect("writer second root reads materialized file"),
-        "hello from writer"
+        fs::read_to_string(fixture.remote_path("from-writer.txt")).expect("read original remote"),
+        "must use service profile"
+    );
+    assert!(
+        !alternate_remote.join("from-writer.txt").exists(),
+        "writer config must not rewrite the service-owned source profile"
     );
     assert_eq!(
-        fs::read_to_string(remote_root.join("docs/note.txt")).expect("remote file after reattach"),
-        "hello from writer"
-    );
-    assert!(
-        !writer_root.join(".section/root.json").exists(),
-        "reattach should remove previous root marker"
-    );
-
-    let downgrade = run_section(
-        &owner_config,
-        &[
-            "--json", "fs", "grant", "project", &writer_id, "--role", "reader",
-        ],
-    );
-    assert_success(&downgrade, "downgrade writer to reader");
-    fs::write(
-        writer_second_root.join("docs/after-downgrade.txt"),
-        "should stay local",
-    )
-    .expect("write after downgrade");
-    let denied_commit = run_section(
-        &writer_config,
-        &[
-            "--json",
-            "commit",
-            "apply",
-            writer_second_root
-                .to_str()
-                .expect("utf8 second writer root"),
-            "--message",
-            "should be denied",
-        ],
-    );
-    assert!(
-        !denied_commit.status.success(),
-        "downgraded writer commit unexpectedly succeeded\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&denied_commit.stdout),
-        String::from_utf8_lossy(&denied_commit.stderr)
-    );
-    let denied_commit: Value =
-        serde_json::from_slice(&denied_commit.stdout).expect("denied commit json");
-    assert_eq!(denied_commit["error"]["code"], "grant_denied");
-    assert!(
-        !remote_root.join("docs/after-downgrade.txt").exists(),
-        "downgraded writer local draft must not materialize"
+        read_json(fixture.remote_root.join(".section/agentfs/fs.json"))["fs_id"],
+        fs_id
     );
 }
 
 #[test]
-fn fs_attach_rejects_backing_source_root_as_working_root() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let data_dir = temp_dir.path().join("owner-data");
-    let config_path = temp_dir.path().join("owner.toml");
-    let remote_root = temp_dir.path().join("remote");
+fn reader_cannot_commit_and_ungranted_agent_cannot_attach() {
+    let fixture = Fixture::new();
+    let owner = fixture.agent("owner");
+    let reader = fixture.agent("reader");
+    let stranger = fixture.agent("stranger");
 
-    fs::create_dir_all(&remote_root).expect("create remote root");
-    write_config(&config_path, &data_dir);
+    owner.login("owner");
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
 
-    let register = run_section(&config_path, &["--json", "agent", "register", "owner"]);
-    assert_success(&register, "agent register");
-    let create = run_section(
-        &config_path,
-        &[
-            "--json",
-            "fs",
-            "create",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
+    let reader_id = reader.login("reader")["agent"]["agent_id"]
+        .as_str()
+        .expect("reader id")
+        .to_string();
+    owner.grant(&reader_id, "reader");
+    share_and_accept(&owner, &reader, &reader_id);
+    reader.attach();
+    let source_sync = reader.source_sync_output(&fs_id);
+    assert!(
+        !source_sync.status.success(),
+        "reader unexpectedly synced AgentFS-backed source through low-level source command\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&source_sync.stdout),
+        String::from_utf8_lossy(&source_sync.stderr)
     );
-    assert_success(&create, "fs create");
-
-    let attach = run_section(
-        &config_path,
-        &[
-            "--json",
-            "fs",
-            "attach",
-            "project",
-            remote_root.to_str().expect("utf8 remote root"),
-        ],
+    let write = reader.write_output(&format!("{fs_id}/bypass.txt"));
+    assert!(
+        !write.status.success(),
+        "reader unexpectedly wrote through low-level file route\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&write.stdout),
+        String::from_utf8_lossy(&write.stderr)
+    );
+    let path_inspect = reader.path_inspect_output();
+    assert!(
+        !path_inspect.status.success(),
+        "reader unexpectedly used low-level path command on AgentFS root\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&path_inspect.stdout),
+        String::from_utf8_lossy(&path_inspect.stderr)
     );
     assert!(
+        !fixture.remote_path("bypass.txt").exists(),
+        "low-level write must not materialize AgentFS content"
+    );
+    reader.write_local("reader-draft.txt", "reader local draft");
+    assert_json_error(&reader.commit_apply_output("reader draft"), "grant_denied");
+    assert!(
+        !fixture.remote_path("reader-draft.txt").exists(),
+        "reader draft must not materialize"
+    );
+
+    stranger.login("stranger");
+    assert_json_error(
+        &stranger.attach_output(&stranger.local_root),
+        "grant_denied",
+    );
+    assert!(
+        !stranger.local_root.join(".section/root.json").exists(),
+        "failed attach must not write root marker"
+    );
+}
+
+#[test]
+fn config_source_named_like_agentfs_source_cannot_bypass_file_router() {
+    let fixture = Fixture::new();
+    let owner = fixture.agent("owner");
+    let writer = fixture.agent("writer");
+
+    owner.login("owner");
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
+
+    let writer_id = login_agent_id(&writer.login("writer"));
+    owner.grant(&writer_id, "writer");
+    share_and_accept(&owner, &writer, &writer_id);
+    writer.attach();
+
+    writer.append_config_source(&fs_id, &fixture.remote_root);
+    let write = writer.write_output(&format!("{fs_id}/bypass.txt"));
+    assert!(
+        !write.status.success(),
+        "writer unexpectedly wrote AgentFS content through config source collision\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&write.stdout),
+        String::from_utf8_lossy(&write.stderr)
+    );
+    assert!(
+        !fixture.remote_path("bypass.txt").exists(),
+        "config source collision must not materialize AgentFS content"
+    );
+    let public_status = writer.runtime_status();
+    let public_status_json = serde_json::to_string(&public_status).expect("status json");
+    assert!(
+        !public_status_json.contains(&fs_id),
+        "public runtime status must filter config-defined AgentFS source names"
+    );
+}
+
+#[test]
+fn stale_writer_cannot_overwrite_new_truth() {
+    let fixture = Fixture::new();
+    let owner = fixture.agent("owner");
+    let writer_a = fixture.agent("writer-a");
+    let writer_b = fixture.agent("writer-b");
+
+    owner.login("owner");
+    owner.create_fs();
+
+    let writer_a_id = writer_a.login("writer-a")["agent"]["agent_id"]
+        .as_str()
+        .expect("writer a id")
+        .to_string();
+    owner.grant(&writer_a_id, "writer");
+    share_and_accept(&owner, &writer_a, &writer_a_id);
+    writer_a.attach();
+
+    let writer_b_id = writer_b.login("writer-b")["agent"]["agent_id"]
+        .as_str()
+        .expect("writer b id")
+        .to_string();
+    owner.grant(&writer_b_id, "writer");
+    share_and_accept(&owner, &writer_b, &writer_b_id);
+    writer_b.attach();
+
+    writer_a.write_local("docs/shared.txt", "from writer a");
+    let commit_a = writer_a.commit_apply("writer a update");
+    let commit_a_id = commit_a["commit"]["commit_id"]
+        .as_str()
+        .expect("writer a commit id")
+        .to_string();
+
+    let marker_path = writer_b.local_root.join(".section/root.json");
+    let mut marker = read_json(&marker_path);
+    marker["base_commit_id"] = Value::String(commit_a_id.clone());
+    fs::write(
+        &marker_path,
+        serde_json::to_vec_pretty(&marker).expect("marker json"),
+    )
+    .expect("tamper writer b marker");
+    writer_b.write_local("docs/from-b.txt", "from writer b");
+    assert_json_error(
+        &writer_b.commit_apply_output("writer b update"),
+        "stale_base",
+    );
+    assert!(
+        !fixture.remote_path("docs/from-b.txt").exists(),
+        "stale writer draft must not materialize"
+    );
+    let head = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    assert_eq!(head["commit_id"], commit_a_id);
+}
+
+#[test]
+fn hardening_rejects_non_empty_backing_and_attach_roots() {
+    let non_empty = Fixture::new();
+    fs::write(non_empty.remote_path("preexisting.txt"), "not imported").expect("write remote file");
+    let owner = non_empty.agent("owner");
+    owner.login("owner");
+    let create = owner.create_fs_output();
+    assert!(
+        !create.status.success(),
+        "fs create unexpectedly accepted non-empty backing source\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+    assert!(
+        !non_empty
+            .remote_root
+            .join(".section/agentfs/fs.json")
+            .exists(),
+        "rejected create must not initialize mirror metadata"
+    );
+
+    let overlap = Fixture::new();
+    let owner = overlap.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    let attach = owner.attach_output(&overlap.remote_root);
+    assert!(
         !attach.status.success(),
-        "attach unexpectedly allowed backing source root as working root\nstdout: {}\nstderr: {}",
+        "fs attach unexpectedly accepted backing root as working root\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&attach.stdout),
         String::from_utf8_lossy(&attach.stderr)
     );
     assert!(
-        !remote_root.join(".section/root.json").exists(),
-        "failed attach must not write a working-root marker into the backing source"
+        !overlap.remote_root.join(".section/root.json").exists(),
+        "failed attach must not write marker into backing source"
     );
-}
 
-#[test]
-fn commit_apply_rejects_stale_marker_local_root_mismatch() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let remote_root = temp_dir.path().join("remote");
-    let data_dir = temp_dir.path().join("owner-data");
-    let config_path = temp_dir.path().join("owner.toml");
-    let first_root = temp_dir.path().join("first-root");
-    let second_root = temp_dir.path().join("second-root");
-
-    fs::create_dir_all(&remote_root).expect("create remote root");
-    write_config(&config_path, &data_dir);
-
-    let register = run_section(&config_path, &["--json", "agent", "register", "owner"]);
-    assert_success(&register, "agent register");
-    let create = run_section(
-        &config_path,
-        &[
-            "--json",
-            "fs",
-            "create",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
-    );
-    assert_success(&create, "fs create");
-
-    let first_attach = run_section(
-        &config_path,
-        &[
-            "--json",
-            "fs",
-            "attach",
-            "project",
-            first_root.to_str().expect("utf8 first root"),
-        ],
-    );
-    assert_success(&first_attach, "first attach");
-    let first_marker = fs::read(first_root.join(".section/root.json")).expect("read first marker");
-
-    let second_attach = run_section(
-        &config_path,
-        &[
-            "--json",
-            "fs",
-            "attach",
-            "project",
-            second_root.to_str().expect("utf8 second root"),
-        ],
-    );
-    assert_success(&second_attach, "second attach");
-
-    fs::create_dir_all(first_root.join(".section")).expect("restore stale marker dir");
-    fs::write(first_root.join(".section/root.json"), first_marker).expect("restore stale marker");
-    fs::write(
-        second_root.join("should-not-commit.txt"),
-        "store-root draft",
-    )
-    .expect("write second root draft");
-
-    let commit = run_section(
-        &config_path,
-        &[
-            "--json",
-            "commit",
-            "apply",
-            first_root.to_str().expect("utf8 first root"),
-            "--message",
-            "must not commit from current store root",
-        ],
-    );
-    assert!(
-        !commit.status.success(),
-        "commit unexpectedly used store root after discovering a stale marker\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&commit.stdout),
-        String::from_utf8_lossy(&commit.stderr)
-    );
-    assert!(
-        !remote_root.join("should-not-commit.txt").exists(),
-        "commit from stale marker must not materialize current store-root content"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn commit_apply_rejects_symlink_paths() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let remote_root = temp_dir.path().join("remote");
-    let data_dir = temp_dir.path().join("owner-data");
-    let config_path = temp_dir.path().join("owner.toml");
-    let local_root = temp_dir.path().join("local-root");
-    let outside_file = temp_dir.path().join("outside-secret.txt");
-
-    fs::create_dir_all(&remote_root).expect("create remote root");
-    fs::write(&outside_file, "must not leak").expect("write outside file");
-    write_config(&config_path, &data_dir);
-
-    let register = run_section(&config_path, &["--json", "agent", "register", "owner"]);
-    assert_success(&register, "agent register");
-    let create = run_section(
-        &config_path,
-        &[
-            "--json",
-            "fs",
-            "create",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
-    );
-    assert_success(&create, "fs create");
-
-    let attach = run_section(
-        &config_path,
-        &[
-            "--json",
-            "fs",
-            "attach",
-            "project",
-            local_root.to_str().expect("utf8 local root"),
-        ],
-    );
-    assert_success(&attach, "attach");
-
-    std::os::unix::fs::symlink(&outside_file, local_root.join("leak.txt")).expect("create symlink");
-    let commit = run_section(
-        &config_path,
-        &[
-            "--json",
-            "commit",
-            "apply",
-            local_root.to_str().expect("utf8 local root"),
-            "--message",
-            "must reject symlink",
-        ],
-    );
-    assert!(
-        !commit.status.success(),
-        "commit unexpectedly followed a symlink\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&commit.stdout),
-        String::from_utf8_lossy(&commit.stderr)
-    );
-    assert!(
-        !remote_root.join("leak.txt").exists(),
-        "symlink target must not materialize as remote content"
-    );
-}
-
-#[test]
-fn reader_can_attach_but_commit_apply_is_denied() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let remote_root = temp_dir.path().join("remote");
-    let owner_data = temp_dir.path().join("owner-data");
-    let reader_data = temp_dir.path().join("reader-data");
-    let owner_config = temp_dir.path().join("owner.toml");
-    let reader_config = temp_dir.path().join("reader.toml");
-    let reader_root = temp_dir.path().join("reader-root");
-
-    fs::create_dir_all(&remote_root).expect("create remote root");
-    write_config(&owner_config, &owner_data);
-    write_config(&reader_config, &reader_data);
-
-    let owner_register = run_section(&owner_config, &["--json", "agent", "register", "owner"]);
-    assert_success(&owner_register, "owner register");
-
-    let create = run_section(
-        &owner_config,
-        &[
-            "--json",
-            "fs",
-            "create",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
-    );
-    assert_success(&create, "owner fs create");
-
-    let reader_register = run_section(&reader_config, &["--json", "agent", "register", "reader"]);
-    assert_success(&reader_register, "reader register");
-    let reader_register: Value =
-        serde_json::from_slice(&reader_register.stdout).expect("reader register json");
-    let reader_id = reader_register["agent"]["agent_id"]
-        .as_str()
-        .expect("reader id")
-        .to_string();
-
-    let reader_source = run_section(
-        &reader_config,
-        &[
-            "source",
-            "add",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
-    );
-    assert_success(&reader_source, "reader backing source add");
-
-    let grant = run_section(
-        &owner_config,
-        &[
-            "--json", "fs", "grant", "project", &reader_id, "--role", "reader",
-        ],
-    );
-    assert_success(&grant, "grant reader");
-
-    let attach = run_section(
-        &reader_config,
-        &[
-            "--json",
-            "fs",
-            "attach",
-            "project",
-            reader_root.to_str().expect("utf8 reader root"),
-        ],
-    );
-    assert_success(&attach, "reader attach");
-
-    let reader_file = reader_root.join("draft.txt");
-    fs::write(&reader_file, "reader local draft").expect("write reader draft");
-
-    let commit = run_section(
-        &reader_config,
-        &[
-            "--json",
-            "commit",
-            "apply",
-            reader_root.to_str().expect("utf8 reader root"),
-            "--message",
-            "reader draft",
-        ],
-    );
-    assert!(
-        !commit.status.success(),
-        "reader commit unexpectedly succeeded\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&commit.stdout),
-        String::from_utf8_lossy(&commit.stderr)
-    );
-    let error: Value = serde_json::from_slice(&commit.stdout).expect("error json");
-    assert_eq!(error["error"]["code"], "grant_denied");
-    assert!(
-        !remote_root.join("draft.txt").exists(),
-        "reader draft must not materialize to shared truth"
-    );
-}
-
-#[test]
-fn fs_attach_rejects_non_empty_local_root_without_publishing_drafts() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let remote_root = temp_dir.path().join("remote");
-    let owner_data = temp_dir.path().join("owner-data");
-    let reader_data = temp_dir.path().join("reader-data");
-    let owner_config = temp_dir.path().join("owner.toml");
-    let reader_config = temp_dir.path().join("reader.toml");
-    let reader_root = temp_dir.path().join("reader-root");
-
-    fs::create_dir_all(&remote_root).expect("create remote root");
-    fs::create_dir_all(&reader_root).expect("create reader root");
-    fs::write(reader_root.join("draft.txt"), "must stay local").expect("write local draft");
-    write_config(&owner_config, &owner_data);
-    write_config(&reader_config, &reader_data);
-
-    let owner_register = run_section(&owner_config, &["--json", "agent", "register", "owner"]);
-    assert_success(&owner_register, "owner register");
-    let create = run_section(
-        &owner_config,
-        &[
-            "--json",
-            "fs",
-            "create",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
-    );
-    assert_success(&create, "owner fs create");
-
-    let reader_register = run_section(&reader_config, &["--json", "agent", "register", "reader"]);
-    assert_success(&reader_register, "reader register");
-    let reader_register: Value =
-        serde_json::from_slice(&reader_register.stdout).expect("reader register json");
-    let reader_id = reader_register["agent"]["agent_id"]
-        .as_str()
-        .expect("reader id")
-        .to_string();
-
-    let reader_source = run_section(
-        &reader_config,
-        &[
-            "source",
-            "add",
-            "project",
-            "--provider",
-            "fs",
-            "--opt",
-            &format!("root={}", remote_root.display()),
-        ],
-    );
-    assert_success(&reader_source, "reader backing source add");
-
-    let grant = run_section(
-        &owner_config,
-        &[
-            "--json", "fs", "grant", "project", &reader_id, "--role", "reader",
-        ],
-    );
-    assert_success(&grant, "grant reader");
-
-    let attach = run_section(
-        &reader_config,
-        &[
-            "--json",
-            "fs",
-            "attach",
-            "project",
-            reader_root.to_str().expect("utf8 reader root"),
-        ],
-    );
+    let non_empty_local = Fixture::new();
+    let owner = non_empty_local.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    fs::create_dir_all(&owner.local_root).expect("create owner root");
+    fs::write(owner.local_root.join("draft.txt"), "must stay local").expect("write draft");
+    let attach = owner.attach_output(&owner.local_root);
     assert!(
         !attach.status.success(),
-        "attach unexpectedly succeeded\nstdout: {}\nstderr: {}",
+        "attach unexpectedly accepted non-empty working root\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&attach.stdout),
         String::from_utf8_lossy(&attach.stderr)
     );
     assert!(
-        !remote_root.join("draft.txt").exists(),
-        "attach must not publish pre-existing local drafts"
+        !non_empty_local.remote_path("draft.txt").exists(),
+        "attach must not publish local drafts"
     );
+}
+
+#[test]
+fn attach_rejects_nested_parent_or_child_roots() {
+    let fixture = Fixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    let parent_root = fixture.root.join("roots");
+    let nested_root = parent_root.join("nested");
+    owner.attach_to(&nested_root);
+
+    let child_root = nested_root.join("child-root");
+    let child_attach = owner.attach_output(&child_root);
     assert!(
-        !reader_root.join(".section/root.json").exists(),
-        "failed attach must not leave an AgentFS marker"
+        !child_attach.status.success(),
+        "attach unexpectedly accepted child root\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&child_attach.stdout),
+        String::from_utf8_lossy(&child_attach.stderr)
+    );
+
+    let attach_parent = owner.attach_output(&parent_root);
+    assert!(
+        !attach_parent.status.success(),
+        "attach unexpectedly accepted parent root overlapping existing root\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&attach_parent.stdout),
+        String::from_utf8_lossy(&attach_parent.stderr)
     );
 }

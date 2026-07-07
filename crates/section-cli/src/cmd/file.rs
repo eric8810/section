@@ -3,15 +3,26 @@ use futures::TryStreamExt;
 use opendal::{Entry, Metadata, Operator};
 use section_core::{Router, SectionConfig, SectionError};
 use section_provider::ProviderStore;
-use sectiond::{SectiondControlPlane, SectiondRuntime};
+use sectiond::SectiondControlPlane;
 use serde_json::json;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 fn build_router(config: &SectionConfig, store: &ProviderStore) -> Result<Router> {
-    let (_, router) = SectiondRuntime::from_config_and_store(config, store)?.into_parts();
-    Ok(router)
+    let mut public_config = config.clone();
+    let config_source_names = public_config.sources.keys().cloned().collect::<Vec<_>>();
+    for name in config_source_names {
+        if store.is_agentfs_source(&name)? {
+            public_config.sources.remove(&name);
+        }
+    }
+    for (name, source) in store.load_all()? {
+        if !store.is_agentfs_source(&name)? {
+            public_config.sources.entry(name).or_insert(source);
+        }
+    }
+    Ok(Router::from_config(&public_config)?)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

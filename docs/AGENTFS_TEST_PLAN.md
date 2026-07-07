@@ -3,7 +3,9 @@
 ## Purpose
 
 This document defines the verification plan for the AgentFS MVP contract in
-[AGENTFS_MVP_CONTRACT.md](AGENTFS_MVP_CONTRACT.md).
+[AGENTFS_MVP_CONTRACT.md](AGENTFS_MVP_CONTRACT.md), and the end-to-end gates
+for the next AgentFS features defined in
+[AGENTFS_DESIGN_PROPOSAL.md](AGENTFS_DESIGN_PROPOSAL.md).
 
 The goal is to make development testable before implementation starts. Every
 test below should prove one contract boundary for:
@@ -12,9 +14,9 @@ test below should prove one contract boundary for:
 Agent / FS / Grant / Commit / Event
 ```
 
-Messages, hook execution, proposal or approval workflows, path-scoped grants,
-and `AGENTS.md` enforcement are out of scope for the current project. Tests may
-assert that these surfaces are not implemented or not claimed.
+Hook execution, proposal or approval workflows, path-scoped grants, and
+`AGENTS.md` enforcement are out of scope for the current MVP slice. Future E2E
+gates below define the product proof required when those features are built.
 
 ## Verification Layers
 
@@ -33,6 +35,7 @@ Use local filesystem OpenDAL provider for MVP tests:
 
 ```text
 temp/
+  control-service-data/
   remote/
   owner-data/
   writer-data/
@@ -47,7 +50,11 @@ temp/
 
 Each agent test config uses a distinct `data_dir` so agent identity and local
 state are isolated. All agents point at the same backing `remote/` directory
-through the same AgentFS source metadata.
+through the same server-managed `SourceProfile`.
+
+Sharing tests must run a Section Control Service test harness. The harness owns
+agent identity, installation identity, grants, shares, source profiles, and
+short-lived sync credentials.
 
 ## Unit Contract Tests
 
@@ -143,7 +150,7 @@ Required codes:
 
 | Case | Steps | Expected |
 | --- | --- | --- |
-| owner creates FS | agent registered, `fs create project` | source exists, `fs.json` exists, head exists with null commit |
+| owner creates FS | agent logged in, source profile exists, `fs create project` | FS exists, source profile is bound, owner grant exists, head exists with null commit |
 | owner grant | create FS | owner grant exists with `owner` role |
 | create event | create FS | `fs.created` event exists |
 | duplicate source name | create existing FS/source | stable error; no partial metadata overwrite |
@@ -180,7 +187,7 @@ Required codes:
 | reader attach | reader has reader grant | attach succeeds |
 | unknown agent attach | no identity | `unknown_agent` |
 | no grant attach | registered but ungranted agent | `grant_denied` |
-| marker contents | inspect `.section/root.json` | includes `schema_version`, `fs_id`, `source_id`, `agent_id`, `base_commit_id` |
+| marker contents | inspect `.section/root.json` | includes `schema_version`, `fs_id`, `source_profile_id`, `agent_id`, `installation_id`, `base_commit_id` |
 | attach event | attach succeeds | `fs.attached` event emitted |
 | failed materialized head | head commit is `failed_to_materialize` | attach reports non-ready state |
 
@@ -232,7 +239,7 @@ Required codes:
 ### Agent Commands
 
 ```text
-section agent register agent-a
+section agent login
 section agent identify
 ```
 
@@ -240,16 +247,19 @@ Expected:
 
 - normal output is human-readable,
 - `--json` output includes `ok: true` and `agent`,
-- repeated register returns the same agent id,
-- identify before register fails or returns a clear absent identity according to final command contract.
+- repeated login identifies the same agent when the same account is used,
+- identify before login fails or returns a clear absent identity according to final command contract.
 
 ### FS Commands
 
 ```text
-section fs create project --provider fs --opt root=/tmp/remote
+section fs create project --source-profile test-profile
 section fs list
 section fs grant project agt_... --role writer
 section fs revoke project agt_...
+section fs share project agt_...
+section fs available
+section fs accept shr_...
 section fs attach project /tmp/writer-root
 section fs status project
 ```
@@ -315,6 +325,7 @@ accepted commit == shared truth mutation
 E2E tests must use the released CLI shape and filesystem behavior:
 
 - run the `section` binary through the CLI test harness,
+- run a Section Control Service test harness for sharing and credential tests,
 - use separate config files and `data_dir` values for each agent,
 - use one shared backing source for the FS,
 - use separate local roots for each attached agent,
@@ -325,9 +336,8 @@ E2E tests may inspect shared metadata files under `.section/agentfs/` as an
 oracle, but the primary assertions should be made through CLI output and
 observable filesystem state.
 
-Until AgentFS event replay/watch is implemented, E2E tests may verify events by
-reading `.section/agentfs/events/`. The final E2E gate must replace that fallback
-with `section watch` or an AgentFS event replay command.
+Product E2E for events must use `section watch` or `section fs events`.
+Metadata file inspection is only a secondary oracle.
 
 ### Product Questions Covered By E2E
 
@@ -377,8 +387,8 @@ and local root bindings cannot accidentally share local state.
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
-| 1 | owner | `agent register owner` | persisted `agt_` identity |
-| 2 | owner | `fs create project --provider fs --opt root=remote` | `fs_` created; owner grant exists |
+| 1 | owner | `agent login` | authenticated `agt_` identity and installation |
+| 2 | owner | `fs create project --source-profile test-profile` | `fs_` created; owner grant exists |
 | 3 | owner | `fs list` and `fs status project` | owner can discover and inspect FS |
 | 4 | owner | inspect `remote/.section/agentfs/` | `fs.json`, head, owner grant, `fs.created` event exist |
 
@@ -389,16 +399,17 @@ This proves agent-owned filesystem creation and initial governance metadata.
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
 | 1 | owner | `fs attach project owner-root` | owner root marker records null base head |
-| 2 | writer | `agent register writer` | distinct `agt_` identity |
+| 2 | writer | `agent login` | distinct `agt_` identity and installation |
 | 3 | owner | `fs grant project <writer_id> --role writer` | writer has `read` and `commit` capability |
-| 4 | writer | add backing source for `project` | writer can resolve the shared FS source |
-| 5 | writer | `fs attach project writer-root` | writer root materializes current shared truth |
-| 6 | writer | write `writer-root/docs/note.txt` | remote file does not exist yet |
-| 7 | writer | `commit status writer-root` | dirty path reports `docs/note.txt` as create |
-| 8 | writer | `commit apply writer-root --message "add note"` | commit id returned; materialization succeeds |
-| 9 | test | inspect head and commit metadata | head points to commit; commit actor is writer |
-| 10 | test | inspect remote file | `remote/docs/note.txt` exists with writer content |
-| 11 | owner | attach a fresh root or sync existing root | owner observes writer's accepted content |
+| 4 | owner | `fs share project <writer_id>` | server-side share exists |
+| 5 | writer | `fs available` then `fs accept <share_id>` | writer accepts the FS through the control service |
+| 6 | writer | `fs attach project writer-root` | writer gets short-lived sync credential and materializes current shared truth |
+| 7 | writer | write `writer-root/docs/note.txt` | remote file does not exist yet |
+| 8 | writer | `commit status writer-root` | dirty path reports `docs/note.txt` as create |
+| 9 | writer | `commit apply writer-root --message "add note"` | commit id returned; materialization succeeds |
+| 10 | test | inspect head and commit metadata | head points to commit; commit actor is writer |
+| 11 | test | inspect remote file | `remote/docs/note.txt` exists with writer content |
+| 12 | owner | attach a fresh root or sync existing root | owner observes writer's accepted content |
 
 This proves the core product statement: local draft is not shared truth until a
 policy-accepted commit advances the FS head.
@@ -419,7 +430,7 @@ This proves grants govern acceptance into shared truth, not local write syscalls
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
-| 1 | stranger | register and add backing source | local identity exists |
+| 1 | stranger | log in without grant or share | local identity exists |
 | 2 | stranger | `fs attach project stranger-root` | `grant_denied` |
 | 3 | test | inspect `stranger-root` | no AgentFS root marker is written |
 
@@ -545,14 +556,14 @@ the head is not materialized.
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
 | 1 | owner | grant writer to `writer` | writer is authorized on the FS |
-| 2 | writer | discover or accept access to the FS | writer can learn enough to attach without out-of-band source setup |
-| 3 | writer | attach | attach succeeds using granted access path |
-| 4 | test | inspect writer local store | source/bootstrap metadata is present without leaking credentials unnecessarily |
+| 2 | owner | create a server-side share for `writer` | share record exists in Section Control Service |
+| 3 | writer | log in and run `fs available` | writer sees the shared FS |
+| 4 | writer | `fs accept <share_id>` | service validates share and grant, then returns source profile and short-lived credential |
+| 5 | writer | attach | attach succeeds using server-issued credential |
+| 6 | test | inspect writer local store | accepted FS and credential binding exist; source long-lived key is absent |
 
 This proves grants lead to usable access from the grantee's perspective. The
-current implementation still requires manual backing source setup, so this is a
-required product-complete E2E after invite/source bootstrap/discovery is
-designed.
+required product-complete E2E is server-side share discovery and accept.
 
 #### 15. Local Root Identity Is Stable
 
@@ -566,38 +577,308 @@ designed.
 This proves local root identity does not depend on fragile path spelling or
 overlapping directory layouts.
 
-### Deferred E2E Scenarios
+### 后续功能 E2E 套件
 
-These belong in the product E2E suite, but require implementation that is not
-part of the current MVP slice.
+后续 E2E 只从 Agent 视角证明产品能力。
 
-| Scenario | Required Feature | Expected Product Proof |
+规则：
+
+- 每个后续功能至少有一条端到端测试。
+- 主要断言通过 CLI、local root、remote materialized files、watch/events 完成。
+- metadata 文件可以作为辅助 oracle，但不能替代用户可见行为。
+- 需要制造 race、失败、hook 输出时，可以使用测试 harness，但最终断言仍然走公开命令。
+
+执行顺序：
+
+| 阶段 | 目标 | 场景 |
 | --- | --- | --- |
-| AgentFS watch/replay from CLI | AgentFS event replay/watch integration | a passive agent sees `commit.accepted` without reading metadata files directly |
-| Authorizing grant audit | commit/event records grant id or owner authority | observer can identify which grant allowed an accepted mutation |
-| Materialization repair | retry materialization command | accepted failed commit is repaired with the same commit id |
-| Granted agent bootstrap | invite/source bootstrap/discovery design | grantee can attach without manual backing source setup |
-| Commit snapshot isolation | frozen commit snapshot or equivalent preflight guard | commit metadata cannot diverge from materialized bytes |
-| Hook-gated commit | hooks trust model and execution | hook result can allow or block commit acceptance |
-| `AGENTS.md` rule enforcement | FS-local rule parser and policy engine | FS-local rules affect commit decisions |
-| Proposal/approval commit | proposal workflow | direct commit is replaced or augmented by approval policy |
+| P0 | 治理真相不能错 | 16-24 |
+| P1 | 多 Agent 使用体验完整 | 25-28 |
+| P2 | 自动化和规则层 | 29-33 |
 
-### Product-Complete E2E Coverage Gaps
+额外 fixture：
 
-The E2E definition above is broader than the current implementation. Before
-calling AgentFS product-complete, the suite must close these gaps:
+```text
+temp/
+  control-service-data/
+  observer-data/
+  manager-data/
+  writer-b-data/
+  credential-broker/
+  hooks/
+  hook-output/
+  corrupt-remote/
+```
+
+测试 harness 可以提供：
+
+- 可暂停 materialization 的 provider，用来测试 snapshot isolation。
+- 可失败一次的 provider，用来测试 materialization repair。
+- Section Control Service harness，用来测试 share、discovery、grant、credential。
+- 临时 hook script，用来记录输入 JSON、返回成功或失败。
+
+#### 16. Trusted Dirty Base And Status
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | create FS and grant writer to `writer-a` and `writer-b` | both writers can attach |
+| 2 | writer-a | attach at head `H0` using path spelling A | local mount state records canonical root and base `H0` |
+| 3 | writer-a | run `fs status` using equivalent path spelling B | status resolves the same mount |
+| 4 | writer-b | commit a file | head advances to `H1` |
+| 5 | writer-a | edit local file and run `fs status --json` | `dirty: true`, `stale: true`, base `H0`, head `H1` |
+| 6 | writer-a | `commit apply` | `stale_base`, no new commit |
+
+This proves Section compares local work against the mounted base, not only the
+current remote files.
+
+#### 17. Commit Snapshot Isolation
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | writer | edit `docs/note.txt` to version A | `commit status` reports version A dirty |
+| 2 | writer | start `commit apply` with a paused materialization provider | staging snapshot is created before metadata write |
+| 3 | test harness | change live local file to version B before materialization resumes | live root now differs from staging |
+| 4 | harness | resume materialization | remote file contains version A |
+| 5 | test | inspect commit record and `fs status` | commit path hash matches version A; version B remains local dirty work |
+
+This proves accepted commit metadata describes the bytes that became shared
+truth.
+
+#### 18. Materialization Repair
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | writer | commit with provider configured to fail materialization once | commit is accepted; head points to it; state is `failed_to_materialize` |
+| 2 | writer | run another `commit apply` | rejected with `materialization_failed` |
+| 3 | owner | `fs status --json` | non-ready materialization state is visible |
+| 4 | writer | `commit repair <root> --commit <commit_id>` after provider recovers | same commit id becomes `materialized` |
+| 5 | writer | run a new commit | new commit can proceed after repair |
+
+This proves repair fixes the accepted head instead of creating a second truth.
+
+#### 19. Metadata Validation And Bad Data Isolation
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | create valid FS `good` | status succeeds |
+| 2 | test harness | create another source with malformed `.section/agentfs/fs.json` | corrupt source exists |
+| 3 | owner | `fs status good --json` | succeeds; may include warning about unrelated bad metadata |
+| 4 | owner | `fs status corrupt --json` | fails with `malformed_shared_metadata` |
+| 5 | test harness | create two FS records with same display name | lookup by name fails with `ambiguous_fs_ref` |
+| 6 | owner | lookup by exact `fs_id` | exact id still resolves |
+
+This proves bad metadata is isolated to the affected FS or lookup candidate.
+
+#### 20. Event Immutability And Sequence Replay
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | create FS, grant writer, writer commits twice | multiple AgentFS events exist |
+| 2 | observer | `fs events <fs> --json` | events have strictly increasing `seq` |
+| 3 | observer | `fs events <fs> --after <seq>` | replay returns only later events |
+| 4 | test harness | try to pre-create or overwrite an existing event id before a command writes | command fails or creates a different event; old event is unchanged |
+| 5 | observer | replay again | event order is still by `seq`, not filesystem list order |
+
+This proves events are append-only and replayable.
+
+#### 21. Source And Path Guardrails
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | create AgentFS-backed source | source record is marked as AgentFS-owned |
+| 2 | owner | run `source sync` on that source | rejected with AgentFS guardrail error |
+| 3 | owner | run `source remove` or `source bind` | rejected with AgentFS guardrail error |
+| 4 | owner | try any low-level force path | rejected; MVP has no low-level bypass |
+| 5 | owner | run `path inspect/compare/resolve` under the root | command works as diagnostic and warns it is not the governance surface |
+
+This proves low-level source/path commands do not silently bypass AgentFS.
+
+#### 22. JSON Error Contract
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | stranger | `fs attach project stranger-root --json` | `error.code = grant_denied`, `retryable = false` |
+| 2 | writer | stale `commit apply --json` | `error.code = stale_base`, `retryable = true` |
+| 3 | owner | status corrupt metadata with `--json` | `error.code = malformed_shared_metadata` |
+| 4 | writer | commit while head failed materialization with `--json` | `error.code = materialization_failed`, `retryable = true` |
+| 5 | test harness | hold metadata lock, then run grant or commit with `--json` | `error.code = metadata_write_conflict`, `retryable = true` |
+
+This proves Agent callers can make decisions from stable error codes.
+
+#### 23. File/Dir Replacement Preflight
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | writer | commit file `docs/api` | file materializes |
+| 2 | writer | replace `docs/api` with directory `docs/api/index.md` | commit succeeds; remote has directory and child |
+| 3 | writer | replace directory `docs/api` with file `docs/api` | commit succeeds; remote has file only |
+| 4 | harness | repeat with provider configured to reject required delete/create plan | commit fails before metadata write |
+| 5 | test | inspect head and remote after failure | no half-materialized accepted commit |
+
+This proves commit acceptance knows whether materialization can execute the path
+plan safely.
+
+#### 24. Local Root Identity And Overlap
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | writer | attach using `/tmp/project/../project` | mount stores canonical root |
+| 2 | writer | run `fs status /tmp/project` | resolves the same `mount_id` |
+| 3 | writer | attach child root under existing root | rejected |
+| 4 | writer | attach parent root over existing root | rejected |
+| 5 | writer | attach backing source root as working root | rejected |
+
+This proves root identity is stable and nested roots cannot leak control files.
+
+#### 25. Server Share And Accept
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | `fs grant project <writer_id> --role writer` | writer has commit authority |
+| 2 | owner | `fs share project <writer_id>` | server-side share record is created |
+| 3 | writer | `fs available --json` | writer sees the shared FS after login |
+| 4 | writer | `fs accept <share_id>` | service validates identity, share, and grant |
+| 5 | writer | `fs attach project writer-root` | source profile and short-lived sync credential are bound locally |
+| 6 | writer | inspect local store through `fs status writer-root --json` | accepted FS exists; no long-lived source key is printed |
+| 7 | writer | edit and commit | commit succeeds through accepted access |
+| 8 | owner | revoke or expire another share, then writer tries accept | revoked or expired share cannot be accepted |
+
+This proves a grant can become usable access through the service control plane.
+
+#### 26. AgentFS Events Replay And Watch
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | observer | start `watch <owner-root> --agentfs --json` | process waits for AgentFS events |
+| 2 | writer | commit a file | `commit.accepted` and `commit.materialized` occur |
+| 3 | observer | read watch output | events include `stream: agentfs`, `seq`, `fs_id`, actor, subject |
+| 4 | observer | stop watch, then run `fs events <fs> --after <seq>` | replay resumes after last seen event |
+
+This proves a passive Agent can observe changes without reading metadata files.
+
+#### 27. Authorizing Grant Audit
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | grant writer to `writer` | grant id is returned |
+| 2 | writer | commit a file | commit succeeds |
+| 3 | observer | `fs events <fs> --json` | `commit.accepted.data.authorized_by.grant_id` equals the grant id |
+| 4 | owner | revoke the writer grant | grant is no longer active |
+| 5 | observer | replay old commit event and inspect commit metadata oracle | old audit still points to original grant id |
+| 6 | owner | commit a file | audit shows `authorized_by.type = owner` |
+
+This proves every accepted mutation explains which authority allowed it.
+
+#### 28. FS Status As Agent Decision Surface
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | create FS and grant reader, writer, manager | roles exist |
+| 2 | each agent | `fs status <root-or-fs> --json` | output includes agent id, role, capabilities, head, base, materialization state |
+| 3 | writer | edit local file | status reports dirty count |
+| 4 | writer | become stale after another commit | status reports stale |
+| 5 | owner | put FS into failed materialization state | status reports non-ready state and warning |
+
+This proves `fs status` is enough for an Agent to decide whether it can act.
+
+#### 29. Post-Event Hook Automation
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | `hooks add project --event commit.accepted -- <script>` | hook record is stored |
+| 2 | writer | commit a file | commit succeeds normally |
+| 3 | hook script | write received JSON to `hook-output/` | JSON includes event kind, fs id, commit id, actor |
+| 4 | observer | `fs events` | optional hook success or hook failure event is visible |
+| 5 | reader | try to add hook | `grant_denied` |
+
+This proves hooks can automate work from AgentFS events and require manage
+authority.
+
+#### 30. Blocking Preflight Hook
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | add `commit.preflight` hook with `blocking: true` | hook is active |
+| 2 | writer | commit content that makes hook return non-zero | commit is rejected before head advances |
+| 3 | test | inspect remote/head | no shared truth mutation occurred |
+| 4 | writer | commit content that hook accepts | commit succeeds |
+| 5 | observer | `fs events` | hook result is visible in event data or hook event |
+
+This proves blocking hooks can allow or block commit acceptance.
+
+#### 31. `AGENTS.md` Rule Enforcement
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | manager | commit `AGENTS.md` with `required_checks` and `protected_paths` machine block | rules become active |
+| 2 | writer | commit normal path with required check passing | commit succeeds |
+| 3 | writer | commit normal path with required check failing | commit rejected before head advances |
+| 4 | writer | commit protected path without manage authority | `grant_denied` or policy error |
+| 5 | manager | commit protected path | commit succeeds |
+| 6 | manager | commit invalid `AGENTS.md` machine block | rejected with `agent_rules_invalid`; previous rules remain active |
+
+This proves FS-local rules affect commit decisions only through defined
+machine-readable rules.
+
+#### 32. Proposal And Approval Commit
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | grant contributor to `contributor` | contributor has `read` and `propose`, not `commit` |
+| 2 | contributor | edit and run `commit apply` | `grant_denied` |
+| 3 | contributor | `commit propose <root> --message "change"` | proposal id returned; head unchanged |
+| 4 | manager-only | inspect proposal and try accept | accept is rejected; head unchanged |
+| 5 | owner | inspect proposal and accept | proposal becomes accepted commit; head advances |
+| 6 | writer-b | advance head before another proposal accept | stale proposal accept is rejected |
+
+This proves proposal/approval is a separate path from direct commit.
+
+#### 33. Path-Scoped Grants
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | grant writer to `writer` with scope `docs/**` | writer has scoped commit authority |
+| 2 | writer | edit `docs/a.md` and commit | commit succeeds |
+| 3 | writer | edit `src/a.rs` and commit | rejected with path-scope policy error |
+| 4 | writer | edit both `docs/b.md` and `src/b.rs` in one commit | entire commit is rejected |
+| 5 | observer | inspect accepted docs commit audit | `authorized_by` includes grant id and matched path scope |
+
+This proves path scopes restrict which local changes can become shared truth.
+
+### AgentFS Product-Complete E2E Gaps
+
+The E2E definition above is broader than the current implementation.
+
+Before calling the AgentFS core product complete, the suite must close the P0
+and P1 gaps:
 
 | Gap | Why It Matters | Current Status |
 | --- | --- | --- |
-| Granted-agent bootstrap | A grant should be usable from the grantee perspective, not only from the owner's local setup. | Open design: invite token, source export, shared source URI, or discovery service. |
-| AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a test fallback. | Open implementation: no AgentFS replay/watch command yet. |
-| Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | Open implementation: commit/event do not record grant id. |
-| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | Open implementation issue: base snapshot/path sync state needs tightening. |
-| Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | Open implementation issue: TOCTOU between commit record and sync materialization. |
-| Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | Partial: failed heads block; retry/repair command is missing. |
-| Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | Partial: exact collision and backing-root overlap are guarded; canonical/overlap semantics remain open. |
-| Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | Open product decision: official escape hatch or guarded management surface. |
-| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | Partial: schema validation and backend-level append-only semantics remain open. |
+| Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness。还缺生产服务端、真实 credential TTL 和刷新。 |
+| AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 未实现。设计已固定：`fs events`、`watch --agentfs`、事件 `seq`。 |
+| Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | 已有第一版审计。还缺完整 replay/watch 输出断言。 |
+| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 部分实现：本地 store 记录 mount/base。还缺 `base_manifest_hash` 和严格 tree diff。 |
+| Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | 未实现。设计已固定：先 staging snapshot，再写 metadata，再从 snapshot 物化。 |
+| Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 部分实现：失败会阻塞后续 commit。还缺 `commit repair` 和 staging-based retry。 |
+| Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 部分实现：已有 backing root、父子 root、runtime guardrails。还缺持久 `mount_id`/canonical root 完整断言。 |
+| Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
+| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。还缺统一 schema validation、坏数据隔离、event `seq`、create-if-absent 断言。 |
+| JSON error contract | Agent callers need stable machine-readable failures. | 部分实现。还缺所有公开 AgentFS 命令统一 `error.code`、`retryable`、`details`。 |
+| File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 未实现。设计已固定：metadata 写入前生成 path operation plan。 |
+| FS status decision surface | Agents need one command to know whether they can act. | 部分实现。还缺完整 status JSON：role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
+
+### Future Feature E2E Gates
+
+P2 features are extension gates. They should not block the AgentFS core product
+complete call, but each feature must pass its own E2E before it is exposed as
+implemented.
+
+| Feature | Why It Matters | Current Status |
+| --- | --- | --- |
+| Hooks | Automation should run from AgentFS events and optionally gate commits. | Design defined: post-event hooks and blocking preflight hooks; implementation open. |
+| `AGENTS.md` rules | FS-local rules should affect Agent behavior through explicit machine-readable policy. | Design defined: minimal machine block, protected paths, required checks; implementation open. |
+| Proposal/approval | Some collaborators should propose changes without direct commit authority. | Design defined: `propose` capability, proposal lifecycle, accept/reject; implementation open. |
+| Path-scoped grants | Coarse FS-wide writer grants may be too broad. | Design defined: allow-only path scopes on grants; implementation open. |
 
 ### Current E2E Implementation
 
@@ -614,15 +895,14 @@ It covers the product behaviors that are implemented today:
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
 | `e2e_hardening_rejects_symlink_commit_paths` | symlink paths cannot materialize files outside the working root |
 
-It intentionally does not mark the product-complete coverage gaps above as
+It intentionally does not mark the core product-complete gaps above as
 passing tests until those product capabilities exist.
 
-### E2E Non-Goals
+### Current MVP E2E Non-Goals
 
-The E2E suite must not claim unsupported products:
+Until the future feature E2Es above are implemented, the current MVP E2E suite
+must not claim unsupported behavior:
 
-- no Messages workflow,
-- no AgentDB, AgentGit, or AgentOps behavior,
 - no path-scoped grant enforcement,
 - no hook execution,
 - no `AGENTS.md` enforcement,
@@ -643,25 +923,41 @@ cargo test -p section-cli --test sync_control_plane
 cargo test -p section-cli --tests
 ```
 
-## Out-Of-Scope Assertions
+## MVP Out-Of-Scope Assertions
 
 The MVP must not imply unsupported behavior:
 
 | Surface | Assertion |
 | --- | --- |
-| Messages | no `message` or conversation command is added |
 | Hooks | event names may be reserved, hook execution is not implemented |
 | `AGENTS.md` | file is synced as normal content, Markdown rules are not enforced |
 | path-scoped grants | all grants are FS-wide |
 | proposals/approvals | direct commit is the only MVP mutation path |
-| AgentDB/Git/Ops | not implemented in this repo |
 
-## Completion Gate
+## 完成标准
 
-The AgentFS MVP is complete only when:
+AgentFS 核心完整完成，必须同时满足：
 
-- all unit, control-plane, CLI, and end-to-end cases above have tests,
-- every required error code is asserted at least once,
-- accepted commit metadata and materialized backing files are both verified,
-- existing source/path regression tests pass,
-- unimplemented out-of-scope surfaces are not exposed as working features.
+- P0 和 P1 场景都有 E2E。
+- 所有 E2E 都通过公开 CLI 跑通。
+- owner、reader、writer、manager 的权限行为都有测试。
+- share、available、accept、attach 的跨机业务路径有测试。
+- commit 会检查权限、base、dirty、reserved path。
+- commit 使用 staging snapshot，metadata 和物化文件一致。
+- accepted commit 记录 `authorized_by`。
+- materialization 失败会阻塞后续 commit。
+- `commit repair` 修复同一个 commit。
+- `fs status --json` 能告诉 Agent 当前能不能行动。
+- `fs events` 和 `watch --agentfs` 能让 Agent 观察变化。
+- 每个公开 AgentFS JSON 错误都有稳定 `error.code`、`retryable`、`details`。
+- 低层 `source/path` 命令不能绕过 AgentFS。
+- 现有 source/path 回归测试仍然通过。
+- 未实现的 P2 功能不能暴露成可用功能。
+- 设计文档、测试计划、CLI 行为一致。
+
+P2 功能单独完成。每个 P2 功能完成时，必须满足：
+
+- 有自己的 E2E。
+- 不破坏 AgentFS 核心 E2E。
+- 错误也走统一 JSON 错误格式。
+- 文档和实现一致。

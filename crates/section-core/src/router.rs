@@ -128,6 +128,7 @@ mod tests {
             mount_point: PathBuf::from("/mnt/section"),
             data_dir: PathBuf::from("/tmp/section-data"),
             sources,
+            control_service: Default::default(),
         }
     }
 

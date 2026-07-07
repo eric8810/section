@@ -2226,6 +2226,7 @@ dependencies = [
  "libc",
  "opendal",
  "ring",
+ "rusqlite",
  "section-core",
  "section-provider",
  "serde",

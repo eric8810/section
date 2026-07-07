@@ -1152,6 +1152,7 @@ mod tests {
             mount_point: temp_dir.path().join("mnt"),
             data_dir: temp_dir.path().join("data"),
             sources,
+            control_service: Default::default(),
         };
         let router = Router::from_config(&config).expect("router");
         SectionFs::new(&config, router)

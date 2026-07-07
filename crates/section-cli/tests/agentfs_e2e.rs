@@ -1,17 +1,19 @@
 mod support;
 
-use crate::support::{assert_success, run_section, write_config};
+use crate::support::{assert_success, run_section, write_agentfs_config};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
 const FS_NAME: &str = "project";
+const SOURCE_PROFILE: &str = "test-profile";
 
 struct AgentFsFixture {
     _temp_dir: tempfile::TempDir,
     root: PathBuf,
     remote_root: PathBuf,
+    control_service_path: PathBuf,
 }
 
 impl AgentFsFixture {
@@ -19,18 +21,26 @@ impl AgentFsFixture {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let root = temp_dir.path().to_path_buf();
         let remote_root = root.join("remote");
+        let control_service_path = root.join("control-service.sqlite");
         fs::create_dir_all(&remote_root).expect("create remote root");
         Self {
             _temp_dir: temp_dir,
             root,
             remote_root,
+            control_service_path,
         }
     }
 
     fn agent(&self, name: &str) -> AgentFsActor {
         let data_dir = self.root.join(format!("{name}-data"));
         let config_path = self.root.join(format!("{name}.toml"));
-        write_config(&config_path, &data_dir);
+        write_agentfs_config(
+            &config_path,
+            &data_dir,
+            &self.control_service_path,
+            SOURCE_PROFILE,
+            &self.remote_root,
+        );
         AgentFsActor {
             config_path,
             local_root: self.root.join(format!("{name}-root")),
@@ -48,11 +58,11 @@ struct AgentFsActor {
 }
 
 impl AgentFsActor {
-    fn register(&self, name: &str) -> String {
+    fn login(&self, name: &str) -> String {
         let output = self.json_owned(vec![
             "--json".to_string(),
             "agent".to_string(),
-            "register".to_string(),
+            "login".to_string(),
             name.to_string(),
         ]);
         output["agent"]["agent_id"]
@@ -61,36 +71,21 @@ impl AgentFsActor {
             .to_string()
     }
 
-    fn create_fs(&self, remote_root: &Path) -> Value {
-        let output = self.create_fs_output(remote_root);
+    fn create_fs(&self) -> Value {
+        let output = self.create_fs_output();
         assert_success(&output, "fs create");
         serde_json::from_slice(&output.stdout).expect("fs create json")
     }
 
-    fn create_fs_output(&self, remote_root: &Path) -> Output {
+    fn create_fs_output(&self) -> Output {
         self.run_owned(vec![
             "--json".to_string(),
             "fs".to_string(),
             "create".to_string(),
             FS_NAME.to_string(),
-            "--provider".to_string(),
-            "fs".to_string(),
-            "--opt".to_string(),
-            format!("root={}", remote_root.display()),
+            "--source-profile".to_string(),
+            SOURCE_PROFILE.to_string(),
         ])
-    }
-
-    fn add_backing_source(&self, remote_root: &Path) {
-        let output = self.run_owned(vec![
-            "source".to_string(),
-            "add".to_string(),
-            FS_NAME.to_string(),
-            "--provider".to_string(),
-            "fs".to_string(),
-            "--opt".to_string(),
-            format!("root={}", remote_root.display()),
-        ]);
-        assert_success(&output, "source add");
     }
 
     fn list_sources(&self) -> Value {
@@ -106,6 +101,29 @@ impl AgentFsActor {
             agent_id.to_string(),
             "--role".to_string(),
             role.to_string(),
+        ])
+    }
+
+    fn share(&self, agent_id: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "share".to_string(),
+            FS_NAME.to_string(),
+            agent_id.to_string(),
+        ])
+    }
+
+    fn available(&self) -> Value {
+        self.json(&["--json", "fs", "available"], "fs available")
+    }
+
+    fn accept(&self, share_id: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "accept".to_string(),
+            share_id.to_string(),
         ])
     }
 
@@ -221,17 +239,35 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
     let owner = fixture.agent("owner");
     let writer = fixture.agent("writer");
 
-    let owner_id = owner.register("owner");
-    let create = owner.create_fs(&fixture.remote_root);
+    let owner_id = owner.login("owner");
+    let create = owner.create_fs();
     let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
     assert_eq!(create["fs"]["owner_agent_id"], owner_id);
     owner.attach();
 
-    let writer_id = writer.register("writer");
-    writer.add_backing_source(&fixture.remote_root);
+    let writer_id = writer.login("writer");
     let grant = owner.grant(&writer_id, "writer");
     assert_eq!(grant["grant"]["agent_id"], writer_id);
     assert_eq!(grant["grant"]["role"], "writer");
+    let share = owner.share(&writer_id);
+    let share_id = share["share"]["share_id"]
+        .as_str()
+        .expect("share id")
+        .to_string();
+    let available = writer.available();
+    assert!(available["available"]
+        .as_array()
+        .expect("available shares")
+        .iter()
+        .any(|share| share["share"]["share_id"] == share_id));
+    let accept = writer.accept(&share_id);
+    assert_eq!(accept["fs"]["fs_id"], fs_id);
+    assert!(
+        !serde_json::to_string(&accept)
+            .expect("accept json string")
+            .contains(fixture.remote_root.to_str().expect("utf8 remote root")),
+        "accept JSON must not expose backing source paths"
+    );
 
     let attach = writer.attach();
     assert_eq!(attach["attach"]["fs"]["fs_id"], fs_id);
@@ -318,12 +354,16 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
     let writer = fixture.agent("writer");
     let manager = fixture.agent("manager");
 
-    owner.register("owner");
-    owner.create_fs(&fixture.remote_root);
+    owner.login("owner");
+    owner.create_fs();
 
-    let reader_id = reader.register("reader");
-    reader.add_backing_source(&fixture.remote_root);
+    let reader_id = reader.login("reader");
     owner.grant(&reader_id, "reader");
+    let reader_share = owner.share(&reader_id);
+    let reader_share_id = reader_share["share"]["share_id"]
+        .as_str()
+        .expect("share id");
+    reader.accept(reader_share_id);
     reader.attach();
     reader.write_local("reader-draft.txt", "reader local draft");
     assert_json_error(&reader.commit_apply_output("reader draft"), "grant_denied");
@@ -332,8 +372,7 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
         "reader local draft must not become shared truth"
     );
 
-    let stranger_id = stranger.register("stranger");
-    stranger.add_backing_source(&fixture.remote_root);
+    let stranger_id = stranger.login("stranger");
     assert_json_error(
         &stranger.attach_output(&stranger.local_root),
         "grant_denied",
@@ -343,9 +382,13 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
         "failed ungranted attach must not write root marker"
     );
 
-    let writer_id = writer.register("writer");
-    writer.add_backing_source(&fixture.remote_root);
+    let writer_id = writer.login("writer");
     owner.grant(&writer_id, "writer");
+    let writer_share = owner.share(&writer_id);
+    let writer_share_id = writer_share["share"]["share_id"]
+        .as_str()
+        .expect("share id");
+    writer.accept(writer_share_id);
     writer.attach();
     owner.grant(&writer_id, "reader");
     writer.write_local("writer-after-downgrade.txt", "writer local draft");
@@ -358,9 +401,13 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
         "downgraded writer draft must not become shared truth"
     );
 
-    let manager_id = manager.register("manager");
-    manager.add_backing_source(&fixture.remote_root);
+    let manager_id = manager.login("manager");
     owner.grant(&manager_id, "manager");
+    let manager_share = owner.share(&manager_id);
+    let manager_share_id = manager_share["share"]["share_id"]
+        .as_str()
+        .expect("share id");
+    manager.accept(manager_share_id);
     let manager_grant = manager.grant(&stranger_id, "reader");
     assert_eq!(manager_grant["grant"]["agent_id"], stranger_id);
     assert_eq!(manager_grant["grant"]["role"], "reader");
@@ -383,17 +430,25 @@ fn e2e_stale_writer_cannot_overwrite_new_truth() {
     let writer_a = fixture.agent("writer-a");
     let writer_b = fixture.agent("writer-b");
 
-    owner.register("owner");
-    owner.create_fs(&fixture.remote_root);
+    owner.login("owner");
+    owner.create_fs();
 
-    let writer_a_id = writer_a.register("writer-a");
-    writer_a.add_backing_source(&fixture.remote_root);
+    let writer_a_id = writer_a.login("writer-a");
     owner.grant(&writer_a_id, "writer");
+    let writer_a_share = owner.share(&writer_a_id);
+    let writer_a_share_id = writer_a_share["share"]["share_id"]
+        .as_str()
+        .expect("share id");
+    writer_a.accept(writer_a_share_id);
     writer_a.attach();
 
-    let writer_b_id = writer_b.register("writer-b");
-    writer_b.add_backing_source(&fixture.remote_root);
+    let writer_b_id = writer_b.login("writer-b");
     owner.grant(&writer_b_id, "writer");
+    let writer_b_share = owner.share(&writer_b_id);
+    let writer_b_share_id = writer_b_share["share"]["share_id"]
+        .as_str()
+        .expect("share id");
+    writer_b.accept(writer_b_share_id);
     writer_b.attach();
 
     writer_a.write_local("docs/shared.txt", "from writer a");
@@ -433,8 +488,8 @@ fn e2e_hardening_rejects_unsafe_backing_source_and_attach_root() {
     let non_empty = AgentFsFixture::new();
     fs::write(non_empty.path("preexisting.txt"), "not imported").expect("write remote file");
     let owner = non_empty.agent("owner");
-    owner.register("owner");
-    let create = owner.create_fs_output(&non_empty.remote_root);
+    owner.login("owner");
+    let create = owner.create_fs_output();
     assert!(
         !create.status.success(),
         "fs create unexpectedly accepted non-empty backing source\nstdout: {}\nstderr: {}",
@@ -459,8 +514,8 @@ fn e2e_hardening_rejects_unsafe_backing_source_and_attach_root() {
 
     let overlap = AgentFsFixture::new();
     let owner = overlap.agent("owner");
-    owner.register("owner");
-    owner.create_fs(&overlap.remote_root);
+    owner.login("owner");
+    owner.create_fs();
     let attach = owner.attach_output(&overlap.remote_root);
     assert!(
         !attach.status.success(),
@@ -479,8 +534,8 @@ fn e2e_hardening_rejects_unsafe_backing_source_and_attach_root() {
 fn e2e_hardening_rejects_symlink_commit_paths() {
     let fixture = AgentFsFixture::new();
     let owner = fixture.agent("owner");
-    owner.register("owner");
-    owner.create_fs(&fixture.remote_root);
+    owner.login("owner");
+    owner.create_fs();
     owner.attach();
 
     let outside_file = fixture.root.join("outside-secret.txt");

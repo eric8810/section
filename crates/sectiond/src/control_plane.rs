@@ -1,3 +1,4 @@
+use crate::control_service::FilesystemCreateResult;
 use crate::sync::{
     compare_path as sync_compare_path, list_watch_events, resolve_path as sync_resolve_path,
     sync_source as run_source_sync, sync_source_with_options as run_source_sync_with_options,
@@ -5,8 +6,10 @@ use crate::sync::{
     SourceSyncResult, SyncLifecycleObserver,
 };
 use crate::{
-    agentfs, AgentFsCapability, AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsError,
-    AgentFsGrantRecord, AgentFsHeadRecord, AgentFsMaterializationState, AgentFsRecord, AgentFsRole,
+    agentfs, AgentFsAcceptResult, AgentFsAvailableShare, AgentFsCapability,
+    AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsError, AgentFsGrantRecord,
+    AgentFsHeadRecord, AgentFsMaterializationState, AgentFsRecord, AgentFsRole, AgentFsShareResult,
+    ControlServiceStore,
 };
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
@@ -14,7 +17,10 @@ use opendal::{EntryMode, Operator, Scheme};
 use ring::digest::{digest, SHA256};
 use section_core::config::{CacheConfig, SourceConfig};
 use section_core::SectionConfig;
-use section_provider::{AgentIdentityRecord, PathSyncStateRecord, ProviderStore, SyncEventRecord};
+use section_provider::{
+    AcceptedFilesystemRecord, AgentFsMountRecord, AgentIdentityRecord,
+    CredentialBindingCacheRecord, PathSyncStateRecord, ProviderStore, SyncEventRecord,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -46,7 +52,11 @@ pub struct RootDiscoveryMarker {
     #[serde(default)]
     pub fs_id: Option<String>,
     #[serde(default)]
+    pub source_profile_id: Option<String>,
+    #[serde(default)]
     pub agent_id: Option<String>,
+    #[serde(default)]
+    pub installation_id: Option<String>,
     #[serde(default)]
     pub base_commit_id: Option<String>,
 }
@@ -126,6 +136,7 @@ pub struct AgentFsCommitApplyResult {
 pub struct SectiondControlPlane {
     config: SectionConfig,
     store: ProviderStore,
+    control_service: ControlServiceStore,
 }
 
 impl SectiondControlPlane {
@@ -133,70 +144,68 @@ impl SectiondControlPlane {
         let config = SectionConfig::load(config_path)?;
         config.ensure_dirs()?;
         let store = ProviderStore::open(&config.data_dir)?;
-        Ok(Self { config, store })
+        let control_service = ControlServiceStore::open(&config)?;
+        Ok(Self {
+            config,
+            store,
+            control_service,
+        })
     }
 
     pub fn agent_register(&self, name: &str) -> Result<AgentIdentityRecord> {
-        self.store.register_agent_identity(name)
+        self.agent_login(name)
+    }
+
+    pub fn agent_login(&self, name: &str) -> Result<AgentIdentityRecord> {
+        let existing = self.store.get_agent_identity()?;
+        let existing_installation_id = existing.as_ref().and_then(|identity| {
+            (identity.name == name).then_some(identity.installation_id.as_str())
+        });
+        let auth_token = existing
+            .as_ref()
+            .and_then(|identity| (identity.name == name).then_some(identity.auth_token.as_str()));
+        let identity =
+            self.control_service
+                .login_agent(name, existing_installation_id, auth_token)?;
+        self.store.cache_agent_identity(&identity)?;
+        Ok(identity)
     }
 
     pub fn agent_identify(&self) -> Result<Option<AgentIdentityRecord>> {
         self.store.get_agent_identity()
     }
 
-    pub fn fs_create(
-        &self,
-        name: &str,
-        provider: &str,
-        options: HashMap<String, String>,
-    ) -> Result<AgentFsRecord> {
+    pub fn fs_create(&self, name: &str, source_profile_name: &str) -> Result<AgentFsRecord> {
         let agent = self.require_agent_identity()?;
-        if self.find_source(name)?.is_some() {
-            bail!("source {name} already exists; fs create will not overwrite existing sources");
-        }
-        let operator = build_operator(provider, &options)?;
+        let (_source_profile, source) = self
+            .control_service
+            .source_profile_by_name(source_profile_name)?;
+        let operator = build_operator(&source.provider, &source.options)?;
         let rt = tokio::runtime::Runtime::new()?;
 
         if agentfs::read_optional_json::<AgentFsRecord>(&rt, &operator, agentfs::FS_PATH)?.is_some()
         {
-            bail!("source {name} already contains AgentFS metadata");
+            bail!("source profile {source_profile_name} already contains AgentFS metadata");
         }
-        ensure_backing_source_is_empty(&rt, &operator, name)?;
+        ensure_backing_source_is_empty(&rt, &operator, source_profile_name)?;
 
-        let source = self.source_add(name, provider, options)?;
+        let created = self
+            .control_service
+            .create_filesystem(name, source_profile_name, &agent)?;
+        self.ensure_local_source_from_config(&created.fs.source_name, &created.source)?;
+        self.cache_accepted_filesystem(&created.fs, created.event.created_at_ms)?;
 
-        let fs = AgentFsRecord {
-            schema_version: agentfs::SCHEMA_VERSION,
-            fs_id: agentfs::new_fs_id()?,
-            name: name.to_string(),
-            owner_agent_id: agent.agent_id.clone(),
-            source_name: source.name.clone(),
-            created_at_ms: agentfs::now_ms(),
-        };
-
-        if let Err(err) = agentfs::initialize_fs_metadata(&rt, &operator, &fs, &agent) {
-            let _ = self.source_remove(&source.name);
+        if let Err(err) = mirror_created_filesystem(&rt, &operator, &created) {
+            let _ = self.source_remove(&created.fs.source_name);
             return Err(err);
         }
-        Ok(fs)
+        Ok(created.fs)
     }
 
     pub fn fs_list(&self) -> Result<Vec<AgentFsRecord>> {
-        let runtime = self.runtime()?;
-        let rt = tokio::runtime::Runtime::new()?;
-        let mut records = Vec::new();
-
-        for source in self.list_sources()? {
-            let operator = runtime.router().get_operator(&source.name)?;
-            if let Some(fs) =
-                agentfs::read_optional_json::<AgentFsRecord>(&rt, operator, agentfs::FS_PATH)?
-            {
-                records.push(fs);
-            }
-        }
-
-        records.sort_by(|left, right| left.name.cmp(&right.name));
-        Ok(records)
+        let agent = self.require_agent_identity()?;
+        self.control_service
+            .list_filesystems_for_agent(&agent.agent_id)
     }
 
     pub fn fs_grant(
@@ -206,177 +215,88 @@ impl SectiondControlPlane {
         role: AgentFsRole,
     ) -> Result<AgentFsGrantRecord> {
         let actor = self.require_agent_identity()?;
-        agentfs::validate_agent_id(agent_id)?;
-        if role == AgentFsRole::Owner {
-            anyhow::bail!(AgentFsError::grant_denied(
-                "owner grants are not supported in the MVP"
-            ));
-        }
-
-        let runtime = self.runtime()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let resolved = self.find_agentfs(&rt, &runtime, fs_ref)?;
-        let lock = agentfs::acquire_head_lock(
-            &rt,
-            &resolved.operator,
-            &resolved.fs.fs_id,
-            &actor.agent_id,
-        )?;
-        let result = (|| -> Result<AgentFsGrantRecord> {
-            let grants = agentfs::list_grants(&rt, &resolved.operator)?;
-            agentfs::ensure_capability(
-                &resolved.fs,
-                &grants,
-                &actor.agent_id,
-                AgentFsCapability::Manage,
-            )?;
-            if actor.agent_id == agent_id
-                && role.has_capability(AgentFsCapability::Commit)
-                && !agentfs::has_capability(
-                    &resolved.fs,
-                    &grants,
-                    &actor.agent_id,
-                    AgentFsCapability::Commit,
-                )
-            {
-                anyhow::bail!(AgentFsError::grant_denied(
-                    "manager cannot grant commit access to itself"
-                ));
-            }
-            if agent_id == resolved.fs.owner_agent_id {
-                anyhow::bail!(AgentFsError::grant_denied(
-                    "owner grant cannot be replaced in the MVP"
-                ));
-            }
-
-            let now = agentfs::now_ms();
-            for mut existing in grants
-                .into_iter()
-                .filter(|grant| grant.agent_id == agent_id && grant.is_active())
-            {
-                if existing.role == AgentFsRole::Owner {
-                    anyhow::bail!(AgentFsError::grant_denied(
-                        "owner grant cannot be replaced in the MVP"
-                    ));
-                }
-                existing.revoked_at_ms = Some(now);
-                existing.revoked_by = Some(actor.agent_id.clone());
-                agentfs::write_grant(&rt, &resolved.operator, &existing)?;
-                let revoked_event = agentfs::event_record(
-                    &resolved.fs.fs_id,
-                    "grant.revoked",
-                    &actor.agent_id,
-                    &existing.grant_id,
-                    None,
-                    serde_json::json!({
-                        "agent_id": existing.agent_id,
-                        "reason": "replaced",
-                    }),
-                )?;
-                agentfs::write_event(&rt, &resolved.operator, &revoked_event)?;
-            }
-
-            let grant = agentfs::grant_record(&resolved.fs, agent_id, role, &actor.agent_id)?;
-            agentfs::write_grant(&rt, &resolved.operator, &grant)?;
-            let event = agentfs::event_record(
-                &resolved.fs.fs_id,
-                "grant.created",
-                &actor.agent_id,
-                &grant.grant_id,
-                None,
-                serde_json::json!({
-                    "agent_id": grant.agent_id,
-                    "role": grant.role,
-                }),
-            )?;
-            agentfs::write_event(&rt, &resolved.operator, &event)?;
-            Ok(grant)
-        })();
-        agentfs::release_head_lock(&rt, &resolved.operator, &lock)?;
-        result
+        let resolved = self.find_agentfs(&rt, fs_ref)?;
+        let mutation =
+            self.control_service
+                .fs_grant(&resolved.fs.fs_id, &actor.agent_id, agent_id, role)?;
+        for revoked in &mutation.revoked {
+            agentfs::write_grant(&rt, &resolved.operator, revoked)?;
+        }
+        agentfs::write_grant(&rt, &resolved.operator, &mutation.grant)?;
+        for event in &mutation.events {
+            agentfs::write_event(&rt, &resolved.operator, event)?;
+        }
+        Ok(mutation.grant)
     }
 
     pub fn fs_revoke(&self, fs_ref: &str, agent_id: &str) -> Result<Vec<AgentFsGrantRecord>> {
         let actor = self.require_agent_identity()?;
-        agentfs::validate_agent_id(agent_id)?;
-        let runtime = self.runtime()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let resolved = self.find_agentfs(&rt, &runtime, fs_ref)?;
-        let lock = agentfs::acquire_head_lock(
-            &rt,
-            &resolved.operator,
-            &resolved.fs.fs_id,
-            &actor.agent_id,
+        let resolved = self.find_agentfs(&rt, fs_ref)?;
+        let mutation =
+            self.control_service
+                .fs_revoke(&resolved.fs.fs_id, &actor.agent_id, agent_id)?;
+        for revoked in &mutation.revoked {
+            agentfs::write_grant(&rt, &resolved.operator, revoked)?;
+        }
+        for event in &mutation.events {
+            agentfs::write_event(&rt, &resolved.operator, event)?;
+        }
+        Ok(mutation.revoked)
+    }
+
+    pub fn fs_share(&self, fs_ref: &str, agent_id: &str) -> Result<AgentFsShareResult> {
+        let actor = self.require_agent_identity()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let resolved = self.find_agentfs(&rt, fs_ref)?;
+        self.control_service
+            .fs_share(&resolved.fs.fs_id, &actor.agent_id, agent_id)
+    }
+
+    pub fn fs_available(&self) -> Result<Vec<AgentFsAvailableShare>> {
+        let actor = self.require_agent_identity()?;
+        self.control_service.available_shares(&actor.agent_id)
+    }
+
+    pub fn fs_accept(&self, share_id: &str) -> Result<AgentFsAcceptResult> {
+        let actor = self.require_agent_identity()?;
+        let (accepted, source) =
+            self.control_service
+                .accept_share(share_id, &actor.agent_id, &actor.installation_id)?;
+        self.ensure_local_source_from_config(&accepted.fs.source_name, &source)?;
+        self.cache_accepted_filesystem(
+            &accepted.fs,
+            accepted
+                .share
+                .accepted_at_ms
+                .unwrap_or_else(agentfs::now_ms),
         )?;
-        let result = (|| -> Result<Vec<AgentFsGrantRecord>> {
-            let grants = agentfs::list_grants(&rt, &resolved.operator)?;
-            agentfs::ensure_capability(
-                &resolved.fs,
-                &grants,
-                &actor.agent_id,
-                AgentFsCapability::Manage,
-            )?;
-
-            if agent_id == resolved.fs.owner_agent_id {
-                anyhow::bail!(AgentFsError::grant_denied(
-                    "owner grant cannot be revoked in the MVP"
-                ));
-            }
-
-            let now = agentfs::now_ms();
-            let mut revoked = Vec::new();
-            for mut grant in grants
-                .into_iter()
-                .filter(|grant| grant.agent_id == agent_id && grant.is_active())
-            {
-                if grant.role == AgentFsRole::Owner {
-                    anyhow::bail!(AgentFsError::grant_denied(
-                        "owner grant cannot be revoked in the MVP"
-                    ));
-                }
-                grant.revoked_at_ms = Some(now);
-                grant.revoked_by = Some(actor.agent_id.clone());
-                agentfs::write_grant(&rt, &resolved.operator, &grant)?;
-                let event = agentfs::event_record(
-                    &resolved.fs.fs_id,
-                    "grant.revoked",
-                    &actor.agent_id,
-                    &grant.grant_id,
-                    None,
-                    serde_json::json!({ "agent_id": grant.agent_id }),
-                )?;
-                agentfs::write_event(&rt, &resolved.operator, &event)?;
-                revoked.push(grant);
-            }
-
-            if revoked.is_empty() {
-                anyhow::bail!(AgentFsError::grant_denied(format!(
-                    "agent {agent_id} has no active grant on fs {}",
-                    resolved.fs.fs_id
-                )));
-            }
-
-            Ok(revoked)
-        })();
-        agentfs::release_head_lock(&rt, &resolved.operator, &lock)?;
-        result
+        self.cache_credential_binding_record(&accepted.credential_binding)?;
+        Ok(accepted)
     }
 
     pub fn fs_attach(&self, fs_ref: &str, local_root: &Path) -> Result<AgentFsAttachResult> {
         let actor = self.require_agent_identity()?;
-        let runtime = self.runtime()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let resolved = self.find_agentfs(&rt, &runtime, fs_ref)?;
-        agentfs::ensure_capability(
-            &resolved.fs,
-            &resolved.grants,
+        let resolved = self.find_agentfs(&rt, fs_ref)?;
+        let issued = self.control_service.issue_credential(
+            &resolved.fs.fs_id,
             &actor.agent_id,
-            AgentFsCapability::Read,
+            &actor.installation_id,
         )?;
+        self.ensure_local_source_from_config(&resolved.fs.source_name, &issued.source)?;
+        self.cache_accepted_filesystem(&resolved.fs, issued.binding.issued_at_ms)?;
+        self.cache_credential_binding_record(&issued.binding)?;
         ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
 
         let local_root = absolutize_path(local_root)?;
         ensure_attach_root_does_not_overlap_backing_root(&resolved.source, &local_root)?;
+        ensure_local_root_does_not_overlap_existing(
+            &self.store,
+            &resolved.source.name,
+            &local_root,
+        )?;
         ensure_attach_root_is_empty(&local_root)?;
         let previous_root = self.store.get_source_local_root(&resolved.source.name)?;
         self.store
@@ -385,12 +305,15 @@ impl SectiondControlPlane {
             &resolved.source.name,
             &local_root,
             &resolved.fs.fs_id,
+            &resolved.fs.source_profile_id,
             &actor.agent_id,
+            &actor.installation_id,
+            &self.control_service.endpoint(),
             resolved.head.commit_id.clone(),
         )?;
 
         self.store.clear_source_sync_state(&resolved.source.name)?;
-        let sync = match self.source_sync(&resolved.source.name) {
+        let sync = match self.source_sync_internal(&resolved.source.name) {
             Ok(sync) if sync.conflicts == 0 => sync,
             Ok(sync) => {
                 self.rollback_failed_attach(
@@ -412,6 +335,16 @@ impl SectiondControlPlane {
                 return Err(err);
             }
         };
+        self.store.upsert_agentfs_mount(&AgentFsMountRecord {
+            source_name: resolved.source.name.clone(),
+            fs_id: resolved.fs.fs_id.clone(),
+            source_profile_id: resolved.fs.source_profile_id.clone(),
+            agent_id: actor.agent_id.clone(),
+            installation_id: actor.installation_id.clone(),
+            local_root: local_root.clone(),
+            base_commit_id: resolved.head.commit_id.clone(),
+            updated_at_ms: agentfs::now_ms(),
+        })?;
 
         if let Some(previous_root) = previous_root {
             if previous_root != local_root {
@@ -443,27 +376,22 @@ impl SectiondControlPlane {
     }
 
     pub fn fs_status(&self, fs_ref: &str) -> Result<AgentFsStatusSnapshot> {
-        let runtime = self.runtime()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let resolved = self.find_agentfs(&rt, &runtime, fs_ref)?;
+        let resolved = self.find_agentfs(&rt, fs_ref)?;
         let materialization_state =
             head_materialization_state(&rt, &resolved.operator, &resolved.head)?;
         let agent = self.agent_identify()?;
-        let role = agent.as_ref().and_then(|agent| {
-            resolved
-                .grants
-                .iter()
-                .find(|grant| grant.agent_id == agent.agent_id && grant.is_active())
-                .map(|grant| grant.role)
-                .or_else(|| {
-                    (resolved.fs.owner_agent_id == agent.agent_id).then_some(AgentFsRole::Owner)
-                })
-        });
+        let role = match agent.as_ref() {
+            Some(agent) => self
+                .control_service
+                .active_role(&resolved.fs, &agent.agent_id)?,
+            None => None,
+        };
         let local_root = self.store.get_source_local_root(&resolved.source.name)?;
-        let base_commit_id = local_root
-            .as_ref()
-            .and_then(|root| read_root_marker_at_root(root).ok())
-            .and_then(|marker| marker.base_commit_id);
+        let base_commit_id = self
+            .store
+            .get_agentfs_mount(&resolved.source.name)?
+            .and_then(|mount| mount.base_commit_id);
 
         Ok(AgentFsStatusSnapshot {
             fs: resolved.fs,
@@ -478,31 +406,30 @@ impl SectiondControlPlane {
 
     pub fn commit_status(&self, input_path: &Path) -> Result<AgentFsCommitStatus> {
         let actor = self.require_agent_identity()?;
-        let runtime = self.runtime()?;
         let rt = tokio::runtime::Runtime::new()?;
         let marker = discover_root_marker(&absolutize_path(input_path)?)?;
         let fs_id = marker
             .fs_id
             .clone()
             .ok_or_else(|| AgentFsError::unknown_fs(&marker.source_id))?;
-        let resolved = self.find_agentfs(&rt, &runtime, &fs_id)?;
-        agentfs::ensure_capability(
-            &resolved.fs,
-            &resolved.grants,
+        let resolved = self.find_agentfs(&rt, &fs_id)?;
+        self.control_service.authorize_capability(
+            &resolved.fs.fs_id,
             &actor.agent_id,
             AgentFsCapability::Read,
         )?;
         ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
 
-        let local_root = local_root_from_marker(&self.store, &resolved.source.name, &marker)?;
+        let mount = local_mount_from_marker(&self.store, &resolved.source.name, &marker)?;
+        let local_root = mount.local_root.clone();
         let dirty_paths = collect_dirty_paths(&rt, &resolved.operator, &local_root)?;
-        let stale = marker.base_commit_id != resolved.head.commit_id;
+        let stale = mount.base_commit_id != resolved.head.commit_id;
 
         Ok(AgentFsCommitStatus {
             fs: resolved.fs,
             source_name: resolved.source.name,
             local_root,
-            base_commit_id: marker.base_commit_id,
+            base_commit_id: mount.base_commit_id,
             current_head_commit_id: resolved.head.commit_id,
             stale,
             dirty_paths,
@@ -520,31 +447,30 @@ impl SectiondControlPlane {
         }
 
         let actor = self.require_agent_identity()?;
-        let runtime = self.runtime()?;
         let rt = tokio::runtime::Runtime::new()?;
         let marker = discover_root_marker(&absolutize_path(input_path)?)?;
         let fs_id = marker
             .fs_id
             .clone()
             .ok_or_else(|| AgentFsError::unknown_fs(&marker.source_id))?;
-        let resolved = self.find_agentfs(&rt, &runtime, &fs_id)?;
-        agentfs::ensure_capability(
-            &resolved.fs,
-            &resolved.grants,
+        let resolved = self.find_agentfs(&rt, &fs_id)?;
+        self.control_service.authorize_capability(
+            &resolved.fs.fs_id,
             &actor.agent_id,
             AgentFsCapability::Commit,
         )?;
         ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
 
-        if marker.base_commit_id != resolved.head.commit_id {
+        let mount = local_mount_from_marker(&self.store, &resolved.source.name, &marker)?;
+        if mount.base_commit_id != resolved.head.commit_id {
             anyhow::bail!(AgentFsError::stale_base(
                 &resolved.fs.fs_id,
-                marker.base_commit_id.as_deref(),
+                mount.base_commit_id.as_deref(),
                 resolved.head.commit_id.as_deref(),
             ));
         }
 
-        let local_root = local_root_from_marker(&self.store, &resolved.source.name, &marker)?;
+        let local_root = mount.local_root.clone();
         let dirty_paths = collect_dirty_paths(&rt, &resolved.operator, &local_root)?;
         if dirty_paths.is_empty() {
             bail!(
@@ -565,10 +491,8 @@ impl SectiondControlPlane {
                 &resolved.operator,
                 agentfs::HEAD_PATH,
             )?;
-            let grants = agentfs::list_grants(&rt, &resolved.operator)?;
-            agentfs::ensure_capability(
-                &resolved.fs,
-                &grants,
+            let authorized_by = self.control_service.authorize_capability(
+                &resolved.fs.fs_id,
                 &actor.agent_id,
                 AgentFsCapability::Commit,
             )?;
@@ -578,10 +502,10 @@ impl SectiondControlPlane {
                 &current_head,
                 &resolved.fs.fs_id,
             )?;
-            if marker.base_commit_id != current_head.commit_id {
+            if mount.base_commit_id != current_head.commit_id {
                 anyhow::bail!(AgentFsError::stale_base(
                     &resolved.fs.fs_id,
-                    marker.base_commit_id.as_deref(),
+                    mount.base_commit_id.as_deref(),
                     current_head.commit_id.as_deref(),
                 ));
             }
@@ -594,6 +518,7 @@ impl SectiondControlPlane {
                 agent_id: actor.agent_id.clone(),
                 summary: summary.to_string(),
                 paths: dirty_paths,
+                authorized_by: Some(authorized_by.clone()),
                 created_at_ms: agentfs::now_ms(),
                 materialization_state: AgentFsMaterializationState::Pending,
                 materialized_at_ms: None,
@@ -613,7 +538,11 @@ impl SectiondControlPlane {
                 &actor.agent_id,
                 &commit.commit_id,
                 None,
-                serde_json::json!({ "summary": commit.summary, "paths": commit.paths }),
+                serde_json::json!({
+                    "summary": commit.summary,
+                    "paths": commit.paths,
+                    "authorized_by": authorized_by,
+                }),
             )?;
             agentfs::write_event(&rt, &resolved.operator, &accepted_event)?;
             Ok(commit)
@@ -621,7 +550,7 @@ impl SectiondControlPlane {
         agentfs::release_head_lock(&rt, &resolved.operator, &lock)?;
         let mut commit = accepted?;
 
-        match self.source_sync(&resolved.source.name) {
+        match self.source_sync_internal(&resolved.source.name) {
             Ok(sync) if sync.conflicts == 0 => {
                 commit.materialization_state = AgentFsMaterializationState::Materialized;
                 commit.materialized_at_ms = Some(agentfs::now_ms());
@@ -639,9 +568,22 @@ impl SectiondControlPlane {
                     &resolved.source.name,
                     &local_root,
                     &resolved.fs.fs_id,
+                    &resolved.fs.source_profile_id,
                     &actor.agent_id,
+                    &actor.installation_id,
+                    &self.control_service.endpoint(),
                     Some(commit.commit_id.clone()),
                 )?;
+                self.store.upsert_agentfs_mount(&AgentFsMountRecord {
+                    source_name: resolved.source.name.clone(),
+                    fs_id: resolved.fs.fs_id.clone(),
+                    source_profile_id: resolved.fs.source_profile_id.clone(),
+                    agent_id: actor.agent_id.clone(),
+                    installation_id: actor.installation_id.clone(),
+                    local_root: local_root.clone(),
+                    base_commit_id: Some(commit.commit_id.clone()),
+                    updated_at_ms: agentfs::now_ms(),
+                })?;
                 Ok(AgentFsCommitApplyResult { commit, sync })
             }
             Ok(sync) => {
@@ -690,6 +632,7 @@ impl SectiondControlPlane {
         options: HashMap<String, String>,
     ) -> Result<SourceRegistryEntry> {
         self.ensure_name_is_not_config_owned(name, "change")?;
+        self.ensure_name_is_not_agentfs_owned(name, "change")?;
 
         let source = SourceConfig {
             provider: provider.to_string(),
@@ -703,8 +646,10 @@ impl SectiondControlPlane {
 
     pub fn source_remove(&self, name: &str) -> Result<()> {
         self.ensure_name_is_not_config_owned(name, "remove")?;
+        self.ensure_source_is_not_agentfs_owned(name, "remove")?;
         let previous_root = self.store.get_source_local_root(name)?;
         self.store.remove_source(name)?;
+        self.store.remove_agentfs_mount(name)?;
         if let Some(previous_root) = previous_root {
             remove_root_marker(&previous_root)?;
         }
@@ -712,6 +657,10 @@ impl SectiondControlPlane {
     }
 
     pub fn list_sources(&self) -> Result<Vec<SourceRegistryEntry>> {
+        self.list_sources_internal(false)
+    }
+
+    fn list_sources_internal(&self, include_agentfs: bool) -> Result<Vec<SourceRegistryEntry>> {
         let store_sources = self.store.load_all()?;
         let binding_map = self
             .store
@@ -725,6 +674,9 @@ impl SectiondControlPlane {
 
         let mut entries = Vec::with_capacity(source_names.len());
         for name in source_names {
+            if !include_agentfs && self.store.is_agentfs_source(&name)? {
+                continue;
+            }
             let origin = match (
                 self.config.sources.contains_key(&name),
                 store_sources.contains_key(&name),
@@ -769,9 +721,10 @@ impl SectiondControlPlane {
         name: &str,
         local_root: &Path,
     ) -> Result<SourceRegistryEntry> {
-        self.ensure_source_exists(name)?;
+        self.ensure_public_source_exists(name)?;
 
         let local_root = absolutize_path(local_root)?;
+        ensure_local_root_does_not_overlap_existing(&self.store, name, &local_root)?;
         let previous_root = self.store.get_source_local_root(name)?;
         self.store.set_source_local_root(name, &local_root)?;
         if previous_root.as_ref() != Some(&local_root) {
@@ -790,10 +743,11 @@ impl SectiondControlPlane {
     }
 
     pub fn source_unbind_local_root(&self, name: &str) -> Result<()> {
-        self.ensure_source_exists(name)?;
+        self.ensure_public_source_exists(name)?;
 
         if let Some(previous_root) = self.store.get_source_local_root(name)? {
             self.store.remove_source_local_root(name)?;
+            self.store.remove_agentfs_mount(name)?;
             remove_root_marker(&previous_root)?;
         }
 
@@ -803,6 +757,10 @@ impl SectiondControlPlane {
     pub fn path_inspect(&self, input_path: &Path) -> Result<PathInspectSnapshot> {
         let local_path = absolutize_path(input_path)?;
         let marker = discover_root_marker(&local_path)?;
+        self.ensure_source_is_not_agentfs_owned(
+            &marker.source_id,
+            "inspect through low-level path commands",
+        )?;
         let authoritative_root = self
             .store
             .get_source_local_root(&marker.source_id)?
@@ -835,7 +793,7 @@ impl SectiondControlPlane {
     }
 
     pub fn source_sync(&self, name: &str) -> Result<SourceSyncResult> {
-        self.ensure_source_exists(name)?;
+        self.ensure_public_source_exists(name)?;
         let local_root = self.source_local_root(name)?;
         let runtime = self.runtime()?;
         run_source_sync(&runtime, &self.store, name, &local_root)
@@ -847,17 +805,27 @@ impl SectiondControlPlane {
         options: &SourceSyncOptions,
         lifecycle: Option<SyncLifecycleObserver>,
     ) -> Result<SourceSyncResult> {
-        self.ensure_source_exists(name)?;
+        self.ensure_public_source_exists(name)?;
         let local_root = self.source_local_root(name)?;
         let runtime = self.runtime()?;
         run_source_sync_with_options(&runtime, &self.store, name, &local_root, options, lifecycle)
     }
 
     pub fn source_local_root(&self, name: &str) -> Result<PathBuf> {
-        self.ensure_source_exists(name)?;
+        self.ensure_public_source_exists(name)?;
         self.store
             .get_source_local_root(name)?
             .ok_or_else(|| anyhow::anyhow!("source {name} has no bound local root"))
+    }
+
+    fn source_sync_internal(&self, name: &str) -> Result<SourceSyncResult> {
+        self.ensure_source_exists(name)?;
+        let local_root = self
+            .store
+            .get_source_local_root(name)?
+            .ok_or_else(|| anyhow::anyhow!("source {name} has no bound local root"))?;
+        let runtime = self.runtime_including_agentfs()?;
+        run_source_sync(&runtime, &self.store, name, &local_root)
     }
 
     pub fn path_compare(&self, input_path: &Path) -> Result<PathCompareSnapshot> {
@@ -929,13 +897,53 @@ impl SectiondControlPlane {
         })
     }
 
+    fn ensure_local_source_from_config(&self, name: &str, source: &SourceConfig) -> Result<()> {
+        self.ensure_name_is_not_config_owned(name, "change")?;
+        self.store.add_source(name, source)?;
+        Ok(())
+    }
+
+    fn cache_accepted_filesystem(&self, fs: &AgentFsRecord, accepted_at_ms: i64) -> Result<()> {
+        self.store
+            .cache_accepted_filesystem(&AcceptedFilesystemRecord {
+                fs_id: fs.fs_id.clone(),
+                name: fs.name.clone(),
+                owner_agent_id: fs.owner_agent_id.clone(),
+                source_profile_id: fs.source_profile_id.clone(),
+                source_name: fs.source_name.clone(),
+                accepted_at_ms,
+            })?;
+        Ok(())
+    }
+
+    fn cache_credential_binding_record(
+        &self,
+        binding: &crate::AgentFsCredentialBindingRecord,
+    ) -> Result<()> {
+        self.store
+            .cache_credential_binding(&CredentialBindingCacheRecord {
+                credential_binding_id: binding.credential_binding_id.clone(),
+                fs_id: binding.fs_id.clone(),
+                agent_id: binding.agent_id.clone(),
+                installation_id: binding.installation_id.clone(),
+                source_profile_id: binding.source_profile_id.clone(),
+                issued_at_ms: binding.issued_at_ms,
+                expires_at_ms: binding.expires_at_ms,
+            })?;
+        Ok(())
+    }
+
     fn runtime(&self) -> Result<SectiondRuntime> {
         SectiondRuntime::from_config_and_store(&self.config, &self.store)
     }
 
+    fn runtime_including_agentfs(&self) -> Result<SectiondRuntime> {
+        SectiondRuntime::from_config_and_store_including_agentfs(&self.config, &self.store)
+    }
+
     fn find_source(&self, name: &str) -> Result<Option<SourceRegistryEntry>> {
         Ok(self
-            .list_sources()?
+            .list_sources_internal(true)?
             .into_iter()
             .find(|entry| entry.name == name))
     }
@@ -947,9 +955,37 @@ impl SectiondControlPlane {
         Ok(())
     }
 
+    fn ensure_public_source_exists(&self, name: &str) -> Result<()> {
+        self.ensure_source_exists(name)?;
+        self.ensure_source_is_not_agentfs_owned(name, "use through low-level source commands")?;
+        Ok(())
+    }
+
+    fn ensure_name_is_not_agentfs_owned(&self, name: &str, action: &str) -> Result<()> {
+        if self.store.is_agentfs_source(name)? {
+            bail!(
+                "Source '{name}' is managed by AgentFS and cannot be changed through low-level source commands; use AgentFS commands to {action} it."
+            );
+        }
+        Ok(())
+    }
+
+    fn ensure_source_is_not_agentfs_owned(&self, name: &str, action: &str) -> Result<()> {
+        if self.store.is_agentfs_source(name)? {
+            bail!(
+                "Source '{name}' is managed by AgentFS and cannot be used through low-level source commands; use AgentFS commands to {action} it."
+            );
+        }
+        Ok(())
+    }
+
     fn resolve_local_path(&self, input_path: &Path) -> Result<(String, PathBuf, PathBuf, String)> {
         let local_path = absolutize_path(input_path)?;
         let marker = discover_root_marker(&local_path)?;
+        self.ensure_source_is_not_agentfs_owned(
+            &marker.source_id,
+            "use through low-level path commands",
+        )?;
         let local_root = self
             .store
             .get_source_local_root(&marker.source_id)?
@@ -976,36 +1012,30 @@ impl SectiondControlPlane {
             .ok_or_else(|| AgentFsError::unknown_agent().into())
     }
 
-    fn find_agentfs(
-        &self,
-        rt: &tokio::runtime::Runtime,
-        runtime: &SectiondRuntime,
-        fs_ref: &str,
-    ) -> Result<ResolvedAgentFs> {
-        for source in self.list_sources()? {
-            let operator = runtime.router().get_operator(&source.name)?;
-            let Some(fs) =
-                agentfs::read_optional_json::<AgentFsRecord>(rt, operator, agentfs::FS_PATH)?
-            else {
-                continue;
-            };
-
-            if fs.fs_id != fs_ref && fs.name != fs_ref && fs.source_name != fs_ref {
-                continue;
-            }
-
-            let head = agentfs::read_json::<AgentFsHeadRecord>(rt, operator, agentfs::HEAD_PATH)?;
-            let grants = agentfs::list_grants(rt, operator)?;
-            return Ok(ResolvedAgentFs {
-                source,
-                fs,
-                head,
-                grants,
-                operator: operator.clone(),
-            });
-        }
-
-        Err(AgentFsError::unknown_fs(fs_ref).into())
+    fn find_agentfs(&self, rt: &tokio::runtime::Runtime, fs_ref: &str) -> Result<ResolvedAgentFs> {
+        let resolved = self.control_service.resolve_filesystem(fs_ref)?;
+        let operator = build_operator(&resolved.source.provider, &resolved.source.options)?;
+        let source = SourceRegistryEntry {
+            name: resolved.fs.source_name.clone(),
+            provider: resolved.source.provider.clone(),
+            origin: SourceOrigin::ProviderStore,
+            metadata_ttl_secs: resolved.source.cache.metadata_ttl_secs,
+            content_ttl_secs: resolved.source.cache.content_ttl_secs,
+            local_root: self.store.get_source_local_root(&resolved.fs.source_name)?,
+            options: resolved
+                .source
+                .options
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        };
+        let head = agentfs::read_json::<AgentFsHeadRecord>(rt, &operator, agentfs::HEAD_PATH)?;
+        Ok(ResolvedAgentFs {
+            source,
+            fs: resolved.fs,
+            head,
+            operator,
+        })
     }
 
     fn rollback_failed_attach(
@@ -1033,7 +1063,6 @@ struct ResolvedAgentFs {
     source: SourceRegistryEntry,
     fs: AgentFsRecord,
     head: AgentFsHeadRecord,
-    grants: Vec<AgentFsGrantRecord>,
     operator: opendal::Operator,
 }
 
@@ -1044,6 +1073,23 @@ fn attached_source_summary(source: &SourceRegistryEntry) -> AgentFsAttachedSourc
         origin: source.origin,
         local_root: source.local_root.clone(),
     }
+}
+
+fn mirror_created_filesystem(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    created: &FilesystemCreateResult,
+) -> Result<()> {
+    agentfs::write_json(rt, operator, agentfs::FS_PATH, &created.fs)?;
+    agentfs::write_json(
+        rt,
+        operator,
+        agentfs::HEAD_PATH,
+        &agentfs::head_record(&created.fs.fs_id, None),
+    )?;
+    agentfs::write_grant(rt, operator, &created.owner_grant)?;
+    agentfs::write_event(rt, operator, &created.event)?;
+    Ok(())
 }
 
 fn build_operator(provider: &str, options: &HashMap<String, String>) -> Result<Operator> {
@@ -1109,6 +1155,32 @@ fn ensure_attach_root_does_not_overlap_backing_root(
     Ok(())
 }
 
+fn ensure_local_root_does_not_overlap_existing(
+    store: &ProviderStore,
+    source_name: &str,
+    local_root: &Path,
+) -> Result<()> {
+    let local_root = canonicalize_existing_or_future_path(local_root)?;
+    for binding in store.list_source_local_roots()? {
+        let existing_root = canonicalize_existing_or_future_path(&binding.local_root)?;
+        if binding.source_name == source_name && existing_root == local_root {
+            continue;
+        }
+        if local_root == existing_root
+            || local_root.starts_with(&existing_root)
+            || existing_root.starts_with(&local_root)
+        {
+            bail!(
+                "local root {} must not overlap existing source root {} for source {}",
+                local_root.display(),
+                existing_root.display(),
+                binding.source_name
+            );
+        }
+    }
+    Ok(())
+}
+
 fn canonicalize_existing_or_future_path(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         return Ok(path.canonicalize()?);
@@ -1133,22 +1205,46 @@ fn canonicalize_existing_or_future_path(path: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-fn local_root_from_marker(
+fn local_mount_from_marker(
     store: &ProviderStore,
     source_name: &str,
     marker: &RootDiscoveryMarker,
-) -> Result<PathBuf> {
-    let store_root = store
-        .get_source_local_root(source_name)?
-        .ok_or_else(|| anyhow::anyhow!("source {source_name} has no bound local root"))?;
-    if store_root != marker.local_root {
+) -> Result<AgentFsMountRecord> {
+    let mount = store
+        .get_agentfs_mount(source_name)?
+        .ok_or_else(|| anyhow::anyhow!("source {source_name} has no trusted AgentFS mount"))?;
+    if mount.local_root != marker.local_root {
         bail!(
             "local marker root {} does not match current source binding {}",
             marker.local_root.display(),
-            store_root.display()
+            mount.local_root.display()
         );
     }
-    Ok(marker.local_root.clone())
+    if marker.fs_id.as_deref() != Some(mount.fs_id.as_str()) {
+        bail!(
+            "local marker fs_id does not match trusted mount fs_id {}",
+            mount.fs_id
+        );
+    }
+    if marker.source_profile_id.as_deref() != Some(mount.source_profile_id.as_str()) {
+        bail!(
+            "local marker source_profile_id does not match trusted mount source_profile_id {}",
+            mount.source_profile_id
+        );
+    }
+    if marker.agent_id.as_deref() != Some(mount.agent_id.as_str()) {
+        bail!(
+            "local marker agent_id does not match trusted mount agent_id {}",
+            mount.agent_id
+        );
+    }
+    if marker.installation_id.as_deref() != Some(mount.installation_id.as_str()) {
+        bail!(
+            "local marker installation_id does not match trusted mount installation_id {}",
+            mount.installation_id
+        );
+    }
+    Ok(mount)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1439,7 +1535,9 @@ fn write_root_marker(source_id: &str, local_root: &Path) -> Result<()> {
         local_root: local_root.to_path_buf(),
         control_plane_endpoint: "sectiond://local".to_string(),
         fs_id: None,
+        source_profile_id: None,
         agent_id: None,
+        installation_id: None,
         base_commit_id: None,
     };
     write_root_marker_record(local_root, &marker)
@@ -1449,16 +1547,21 @@ fn write_root_marker_for_agentfs(
     source_id: &str,
     local_root: &Path,
     fs_id: &str,
+    source_profile_id: &str,
     agent_id: &str,
+    installation_id: &str,
+    control_plane_endpoint: &str,
     base_commit_id: Option<String>,
 ) -> Result<()> {
     let marker = RootDiscoveryMarker {
         schema_version: 1,
         source_id: source_id.to_string(),
         local_root: local_root.to_path_buf(),
-        control_plane_endpoint: "sectiond://local".to_string(),
+        control_plane_endpoint: control_plane_endpoint.to_string(),
         fs_id: Some(fs_id.to_string()),
+        source_profile_id: Some(source_profile_id.to_string()),
         agent_id: Some(agent_id.to_string()),
+        installation_id: Some(installation_id.to_string()),
         base_commit_id,
     };
     write_root_marker_record(local_root, &marker)
@@ -1487,11 +1590,6 @@ fn remove_root_marker(local_root: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn read_root_marker_at_root(local_root: &Path) -> Result<RootDiscoveryMarker> {
-    let marker = std::fs::read(local_root.join(".section").join("root.json"))?;
-    Ok(serde_json::from_slice(&marker)?)
 }
 
 fn discover_root_marker(path: &Path) -> Result<RootDiscoveryMarker> {

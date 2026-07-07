@@ -21,8 +21,19 @@ pub struct AgentFsRecord {
     pub fs_id: String,
     pub name: String,
     pub owner_agent_id: String,
+    pub source_profile_id: String,
     pub source_name: String,
     pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentFsSourceProfileRecord {
+    pub schema_version: u32,
+    pub source_profile_id: String,
+    pub name: String,
+    pub provider: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +86,34 @@ pub struct AgentFsGrantRecord {
     pub revoked_by: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentFsShareRecord {
+    pub schema_version: u32,
+    pub share_id: String,
+    pub fs_id: String,
+    pub target_agent_id: String,
+    pub grant_id: String,
+    pub role: AgentFsRole,
+    pub source_profile_id: String,
+    pub created_by: String,
+    pub created_at_ms: i64,
+    pub expires_at_ms: Option<i64>,
+    pub accepted_at_ms: Option<i64>,
+    pub revoked_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentFsCredentialBindingRecord {
+    pub schema_version: u32,
+    pub credential_binding_id: String,
+    pub fs_id: String,
+    pub agent_id: String,
+    pub installation_id: String,
+    pub source_profile_id: String,
+    pub issued_at_ms: i64,
+    pub expires_at_ms: i64,
+}
+
 impl AgentFsGrantRecord {
     pub fn is_active(&self) -> bool {
         self.revoked_at_ms.is_none()
@@ -117,6 +156,19 @@ pub enum AgentFsMaterializationState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentFsAuthorization {
+    Owner {
+        agent_id: String,
+    },
+    Grant {
+        grant_id: String,
+        role: AgentFsRole,
+        capabilities: Vec<AgentFsCapability>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentFsCommitRecord {
     pub schema_version: u32,
     pub commit_id: String,
@@ -125,6 +177,8 @@ pub struct AgentFsCommitRecord {
     pub agent_id: String,
     pub summary: String,
     pub paths: Vec<AgentFsCommitPathRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorized_by: Option<AgentFsAuthorization>,
     pub created_at_ms: i64,
     pub materialization_state: AgentFsMaterializationState,
     pub materialized_at_ms: Option<i64>,
@@ -170,7 +224,7 @@ impl AgentFsError {
     pub fn unknown_agent() -> Self {
         Self::new(
             "unknown_agent",
-            "agent identity is missing; run `section agent register <name>` first",
+            "agent identity is missing; run `section agent login <name>` first",
             false,
         )
     }
@@ -243,8 +297,32 @@ pub fn new_fs_id() -> Result<String> {
     Ok(format!("fs_{}", random_hex(16)?))
 }
 
+pub fn new_agent_id() -> Result<String> {
+    Ok(format!("agt_{}", random_hex(16)?))
+}
+
+pub fn new_installation_id() -> Result<String> {
+    Ok(format!("ins_{}", random_hex(16)?))
+}
+
+pub fn new_source_profile_id() -> Result<String> {
+    Ok(format!("srcp_{}", random_hex(16)?))
+}
+
+pub fn new_auth_token() -> Result<String> {
+    Ok(format!("auth_{}", random_hex(32)?))
+}
+
 pub fn new_grant_id() -> Result<String> {
     Ok(format!("grt_{}", random_hex(16)?))
+}
+
+pub fn new_share_id() -> Result<String> {
+    Ok(format!("shr_{}", random_hex(16)?))
+}
+
+pub fn new_credential_binding_id() -> Result<String> {
+    Ok(format!("cred_{}", random_hex(16)?))
 }
 
 pub fn new_commit_id() -> Result<String> {
@@ -552,7 +630,11 @@ pub fn initialize_fs_metadata(
         &owner.agent_id,
         &fs.fs_id,
         None,
-        json!({ "name": fs.name, "source_name": fs.source_name }),
+        json!({
+            "name": fs.name,
+            "source_name": fs.source_name,
+            "source_profile_id": fs.source_profile_id,
+        }),
     )?;
     write_event(rt, op, &event)?;
 

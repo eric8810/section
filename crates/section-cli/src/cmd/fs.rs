@@ -1,8 +1,7 @@
 use crate::{FsAction, FsRoleArg};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use sectiond::{AgentFsError, AgentFsRole, SectiondControlPlane};
 use serde_json::json;
-use std::collections::HashMap;
 use std::path::Path;
 
 pub fn run(config_path: Option<&Path>, action: FsAction, json_mode: bool) -> Result<()> {
@@ -23,11 +22,16 @@ fn run_inner(config_path: Option<&Path>, action: FsAction, json_mode: bool) -> R
     match action {
         FsAction::Create {
             name,
+            source_profile,
             provider,
             opt,
         } => {
-            let options: HashMap<String, String> = opt.into_iter().collect();
-            let fs = control_plane.fs_create(&name, &provider, options)?;
+            if provider.is_some() || !opt.is_empty() {
+                bail!("fs create now uses Section Control Service SourceProfiles; pass --source-profile <profile>");
+            }
+            let source_profile = source_profile
+                .ok_or_else(|| anyhow::anyhow!("fs create requires --source-profile <profile>"))?;
+            let fs = control_plane.fs_create(&name, &source_profile)?;
             if json_mode {
                 println!("{}", json!({ "ok": true, "fs": fs }));
             } else {
@@ -70,6 +74,55 @@ fn run_inner(config_path: Option<&Path>, action: FsAction, json_mode: bool) -> R
                     revoked.len(),
                     fs,
                     agent_id
+                );
+            }
+        }
+        FsAction::Share { fs, agent_id } => {
+            let share = control_plane.fs_share(&fs, &agent_id)?;
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({ "ok": true, "share": share.share, "fs": share.fs, "source_profile": share.source_profile })
+                );
+            } else {
+                println!(
+                    "Shared '{}' with {} as share {}.",
+                    share.fs.name, share.share.target_agent_id, share.share.share_id
+                );
+            }
+        }
+        FsAction::Available => {
+            let shares = control_plane.fs_available()?;
+            if json_mode {
+                println!("{}", json!({ "ok": true, "available": shares }));
+            } else if shares.is_empty() {
+                println!("No AgentFS shares available.");
+            } else {
+                for share in shares {
+                    println!(
+                        "  {}  ({}, role: {:?}, share: {})",
+                        share.fs.name, share.fs.fs_id, share.share.role, share.share.share_id
+                    );
+                }
+            }
+        }
+        FsAction::Accept { share_id } => {
+            let accepted = control_plane.fs_accept(&share_id)?;
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({
+                        "ok": true,
+                        "share": accepted.share,
+                        "fs": accepted.fs,
+                        "source_profile": accepted.source_profile,
+                        "credential_binding": accepted.credential_binding,
+                    })
+                );
+            } else {
+                println!(
+                    "Accepted share {} for '{}'.",
+                    accepted.share.share_id, accepted.fs.name
                 );
             }
         }

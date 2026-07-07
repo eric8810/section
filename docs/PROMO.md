@@ -31,7 +31,7 @@ Section’s outward story should be simpler:
 - keep humans and agents in the same place
 - surface sync issues clearly when they need attention
 
-## Three Core Messages
+## Three Core Points
 
 1. **One shared local folder**
    - humans and agents work in the same place

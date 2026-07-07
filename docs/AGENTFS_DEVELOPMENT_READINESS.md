@@ -4,16 +4,16 @@
 
 This document lists the contracts that must be defined before implementation starts.
 
-It is a development gate for [AGENTFS_DESIGN_PROPOSAL.md](AGENTFS_DESIGN_PROPOSAL.md). The concrete answers live in [AGENTFS_MVP_CONTRACT.md](AGENTFS_MVP_CONTRACT.md). The goal is to avoid starting code before the authority model, shared metadata model, and control-plane behavior are precise enough to test.
+It is a development gate for [AGENTFS_DESIGN_PROPOSAL.md](AGENTFS_DESIGN_PROPOSAL.md). The concrete answers live in [AGENTFS_MVP_CONTRACT.md](AGENTFS_MVP_CONTRACT.md). The goal is to avoid starting code before the authority model, service control model, metadata mirror model, and control-plane behavior are precise enough to test.
 
 ## Development Gate
 
 Development can start when the Phase 1 contracts below are answered in docs.
 
-Do not start by implementing hooks, approval workflows, or `AGENTS.md` enforcement. Those are later layers. Messages are out of scope for the current project. The first build proves the AgentFS core:
+Do not start by implementing hooks, approval workflows, or `AGENTS.md` enforcement. Those are later layers. The first build proves the AgentFS core:
 
 ```text
-Agent / FS / Grant / Commit / Event
+Agent / Installation / FS / SourceProfile / Grant / Share / Credential / Commit / Event
 ```
 
 ## Phase 1 Required Definitions
@@ -25,10 +25,15 @@ Define stable identifiers and naming rules:
 | Term | Required Definition |
 | --- | --- |
 | `agent_id` | Format, persistence location, uniqueness, display name rules |
+| `installation_id` | Format, persistence location, relationship to one local runtime |
 | `fs_id` | Format, relationship to source name, rename behavior |
+| `source_profile_id` | Server-side backing source profile identity |
+| `share_id` | Server-side share identity |
+| `credential_binding_id` | Short-lived sync credential audit identity |
 | `mount_id` | Whether needed in MVP or derived from local root |
 | `commit_id` | Format, ordering, collision strategy |
-| `event_id` | Format and monotonicity expectations |
+| `event_id` | Format and identity rules |
+| `event_seq` | Per-FS ordering and replay offset rules |
 
 Minimum decision:
 
@@ -41,6 +46,7 @@ IDs should be stable, opaque strings. Human-readable names are metadata, not ide
 Define the truth hierarchy exactly:
 
 ```text
+Section Control Service = identity, grant, share, source profile, credential authority
 accepted commit log = governance truth
 backing source = materialized filesystem state
 local mount = working copy
@@ -52,20 +58,34 @@ Required answers:
 - What happens if commit metadata writes succeed but file materialization fails?
 - What state is shown while materialization is incomplete?
 - Which state can watchers rely on as authoritative?
+- Which decisions must go to Section Control Service?
+- How are source profiles and short-lived credentials issued?
 - Can a backing source be edited outside Section, and how is that detected?
 
 Minimum decision:
 
 ```text
 Accepted commit metadata is authoritative for governance.
+Section Control Service is authoritative for identity, grants, shares, source profiles, and credentials.
 Backing source sync can lag and is reported as syncing/error.
 ```
 
-### 3. Shared Metadata Layout
+### 3. Control Metadata Layout
 
-Define exact backing-source paths and ownership.
+Define exact service records, backing-source mirror paths, and ownership.
 
-MVP namespace:
+Service-owned records:
+
+```text
+agents
+installations
+source_profiles
+grants
+shares
+credential_bindings
+```
+
+Backing-source mirror namespace:
 
 ```text
 .section/agentfs/fs.json
@@ -73,7 +93,6 @@ MVP namespace:
 .section/agentfs/grants/<grant_id>.json
 .section/agentfs/commits/<commit_id>.json
 .section/agentfs/events/<event_id>.json
-.section/agentfs/locks/head.json
 ```
 
 Required answers:
@@ -83,12 +102,14 @@ Required answers:
 - How does Section prevent ordinary commits from modifying metadata files?
 - Are metadata records immutable or mutable?
 - How are partial writes avoided or recovered?
+- Which records are service authority and which are only mirrors?
 
 Minimum decision:
 
 ```text
 .section/agentfs/* is reserved control metadata.
 Normal file commits cannot modify it.
+Grant, share, source profile, and credential authority lives in Section Control Service.
 ```
 
 ### 4. Metadata Schemas
@@ -118,8 +139,8 @@ Minimum fields:
 ```text
 fs: schema_version, fs_id, name, owner_agent_id, created_at_ms
 grant: schema_version, grant_id, fs_id, agent_id, role, granted_by, created_at_ms, revoked_at_ms
-commit: schema_version, commit_id, fs_id, parent_commit_id, agent_id, summary, paths, created_at_ms, materialization_state
-event: schema_version, event_id, fs_id, kind, actor_agent_id, subject_id, path, created_at_ms
+commit: schema_version, commit_id, fs_id, parent_commit_id, base_commit_id, base_manifest_hash, agent_id, authorized_by, summary, paths, staging_snapshot, created_at_ms, materialization_state
+event: schema_version, event_id, seq, fs_id, kind, actor_agent_id, subject_id, path, created_at_ms
 head: schema_version, fs_id, commit_id, updated_at_ms
 ```
 
@@ -166,6 +187,7 @@ Required answers:
 - What files are forbidden from commit?
 - Is a summary required?
 - Can an empty commit exist?
+- Does commit read live files or a frozen staging snapshot?
 
 Minimum decision:
 
@@ -173,6 +195,7 @@ Minimum decision:
 MVP commit applies all dirty paths under the attached root.
 Commit requires a non-empty summary.
 Commit is rejected if the local base is stale.
+Commit materialization reads a frozen staging snapshot, not the live working tree.
 ```
 
 ### 7. Materialization Semantics
@@ -186,6 +209,7 @@ Required answers:
 - How is `failed_to_materialize` represented?
 - Can another commit proceed while materialization is incomplete?
 - How does attach handle a partially materialized head?
+- Does repair reuse the original commit or create a new one?
 
 Minimum decision:
 
@@ -193,6 +217,7 @@ Minimum decision:
 Commit metadata is appended first, then materialization runs.
 If materialization fails, FS state is error/syncing until repair.
 Further commits should block until the head is materialized.
+Repair must use the same commit_id and the original staging snapshot.
 ```
 
 ### 8. Event Semantics
@@ -222,7 +247,7 @@ Required answers:
 Minimum decision:
 
 ```text
-AgentFS events are append-only and replayable by event_id.
+AgentFS events are append-only and replayable by per-FS seq.
 Watch may merge source/path events and AgentFS events, but event kind must identify the stream.
 ```
 
@@ -248,20 +273,21 @@ Only commit is governed.
 
 ### 10. Source Compatibility
 
-Define how AgentFS maps to existing `source` behavior.
+Define how AgentFS maps to existing `source` behavior and server-side source profiles.
 
 Required answers:
 
-- Does each FS own exactly one source?
-- Can an existing source be upgraded into an FS?
+- Does each FS bind exactly one SourceProfile?
+- Who can create or select a SourceProfile?
 - Can `source sync` bypass AgentFS governance?
-- Are low-level `source` commands still documented as escape hatches?
+- Are low-level `source` commands blocked for AgentFS-backed sources?
 
 Minimum decision:
 
 ```text
-MVP FS wraps one backing source.
-Existing source commands remain lower-level escape hatches and are not the AgentFS governance surface.
+FS binds one server-side SourceProfile.
+Existing source commands remain sync infrastructure and are not the AgentFS governance surface.
+AgentFS-backed sources must be guarded from ordinary source mutation commands.
 ```
 
 ### 11. Error Model
@@ -313,7 +339,6 @@ These must not block core development:
 - path-scoped grants
 - ownership transfer
 - organization/team identity
-- dedicated control-plane service
 - semantic search
 - sandbox runtime integration
 
@@ -322,9 +347,13 @@ These must not block core development:
 The smallest useful implementation slice is:
 
 ```text
-agent register
+agent login
+source profile exists or is provisioned
 fs create
 fs grant
+fs share
+fs available
+fs accept
 fs attach
 commit status
 commit apply
@@ -336,6 +365,8 @@ This slice should prove:
 ```text
 two agents can share one FS;
 one owner grants one writer;
+the owner shares the FS through Section Control Service;
+the writer accepts the server-side share;
 the writer commits a local change;
 the owner observes the accepted mutation.
 ```
@@ -346,7 +377,7 @@ The design is ready for development when:
 
 - all Phase 1 definitions are answered in docs
 - [AGENTFS_MVP_CONTRACT.md](AGENTFS_MVP_CONTRACT.md) is current
-- schemas exist for shared metadata
+- schemas exist for service records and backing-source metadata mirror
 - CLI command contracts are stable enough for tests
 - multi-agent happy path is described end to end
 - stale-base and materialization-failure behavior are described

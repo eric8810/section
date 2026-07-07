@@ -6,7 +6,7 @@ This document records the product direction for Section as an AgentFS.
 
 It is directional product requirements, not a detailed implementation plan. The current source/path sync layer remains the infrastructure baseline. The AgentFS direction defines the business semantics that should sit above that sync layer.
 
-Section AgentFS is the first product in a possible agent-governed infrastructure family. The family idea is useful for positioning, but AgentFS should remain a focused filesystem product.
+Section AgentFS should remain a focused filesystem product.
 
 The concrete first design proposal lives in [AGENTFS_DESIGN_PROPOSAL.md](AGENTFS_DESIGN_PROPOSAL.md). The development contract for the MVP lives in [AGENTFS_MVP_CONTRACT.md](AGENTFS_MVP_CONTRACT.md).
 
@@ -15,6 +15,16 @@ The concrete first design proposal lives in [AGENTFS_DESIGN_PROPOSAL.md](AGENTFS
 Section is an agent-owned, agent-governed shared filesystem.
 
 Agents create filesystems, grant other agents access, and move changes into shared truth through policy-controlled commits.
+
+正式产品必须有服务端控制面。
+
+```text
+Section Control Service 负责身份、发现、grant、share、source profile、credential。
+AgentFS Local 负责 attach、local edit、status、commit。
+Sync layer 负责文件同步。
+```
+
+跨机 / 多 agent 分享必须走 Section Control Service。不要设计离线 invite file、手动 source bootstrap、直接分享 source 密钥。
 
 ## Core Distinction
 
@@ -47,35 +57,12 @@ filesystem records and enforces that governance
 
 From this point of view, grants, commits, `AGENTS.md`, hooks, watch, and audit are not separate differentiating features. They are expressions of the same core model: shared filesystem truth is governed by agents.
 
-## Product Family Boundary
+## Product Boundary
 
-Agent-governed truth is a method, not a single universal product.
-
-Different resource types should become separate products because each resource has its own native semantics:
-
-- `Section AgentFS`: agent-governed filesystem
-- `Section AgentDB`: agent-governed database changes
-- `Section AgentGit`: agent-governed code and repository changes
-- `Section AgentOps`: agent-governed operational actions
-
-These products may share a philosophy:
-
-```text
-agent owns or is granted access
-agent proposes changes
-policy checks changes
-hooks automate validation
-accepted changes become truth
-everything is observable
-```
-
-They should not collapse into one vague agent-governed resources platform.
-
-For this repo, the product boundary is:
+For this repo, the boundary is:
 
 ```text
 Build one excellent agent-governed filesystem.
-Do not generalize into agent-governed resources until another resource has its own concrete product.
 ```
 
 Other resource types may appear inside AgentFS as files or artifacts, but they are not first-class Section AgentFS resources.
@@ -85,8 +72,12 @@ Other resource types may appear inside AgentFS as files or artifacts, but they a
 The minimum AgentFS core is:
 
 - `Agent`
+- `Installation`
 - `FS`
+- `SourceProfile`
 - `Grant`
+- `Share`
+- `Credential`
 - `Commit`
 - `Event`
 
@@ -100,8 +91,10 @@ The relationship is:
 ```text
 Agent creates FS
 Agent owns FS
-Agent grants other agents access
-Agents attach FS as normal files
+Agent grants other agents access through the control service
+Agent shares FS through a server-side share record
+Other agents accept shares after authentication
+Agents attach FS as normal files with server-issued sync credentials
 Agents edit locally
 Agents commit through policy
 All agents observe accepted FS mutations
@@ -143,6 +136,8 @@ Access is not implicit.
 
 An agent can access an FS only if it owns the FS or has been granted access by an authorized agent.
 
+The authoritative grant registry lives in Section Control Service. Metadata in the backing source may mirror grant state for audit or sync, but it must not be the product authority for cross-machine access.
+
 Grants should express coarse capabilities first:
 
 - read
@@ -169,6 +164,30 @@ Agents should be able to use ordinary tools:
 The local file tree is the work surface. Section's control plane carries ownership, grants, policy, events, conflict state, and commit state.
 
 The local file tree is not the authority boundary in the first design. The authority boundary is commit.
+
+### 3a. Service-Controlled Sharing
+
+An FS can be shared only through the Section Control Service.
+
+The service must handle:
+
+- authenticated agent identity
+- installation identity
+- server-side share records
+- FS discovery for granted agents
+- source profile lookup
+- short-lived sync credential issuance
+- share and grant audit
+
+A share is not a file and is not a source credential.
+
+```text
+share = server-side access record
+accept = authenticated agent accepts that server-side record
+credential = short-lived sync credential issued after grant check
+```
+
+The product must not require agents to manually copy source configuration or exchange long-lived source keys.
 
 ### 4. Local Edits Are Not Shared Truth
 
@@ -322,8 +341,6 @@ Section AgentFS is not primarily:
 - a general-purpose Git replacement
 - a memory or RAG database
 - an agent runtime or sandbox manager
-- a chat system detached from files
-- an agent messaging system
 
 Those capabilities may integrate with Section, but the core product direction is shared filesystem governance for agents.
 
@@ -340,6 +357,5 @@ All accepted mutations are observable.
 ```
 
 Rules and hooks extend this core after the commit boundary is stable.
-Messages are out of scope for the current project.
 
 Section should evolve from a sync-aware shared folder into an agent-owned shared filesystem where agents can safely collaborate through files.

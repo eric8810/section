@@ -76,8 +76,36 @@ impl SectiondRuntime {
     }
 
     pub fn from_config_and_store(config: &SectionConfig, store: &ProviderStore) -> Result<Self> {
-        let file_sources = config.sources.clone();
-        let store_sources = store.load_all()?;
+        Self::from_config_and_store_with_agentfs(config, store, false)
+    }
+
+    pub fn from_config_and_store_including_agentfs(
+        config: &SectionConfig,
+        store: &ProviderStore,
+    ) -> Result<Self> {
+        Self::from_config_and_store_with_agentfs(config, store, true)
+    }
+
+    fn from_config_and_store_with_agentfs(
+        config: &SectionConfig,
+        store: &ProviderStore,
+        include_agentfs: bool,
+    ) -> Result<Self> {
+        let mut file_sources = config.sources.clone();
+        let mut store_sources = store.load_all()?;
+        for name in config.sources.keys() {
+            if store.is_agentfs_source(name)? {
+                file_sources.remove(name);
+            }
+        }
+        if !include_agentfs {
+            let store_source_names = store_sources.keys().cloned().collect::<Vec<_>>();
+            for name in store_source_names {
+                if store.is_agentfs_source(&name)? {
+                    store_sources.remove(&name);
+                }
+            }
+        }
         let binding_map = store
             .list_source_local_roots()?
             .into_iter()
@@ -85,6 +113,7 @@ impl SectiondRuntime {
             .collect::<std::collections::HashMap<_, _>>();
 
         let mut merged = config.clone();
+        merged.sources = file_sources.clone();
         for (name, source) in &store_sources {
             merged.sources.entry(name.clone()).or_insert(source.clone());
         }
@@ -195,6 +224,7 @@ impl SectiondRuntime {
 mod tests {
     use super::*;
     use section_core::config::{CacheConfig, SourceConfig};
+    use section_provider::AcceptedFilesystemRecord;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -291,6 +321,80 @@ mod tests {
             runtime.router().sources(),
             vec!["config-only".to_string(), "db-only".to_string()]
         );
+    }
+
+    #[test]
+    fn public_runtime_filters_agentfs_sources_and_internal_runtime_uses_store_source() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let public_root = TempDir::new().expect("public root");
+        let service_root = TempDir::new().expect("service root");
+        let collision_root = TempDir::new().expect("collision root");
+        let store = ProviderStore::open(temp_dir.path()).expect("store");
+        store
+            .add_source(
+                "fs_service",
+                &fs_source(service_root.path().to_str().expect("utf8 service"), 30, 45),
+            )
+            .expect("add agentfs source");
+        store
+            .cache_accepted_filesystem(&AcceptedFilesystemRecord {
+                fs_id: "fs_service".to_string(),
+                name: "project".to_string(),
+                owner_agent_id: "agt_owner".to_string(),
+                source_profile_id: "srcp_profile".to_string(),
+                source_name: "fs_service".to_string(),
+                accepted_at_ms: 1,
+            })
+            .expect("mark accepted agentfs source");
+
+        let mut config = SectionConfig::default();
+        config.data_dir = temp_dir.path().to_path_buf();
+        config.sources.insert(
+            "public".to_string(),
+            fs_source(public_root.path().to_str().expect("utf8 public"), 60, 300),
+        );
+        config.sources.insert(
+            "fs_service".to_string(),
+            fs_source(
+                collision_root.path().to_str().expect("utf8 collision"),
+                99,
+                100,
+            ),
+        );
+
+        let public_runtime =
+            SectiondRuntime::from_config_and_store(&config, &store).expect("public runtime");
+        assert_eq!(
+            public_runtime.router().sources(),
+            vec!["public".to_string()]
+        );
+        assert!(public_runtime.router().get_operator("fs_service").is_err());
+        assert_eq!(
+            public_runtime
+                .snapshot(None)
+                .sources
+                .iter()
+                .map(|source| source.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["public"]
+        );
+
+        let internal_runtime =
+            SectiondRuntime::from_config_and_store_including_agentfs(&config, &store)
+                .expect("internal runtime");
+        assert_eq!(
+            internal_runtime.router().sources(),
+            vec!["fs_service".to_string(), "public".to_string()]
+        );
+        let agentfs_source = internal_runtime
+            .snapshot(None)
+            .sources
+            .into_iter()
+            .find(|source| source.name == "fs_service")
+            .expect("agentfs source");
+        assert_eq!(agentfs_source.origin, SourceOrigin::ProviderStore);
+        assert_eq!(agentfs_source.metadata_ttl_secs, 30);
+        assert_eq!(agentfs_source.content_ttl_secs, 45);
     }
 
     #[test]

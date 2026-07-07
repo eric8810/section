@@ -4,8 +4,8 @@ use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use sectiond::{
-    SectiondControlPlane, SourceSyncOptions, SourceSyncResult, SyncLifecycleEvent,
-    SyncLifecycleObserver, SyncLifecycleStage,
+    SectiondControlPlane, SourceRegistryEntry, SourceSyncOptions, SourceSyncResult,
+    SyncLifecycleEvent, SyncLifecycleObserver, SyncLifecycleStage,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -39,6 +39,17 @@ fn mask_value(key: &str, value: &str) -> String {
     value.to_string()
 }
 
+fn source_json(source: &SourceRegistryEntry) -> serde_json::Value {
+    json!({
+        "name": source.name,
+        "provider": source.provider,
+        "origin": source.origin,
+        "metadata_ttl_secs": source.metadata_ttl_secs,
+        "content_ttl_secs": source.content_ttl_secs,
+        "local_root": source.local_root,
+    })
+}
+
 pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) -> Result<()> {
     let control_plane = SectiondControlPlane::load(config_path)?;
 
@@ -56,7 +67,7 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
                     json!({
                         "ok": true,
                         "message": format!("Source '{name}' added (provider: {provider})."),
-                        "source": entry,
+                        "source": source_json(&entry),
                     })
                 );
             } else {
@@ -78,7 +89,7 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
                                 .expect("bound source should have local root")
                                 .display()
                         ),
-                        "source": entry,
+                        "source": source_json(&entry),
                     })
                 );
             } else {
@@ -133,25 +144,7 @@ pub fn run(config_path: Option<&Path>, action: SourceAction, json_mode: bool) ->
         SourceAction::List => {
             let sources = control_plane.list_sources()?;
             if json_mode {
-                let arr: Vec<serde_json::Value> = sources
-                    .iter()
-                    .map(|source| {
-                        let masked_options: serde_json::Map<String, serde_json::Value> = source
-                            .options
-                            .iter()
-                            .map(|(k, v)| (k.clone(), json!(mask_value(k, v))))
-                            .collect();
-                        json!({
-                            "name": source.name,
-                            "provider": source.provider,
-                            "origin": source.origin,
-                            "metadata_ttl_secs": source.metadata_ttl_secs,
-                            "content_ttl_secs": source.content_ttl_secs,
-                            "local_root": source.local_root,
-                            "options": masked_options,
-                        })
-                    })
-                    .collect();
+                let arr: Vec<serde_json::Value> = sources.iter().map(source_json).collect();
                 println!("{}", serde_json::to_string(&arr)?);
             } else if sources.is_empty() {
                 println!("No sources configured.");

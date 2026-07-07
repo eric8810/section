@@ -178,6 +178,11 @@ pub enum SourceAction {
 
 #[derive(Subcommand)]
 pub enum AgentAction {
+    /// Log in through the Section Control Service
+    Login {
+        /// Agent display name
+        name: String,
+    },
     /// Register or rename the local agent identity
     Register {
         /// Agent display name
@@ -193,10 +198,13 @@ pub enum FsAction {
     Create {
         /// Filesystem name
         name: String,
-        /// Provider type (e.g., "fs", "s3", "webdav")
+        /// Server-managed SourceProfile name
         #[arg(long)]
-        provider: String,
-        /// Provider-specific options as key=value pairs
+        source_profile: Option<String>,
+        /// Deprecated provider type; use --source-profile
+        #[arg(long)]
+        provider: Option<String>,
+        /// Deprecated provider-specific options; use --source-profile
         #[arg(long, value_parser = parse_key_val)]
         opt: Vec<(String, String)>,
     },
@@ -218,6 +226,20 @@ pub enum FsAction {
         fs: String,
         /// Agent id to revoke
         agent_id: String,
+    },
+    /// Create a server-side share for a granted agent
+    Share {
+        /// FS name, fs_id, or source name
+        fs: String,
+        /// Agent id to share with
+        agent_id: String,
+    },
+    /// List server-side shares available to the logged-in agent
+    Available,
+    /// Accept a server-side share
+    Accept {
+        /// Share id
+        share_id: String,
     },
     /// Attach an FS to a local working directory
     Attach {
