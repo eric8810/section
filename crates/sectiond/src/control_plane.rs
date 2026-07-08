@@ -1974,6 +1974,15 @@ fn collect_dirty_paths(
         if local_entry == remote_entry {
             continue;
         }
+        if let (Some(local_entry), Some(remote_entry)) = (local_entry, remote_entry) {
+            if local_entry.kind != remote_entry.kind {
+                anyhow::bail!(AgentFsError::path_type_conflict(
+                    &path,
+                    &local_entry.kind,
+                    &remote_entry.kind,
+                ));
+            }
+        }
 
         let op = match (local_entry, remote_entry) {
             (Some(_), None) => "create",

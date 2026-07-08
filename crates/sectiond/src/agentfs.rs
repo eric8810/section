@@ -312,6 +312,21 @@ impl AgentFsError {
         .with_details(json!({ "commit_id": commit_id }))
     }
 
+    pub fn path_type_conflict(path: &str, local_kind: &str, remote_kind: &str) -> Self {
+        Self::new(
+            "path_type_conflict",
+            format!(
+                "path {path} changed type from remote {remote_kind} to local {local_kind}; replace it with separate delete and create commits"
+            ),
+            false,
+        )
+        .with_details(json!({
+            "path": path,
+            "local_kind": local_kind,
+            "remote_kind": remote_kind,
+        }))
+    }
+
     pub fn payload(&self) -> &AgentFsErrorPayload {
         &self.payload
     }

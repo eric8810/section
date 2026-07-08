@@ -89,7 +89,7 @@ These must be handled before making stronger claims about AgentFS correctness.
 | 7 | A second granted agent cannot attach by grant alone; it still needs manual source setup. | confirmed | fixed-local |
 | 12 | Commit record and actual materialization have a TOCTOU gap. | confirmed | fixed-local |
 | 18 | `fs create` can create `head=null` over a non-empty backing source. | confirmed | fixed-local |
-| 19 | Stale-base checks trust editable `.section/root.json`. | confirmed | open |
+| 19 | Stale-base checks trust editable `.section/root.json`. | confirmed | fixed-local |
 | 20 | Governance state can advance before event writes succeed. | confirmed | open |
 | 23 | `fs attach --json` can expose backing source options and credentials. | confirmed | fixed-local |
 | 34 | Local symlinks are followed and can expose files outside the working root. | confirmed | fixed-local |
@@ -116,7 +116,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 39 | Local root identity is not canonicalized. | confirmed | open |
 | 40 | A bad `fs.json` in an unrelated source can block lookup of a healthy FS. | confirmed | open |
 | 43 | FS reference resolution does not support local source aliases and can pick the first name collision. | confirmed | open |
-| 45 | File/directory type replacement is accepted before sync later reports conflict. | confirmed | open |
+| 45 | File/directory type replacement is accepted before sync later reports conflict. | confirmed | fixed-local |
 | 46 | AgentFS tests do not cover the test plan. | partial | partial |
 | 47 | Overlapping local roots can make a parent FS treat a child FS marker as user content. | confirmed | open |
 | 48 | Low-level `source bind/unbind/remove` can break AgentFS root markers. | confirmed | open |
@@ -202,7 +202,7 @@ This table preserves every reviewer finding for traceability.
 | 16 | Non-UTF-8 paths are lossy converted. | P1 | confirmed | open | Reject non-UTF-8 paths with typed error. |
 | 17 | Materialization failure does not emit `fs.error`. | P2 | confirmed | open | Emit both commit failure and FS state event. |
 | 18 | Non-empty backing source can become head-null FS truth. | P0 | confirmed | fixed-local | Reject non-empty backing source or import it as initial commit. |
-| 19 | Stale-base check trusts editable root marker. | P0 | confirmed | open | Store mount base in local trusted store or verify marker against local store. |
+| 19 | Stale-base check trusts editable root marker. | P0 | confirmed | fixed-local | Commit/status use the trusted local mount store for base; E2E verifies marker base tampering cannot bypass stale-base. |
 | 20 | Governance mutation can succeed while event write fails. | P0 | confirmed | open | Make event write part of atomic mutation or add recoverable outbox. |
 | 21 | Failed attach can leave half-bound working copy. | P2 | partial | fixed-local | Keep rollback tests; still check failures after event write. |
 | 22 | `fs list/status` expose metadata without read grant. | P2 | decision | decision-needed | Decide whether discoverability is allowed; otherwise filter by grant. |
@@ -228,7 +228,7 @@ This table preserves every reviewer finding for traceability.
 | 42 | Backing root can be attached as working root for `fs` provider. | P0 | confirmed | fixed-local | Reject local roots overlapping provider backing root for local fs provider. |
 | 43 | FS ref lookup mishandles local aliases and name collisions. | P1 | confirmed | open | Define lookup precedence and ambiguity errors. |
 | 44 | Commit commands ignore marker `local_root`. | P0 | confirmed | fixed-local | Use marker root or fail on marker/store mismatch. |
-| 45 | File/dir type replacement is accepted then fails materialization. | P1 | confirmed | open | Preflight type conflicts or plan delete-create replacement. |
+| 45 | File/dir type replacement is accepted then fails materialization. | P1 | confirmed | fixed-local | Preflight rejects same-path file/dir type conflicts with `path_type_conflict` before writing accepted commit metadata. |
 | 46 | AgentFS tests do not cover the test plan. | P1 | partial | partial | CLI E2E tests now cover the implemented product path; continue converting product-complete gaps into tests as features land. |
 | 47 | Overlapping local roots can leak child markers. | P1 | confirmed | open | Reject overlapping roots after canonicalization. |
 | 48 | Low-level source commands can break AgentFS markers. | P1 | confirmed | fixed-local | Low-level source/path commands reject AgentFS-backed sources by default. |
@@ -270,7 +270,7 @@ After the decisions above, prioritize:
 2. safe FS initialization and recovery (#6, #15, #20),
 3. schema validation and backend-level event immutability (#10, #51),
 4. local root canonicalization and overlap (#39, #47),
-5. file/dir replacement preflight (#45).
+5. marker update success boundary (#29).
 
 ## Verification Record
 

@@ -688,6 +688,10 @@ fn e2e_stale_writer_cannot_overwrite_new_truth() {
     );
 
     writer_b.write_local("docs/from-b.txt", "from writer b");
+    let marker_path = writer_b.local_root.join(".section/root.json");
+    let mut marker = read_json(&marker_path);
+    marker["base_commit_id"] = Value::String(commit_a_id.clone());
+    write_json(&marker_path, &marker);
     let stale_status = writer_b.fs_status(&writer_b.local_root.to_string_lossy());
     assert_eq!(stale_status["status"]["stale"], true);
     assert!(stale_status["status"]["next_actions"]
@@ -763,6 +767,67 @@ fn e2e_hardening_rejects_unsafe_backing_source_and_attach_root() {
     assert!(
         !overlap.remote_root.join(".section/root.json").exists(),
         "rejected attach must not write a local root marker into backing source"
+    );
+}
+
+#[test]
+fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    owner.write_local("shape", "original file");
+    let initial_commit = owner.commit_apply("create file shape");
+    let initial_commit_id = initial_commit["commit"]["commit_id"]
+        .as_str()
+        .expect("initial commit id")
+        .to_string();
+    assert!(
+        fixture.path("shape").is_file(),
+        "initial commit should materialize shape as a file"
+    );
+    let accepted_before = owner.fs_events(FS_NAME, None)["events"]
+        .as_array()
+        .expect("events before type conflict")
+        .iter()
+        .filter(|event| event["kind"] == "commit.accepted")
+        .count();
+
+    fs::remove_file(owner.local_root.join("shape")).expect("remove local file");
+    fs::create_dir(owner.local_root.join("shape")).expect("create local replacement dir");
+    fs::write(owner.local_root.join("shape/nested.txt"), "nested").expect("write nested file");
+
+    let rejected = owner.commit_apply_output("replace file with dir");
+    let error = assert_json_error(&rejected, "path_type_conflict");
+    assert_eq!(error["error"]["details"]["path"], "shape");
+    assert_eq!(error["error"]["details"]["local_kind"], "dir");
+    assert_eq!(error["error"]["details"]["remote_kind"], "file");
+
+    let head = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    assert_eq!(head["commit_id"], initial_commit_id);
+    assert!(
+        fixture.path("shape").is_file(),
+        "rejected type replacement must leave remote shape as file"
+    );
+    assert!(
+        !fixture.path("shape/nested.txt").exists(),
+        "rejected type replacement must not materialize nested content"
+    );
+    let accepted_after = owner.fs_events(FS_NAME, None)["events"]
+        .as_array()
+        .expect("events after type conflict")
+        .iter()
+        .filter(|event| event["kind"] == "commit.accepted")
+        .count();
+    assert_eq!(
+        accepted_after, accepted_before,
+        "type replacement must be rejected before a new accepted commit"
     );
 }
 

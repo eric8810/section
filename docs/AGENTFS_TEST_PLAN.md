@@ -857,14 +857,14 @@ and P1 gaps:
 | Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness。还缺生产服务端、真实 credential TTL 和刷新。 |
 | AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 已有第一版：`fs events` 支持 replay/after，`watch --agentfs` 输出 AgentFS 事件，事件有递增 `seq`。还缺更强的服务端事件 API 和并发顺序保障。 |
 | Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | 已有第一版：commit record 和 `commit.accepted` event 记录 `authorized_by`，E2E 已通过 `fs events` 验证。 |
-| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 部分实现：本地 store 记录 mount/base。还缺 `base_manifest_hash` 和严格 tree diff。 |
+| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 部分实现：本地 store 记录 mount/base，E2E 验证篡改 `.section/root.json` 不能绕过 stale-base。还缺 `base_manifest_hash` 和严格 tree diff。 |
 | Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | 已有第一版：`commit apply` 先写 staging snapshot，commit metadata 记录 snapshot，物化从 snapshot 读取。E2E 验证 live root 后续修改仍是 dirty work。 |
 | Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 已有第一版：failed head 阻塞后续 commit，`commit repair` 用原 staging snapshot 修复同一个 commit。 |
 | Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 部分实现：已有 backing root、父子 root、runtime guardrails。还缺持久 `mount_id`/canonical root 完整断言。 |
 | Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
 | Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 event `seq` 和事件路径覆盖拒绝；还缺统一 schema validation、坏数据隔离、backend create-if-absent 断言。 |
 | JSON error contract | Agent callers need stable machine-readable failures. | 已有第一版：`agent`、`fs`、`commit`、`watch --agentfs` 在 `--json` 失败时输出稳定 `error.code`、`retryable`、`details`。参数错误是 `invalid_arguments`，普通运行错误统一落到 `operation_failed`。 |
-| File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 未实现。设计已固定：metadata 写入前生成 path operation plan。 |
+| File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 已有第一版：同一路径文件/目录类型替换会在 accepted commit 写入前失败，返回 `path_type_conflict`。 |
 | FS status decision surface | Agents need one command to know whether they can act. | 已有第一版：`fs status --json` 支持本地 path，输出 role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
 
 ### Future Feature E2E Gates
@@ -891,8 +891,9 @@ It covers the product behaviors that are implemented today:
 | --- | --- |
 | `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; staging snapshot、repair、`fs events` replay、`watch --agentfs`、event `seq`、`authorized_by`、JSON error payload 都可验证 |
 | `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit; `fs status` exposes role、capabilities、dirty、next_actions |
-| `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; `fs status` exposes stale state and `sync` next action |
+| `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; 篡改本地 marker 不能绕过 trusted mount base；`fs status` exposes stale state and `sync` next action |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
+| `e2e_rejects_file_dir_type_replacement_before_acceptance` | file/dir type replacement is rejected before a new accepted commit; head and backing source remain unchanged |
 | `e2e_hardening_rejects_symlink_commit_paths` | symlink paths cannot materialize files outside the working root |
 
 It intentionally does not mark the core product-complete gaps above as
