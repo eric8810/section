@@ -321,6 +321,7 @@ Rules:
 - Ownership transfer is deferred.
 - `manager` cannot grant `owner`.
 - `manager` can create, revoke, or replace `reader`, `writer`, and `manager` grants.
+- `manager` can create server-side shares for agents that already have readable grants.
 - Revoked agents cannot attach or commit after revocation is observed.
 - Existing raw local files remain on disk after revocation, but they cannot become shared truth through AgentFS commit.
 

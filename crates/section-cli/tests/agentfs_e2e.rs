@@ -431,6 +431,26 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
         .any(|share| share["share"]["share_id"] == share_id));
     let accept = writer.accept(&share_id);
     assert_eq!(accept["fs"]["fs_id"], fs_id);
+    let credential = &accept["credential_binding"];
+    assert!(credential["credential_binding_id"]
+        .as_str()
+        .expect("credential binding id")
+        .starts_with("cred_"));
+    assert_eq!(credential["fs_id"], fs_id);
+    assert_eq!(credential["agent_id"], writer_id);
+    assert!(credential["installation_id"]
+        .as_str()
+        .expect("installation id")
+        .starts_with("ins_"));
+    assert_eq!(
+        credential["source_profile_id"],
+        accept["fs"]["source_profile_id"]
+    );
+    assert!(
+        credential["expires_at_ms"].as_i64().expect("expires")
+            > credential["issued_at_ms"].as_i64().expect("issued"),
+        "credential binding must be short-lived with an expiry"
+    );
     assert!(
         !serde_json::to_string(&accept)
             .expect("accept json string")
@@ -851,6 +871,20 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
     let manager_grant = manager.grant(&stranger_id, "reader");
     assert_eq!(manager_grant["grant"]["agent_id"], stranger_id);
     assert_eq!(manager_grant["grant"]["role"], "reader");
+    let managed_share = manager.share(&stranger_id);
+    let managed_share_id = managed_share["share"]["share_id"]
+        .as_str()
+        .expect("manager-created share id");
+    let stranger_available = stranger.available();
+    assert!(stranger_available["available"]
+        .as_array()
+        .expect("stranger available shares")
+        .iter()
+        .any(|share| share["share"]["share_id"] == managed_share_id));
+    stranger.accept(managed_share_id);
+    stranger.attach();
+    let stranger_status = stranger.fs_status(&stranger.local_root.to_string_lossy());
+    assert_eq!(stranger_status["status"]["role"], "reader");
     let manager_revoke = manager.revoke(&stranger_id);
     assert_eq!(
         manager_revoke["revoked"][0]["agent_id"], stranger_id,
