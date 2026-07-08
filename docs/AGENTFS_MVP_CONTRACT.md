@@ -126,10 +126,12 @@ Authority rules:
 
 ### Metadata Write Lock
 
-The MVP uses a single FS head lock:
+AgentFS 用锁记录保护 head 更新和 commit 接受。
+
+新的锁记录写在：
 
 ```text
-.section/agentfs/locks/head.json
+.section/agentfs/locks/head/<lock_token>.json
 ```
 
 Lock fields:
@@ -149,9 +151,13 @@ Rules:
 
 - The lock protects head updates and commit acceptance.
 - Grant, share, source profile, and credential changes are protected by Section Control Service.
-- A stale lock can be replaced after `expires_at_ms`.
-- If the lock cannot be acquired, commands return `metadata_write_conflict`.
-- The first implementation can keep lock semantics conservative and fail closed.
+- 申请锁时必须用 backing source 的 create-if-absent / `if_not_exists` 能力创建自己的锁记录。
+- 同一个 FS 里，未过期锁记录按 `created_at_ms`、`lock_token` 排序，排第一的记录持有锁。
+- 没拿到锁的命令必须删除自己的锁记录，并返回 `metadata_write_conflict`。
+- `expires_at_ms` 之后的锁记录会被忽略。
+- 释放锁只删除自己的 `<lock_token>.json`。
+- 旧版本的 `.section/agentfs/locks/head.json` 如果还存在且未过期，会继续阻塞写入；新版本不再写这个单文件锁。
+- AgentFS 不做无条件覆盖 fallback。backing source 必须支持 metadata 条件创建和锁目录一致列举；不支持时命令失败。
 
 ## 4. Metadata Schemas
 
@@ -402,6 +408,11 @@ fs.error
 
 Event records are immutable.
 
+Event files are written with backing source create-if-absent / `if_not_exists`.
+If `.section/agentfs/events/<event_id>.json` already exists, the command returns
+`metadata_write_conflict` and keeps the old event content unchanged. AgentFS
+does not fall back to read-then-write overwrite behavior.
+
 Replay:
 
 - event files are listed under `.section/agentfs/events/`,
@@ -491,7 +502,7 @@ Errors must have stable codes for JSON output.
 | `reserved_metadata_path` | operation attempts to commit `.section/**` | no |
 | `materialization_failed` | accepted commit could not update backing source | yes, repair/retry materialization |
 | `malformed_shared_metadata` | shared metadata failed schema validation | no, repair metadata |
-| `metadata_write_conflict` | lock or head update conflict | yes |
+| `metadata_write_conflict` | metadata lock, head update, or immutable event conflict | yes |
 
 JSON shape:
 

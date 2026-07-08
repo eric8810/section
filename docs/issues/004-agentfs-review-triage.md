@@ -105,7 +105,7 @@ These should be fixed before calling the AgentFS MVP complete.
 
 | ID | Finding | Validity | Status |
 | --- | --- | --- | --- |
-| 2 | Metadata writes need a real head lock and conflict path. | partial | partial |
+| 2 | Metadata writes need a real head lock and conflict path. | partial | fixed-local |
 | 8 | Multiple local roots per FS are not implemented; current store is still source-level single-root. | decision | fixed-contract |
 | 9 | AgentFS JSON error contract is incomplete and inconsistent. | confirmed | fixed-local |
 | 10 | Shared metadata lacks schema/version/cross-record consistency validation. | confirmed | fixed-local |
@@ -121,7 +121,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 46 | AgentFS tests do not cover the test plan. | partial | partial |
 | 47 | Overlapping local roots can make a parent FS treat a child FS marker as user content. | confirmed | fixed-local |
 | 48 | Low-level `source bind/unbind/remove` can break AgentFS root markers. | confirmed | fixed-local |
-| 51 | AgentFS event files are not protected as append-only/immutable records. | partial | partial |
+| 51 | AgentFS event files are not protected as append-only/immutable records. | partial | fixed-local |
 
 ### P2: Hardening And Contract Cleanup
 
@@ -151,6 +151,7 @@ of the recorded baseline.
 | ID | Finding | Evidence / Fix Direction |
 | --- | --- |
 | 1 | `fs attach` could publish local files without accepted commit. | Attach now requires an empty target root and rolls back failed attach. |
+| 2 | Metadata writes needed a real lock and conflict path. | Head lock acquisition now creates unique lock records with backend `if_not_exists`; active lock contention returns `metadata_write_conflict`. |
 | 4 | Attach/status did not handle failed materialization. | Attach rejects non-materialized head; status reports materialization state. |
 | 6 | `fs create` could leave service/local/remote initialization state behind after shared metadata setup failed. | Failed create now rolls back Control Service FS/grant/event rows, removes local AgentFS source cache, cleans partial remote `.section` metadata, and E2E verifies retry create succeeds. |
 | 11 | Status role could be wrong with replaced grants. | Grant replacement now revokes previous active grants for that agent. |
@@ -170,6 +171,7 @@ of the recorded baseline.
 | 41 | Manager could self-grant writer. | Manager without commit capability cannot grant commit access to itself. |
 | 42 | Local `fs` backing root could be used as working root. | Attach now rejects working roots that overlap the backing root for the local `fs` provider. |
 | 44 | Commit commands ignored marker `local_root`. | Commit status/apply now fail if marker `local_root` differs from the current store binding. |
+| 51 | Event files were not immutable. | Event files now use backend `if_not_exists`; duplicate event ids return `metadata_write_conflict` and do not overwrite old content. |
 | 52 | Grant `capabilities` field was ignored by enforcement. | Capability checks now read the stored `capabilities` field. |
 
 ### Partially Addressed In Current Local Branch
@@ -179,7 +181,7 @@ correctness work.
 
 | ID | Finding | Remaining Gap |
 | --- | --- | --- |
-| 51 | AgentFS event files are not immutable. | Event writes now reject an already-existing event path, but this is not backend-level create-if-absent/CAS semantics. |
+| 46 | AgentFS tests do not cover the full test plan. | Current E2E covers the implemented core paths, but the test plan still needs a requirement-by-requirement coverage audit before AgentFS can be called complete. |
 
 ## Full Finding Ledger
 
@@ -188,7 +190,7 @@ This table preserves every reviewer finding for traceability.
 | ID | Finding | Priority | Validity | Status | Recommended Action |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `fs attach` can publish local-only files without accepted commit. | P0 | confirmed | fixed-local | Keep empty-root attach rule; add lower-level source escape protections. |
-| 2 | AgentFS metadata writes have no required head lock. | P1 | partial | partial | Current lock is conservative; add create-if-absent/CAS semantics or document backend limits. |
+| 2 | AgentFS metadata writes have no required head lock. | P1 | partial | fixed-local | Head lock acquisition now creates a unique lock record with backend `if_not_exists`; active lock contention returns `metadata_write_conflict`. |
 | 3 | `watch` cannot observe AgentFS events. | P0 | confirmed | fixed-local | `fs events` and `watch --agentfs` now expose AgentFS events with `seq`. |
 | 4 | Attach/status do not enforce or expose failed materialization. | P2 | partial | fixed-local | Keep tests for attach rejection and status output. |
 | 5 | Commit dirty detection uses current remote, not mounted base/path sync state. | P0 | confirmed | fixed-local | Commit now checks current backing source against trusted path sync base first; external drift returns `remote_drift` before acceptance. |
@@ -237,25 +239,22 @@ This table preserves every reviewer finding for traceability.
 | 48 | Low-level source commands can break AgentFS markers. | P1 | confirmed | fixed-local | Low-level source/path commands reject AgentFS-backed sources by default. |
 | 49 | AgentFS event replay/resume has no control-plane entry. | P0 | covered | fixed-local | `section fs events` supports replay and `--after`; `watch --agentfs` streams the same event records. |
 | 50 | `fs status` swallows corrupt local marker. | P2 | confirmed | fixed-local | `fs status <local path> --json` now returns `malformed_shared_metadata` with a local marker parse/read message. |
-| 51 | Event files are not immutable. | P1 | partial | partial | Existing event paths are rejected; still need create-if-absent semantics where backend supports it. |
+| 51 | Event files are not immutable. | P1 | partial | fixed-local | Event files now use backend `if_not_exists`; duplicate event ids return `metadata_write_conflict` and keep existing content unchanged. |
 | 52 | Grant `capabilities` field is not used for enforcement. | P2 | confirmed | fixed-local | Keep enforcement based on stored capabilities; schema validation now requires grant capabilities to match role. |
 
 ## Recommended Next Work
 
 ### Commit Current Hardening Batch
 
-The current working tree contains a focused hardening batch. Commit it before
-starting larger design work.
+The current working tree contains a focused metadata hardening batch. Commit it
+before starting larger design work.
 
 Recommended commit scope:
 
-- issue triage record,
-- non-empty backing source rejection,
-- attach/backing root overlap rejection,
-- sanitized attach output,
-- marker/store local-root mismatch rejection,
-- symlink rejection in commit path collection,
-- best-effort event immutability check.
+- event files use backend `if_not_exists`,
+- head lock uses unique lock records under `.section/agentfs/locks/head/`,
+- CLI E2E proves an active metadata lock blocks commit,
+- contract, test plan, and triage docs match the implementation.
 
 ### Next Design Pass
 
@@ -269,8 +268,7 @@ Resolved decisions:
 
 After the decisions above, prioritize:
 
-1. backend-level CAS / create-if-absent semantics for head and event metadata (#2, #51),
-2. remaining AgentFS test-plan coverage audit (#46).
+1. remaining AgentFS test-plan coverage audit (#46).
 
 ## Verification Record
 
@@ -278,8 +276,8 @@ The current working tree fixes were last checked with:
 
 ```bash
 cargo fmt --check
-cargo test -p section-provider -p sectiond --lib
-cargo test -p section-cli --test agentfs_control_plane
-cargo test -p section-cli --test agentfs_e2e
+git diff --check
+cargo test -p section-provider
+cargo test -p sectiond
 cargo test -p section-cli --tests
 ```

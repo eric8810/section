@@ -1507,6 +1507,57 @@ fn e2e_event_write_failure_does_not_advance_commit_head() {
     );
 }
 
+#[test]
+fn e2e_metadata_head_lock_blocks_commit_until_released() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    let owner_id = owner.login("owner");
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
+    owner.attach();
+
+    let lock_token = "lck_11111111111111111111111111111111";
+    let lock_dir = fixture.remote_root.join(".section/agentfs/locks/head");
+    fs::create_dir_all(&lock_dir).expect("create lock dir");
+    let lock_path = lock_dir.join(format!("{lock_token}.json"));
+    write_json(
+        &lock_path,
+        &serde_json::json!({
+            "schema_version": 1,
+            "fs_id": fs_id,
+            "lock_token": lock_token,
+            "owner_agent_id": owner_id,
+            "created_at_ms": 1,
+            "expires_at_ms": 9999999999999_i64,
+        }),
+    );
+
+    owner.write_local("docs/locked.txt", "blocked by lock");
+    let rejected = owner.commit_apply_output("blocked by active metadata lock");
+    assert_json_error(&rejected, "metadata_write_conflict");
+    assert!(
+        !fixture.path("docs/locked.txt").exists(),
+        "locked commit must not materialize user content"
+    );
+
+    fs::remove_file(&lock_path).expect("remove lock");
+    let commit = owner.commit_apply("commit after lock release");
+    let commit_id = commit["commit"]["commit_id"]
+        .as_str()
+        .expect("commit id")
+        .to_string();
+    let head = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    assert_eq!(head["commit_id"], commit_id);
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/locked.txt")).expect("read committed file"),
+        "blocked by lock"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn e2e_rejects_non_utf8_commit_paths() {

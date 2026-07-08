@@ -13,6 +13,7 @@ pub const METADATA_ROOT: &str = ".section/agentfs";
 pub const FS_PATH: &str = ".section/agentfs/fs.json";
 pub const HEAD_PATH: &str = ".section/agentfs/heads/current.json";
 pub const HEAD_LOCK_PATH: &str = ".section/agentfs/locks/head.json";
+pub const HEAD_LOCK_DIR: &str = ".section/agentfs/locks/head/";
 const HEAD_LOCK_TTL_MS: i64 = 30_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -312,7 +313,7 @@ impl AgentFsError {
     pub fn metadata_write_conflict(fs_id: &str) -> Self {
         Self::new(
             "metadata_write_conflict",
-            format!("metadata head lock is held for fs {fs_id}"),
+            format!("metadata write conflict for fs {fs_id}"),
             true,
         )
         .with_details(json!({ "fs_id": fs_id }))
@@ -941,6 +942,31 @@ pub fn write_json<T: Serialize>(
     Ok(())
 }
 
+fn write_json_if_not_exists<T: Serialize>(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    path: &str,
+    value: &T,
+    fs_id: &str,
+) -> Result<()> {
+    ensure_remote_parent_dirs(rt, op, path)?;
+    let bytes = serde_json::to_vec_pretty(value)?;
+    match rt.block_on(async { op.write_with(path, bytes).if_not_exists(true).await }) {
+        Ok(_) => Ok(()),
+        Err(err) if is_create_conflict(&err) => {
+            anyhow::bail!(AgentFsError::metadata_write_conflict(fs_id))
+        }
+        Err(err) => Err(err).with_context(|| format!("failed to write AgentFS metadata {path}")),
+    }
+}
+
+fn is_create_conflict(err: &opendal::Error) -> bool {
+    matches!(
+        err.kind(),
+        opendal::ErrorKind::AlreadyExists | opendal::ErrorKind::ConditionNotMatch
+    )
+}
+
 pub fn read_json<T: DeserializeOwned + AgentFsMetadataRecord>(
     rt: &tokio::runtime::Runtime,
     op: &Operator,
@@ -1001,12 +1027,7 @@ pub fn write_event(
         event.seq = next_event_seq(rt, op)?;
     }
     let path = format!("{METADATA_ROOT}/events/{}.json", event.event_id);
-    match rt.block_on(op.stat(&path)) {
-        Ok(_) => anyhow::bail!(AgentFsError::metadata_write_conflict(&event.fs_id)),
-        Err(err) if err.kind() == opendal::ErrorKind::NotFound => {}
-        Err(err) => return Err(err.into()),
-    }
-    write_json(rt, op, &path, &event)
+    write_json_if_not_exists(rt, op, &path, &event, &event.fs_id)
 }
 
 pub fn ensure_event_log_ready(
@@ -1057,8 +1078,19 @@ pub fn acquire_head_lock(
         created_at_ms: now,
         expires_at_ms: now + HEAD_LOCK_TTL_MS,
     };
-    write_json(rt, op, HEAD_LOCK_PATH, &lock)?;
-    Ok(lock)
+    let lock_path = head_lock_record_path(&lock.lock_token);
+    write_json_if_not_exists(rt, op, &lock_path, &lock, fs_id)?;
+
+    let active_locks = list_active_head_locks(rt, op, fs_id, now)?;
+    let acquired = active_locks
+        .first()
+        .is_some_and(|active| active.lock_token == lock.lock_token);
+    if acquired {
+        Ok(lock)
+    } else {
+        delete_head_lock_record(rt, op, &lock.lock_token)?;
+        anyhow::bail!(AgentFsError::metadata_write_conflict(fs_id));
+    }
 }
 
 pub fn release_head_lock(
@@ -1066,18 +1098,7 @@ pub fn release_head_lock(
     op: &Operator,
     lock: &AgentFsHeadLockRecord,
 ) -> Result<()> {
-    let existing = read_optional_json::<AgentFsHeadLockRecord>(rt, op, HEAD_LOCK_PATH)?;
-    if existing
-        .as_ref()
-        .is_some_and(|existing| existing.lock_token == lock.lock_token)
-    {
-        match rt.block_on(op.delete(HEAD_LOCK_PATH)) {
-            Ok(()) => {}
-            Err(err) if err.kind() == opendal::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-    }
-    Ok(())
+    delete_head_lock_record(rt, op, &lock.lock_token)
 }
 
 pub fn list_grants(rt: &tokio::runtime::Runtime, op: &Operator) -> Result<Vec<AgentFsGrantRecord>> {
@@ -1102,6 +1123,42 @@ fn next_event_seq(rt: &tokio::runtime::Runtime, op: &Operator) -> Result<i64> {
         .max()
         .unwrap_or(0);
     Ok(max_seq + 1)
+}
+
+fn head_lock_record_path(lock_token: &str) -> String {
+    format!("{HEAD_LOCK_DIR}{lock_token}.json")
+}
+
+fn list_active_head_locks(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    fs_id: &str,
+    now: i64,
+) -> Result<Vec<AgentFsHeadLockRecord>> {
+    let mut locks: Vec<AgentFsHeadLockRecord> =
+        list_json_records::<AgentFsHeadLockRecord>(rt, op, HEAD_LOCK_DIR)?
+            .into_iter()
+            .filter(|lock| lock.fs_id == fs_id && lock.expires_at_ms > now)
+            .collect();
+    locks.sort_by(|left, right| {
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
+            .then_with(|| left.lock_token.cmp(&right.lock_token))
+    });
+    Ok(locks)
+}
+
+fn delete_head_lock_record(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    lock_token: &str,
+) -> Result<()> {
+    let path = head_lock_record_path(lock_token);
+    match rt.block_on(op.delete(&path)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == opendal::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to delete AgentFS metadata {path}")),
+    }
 }
 
 pub fn initialize_fs_metadata(
@@ -1196,6 +1253,14 @@ fn random_hex(byte_len: usize) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opendal::services;
+    use std::fs;
+    use std::path::Path;
+
+    fn fs_operator(root: &Path) -> Operator {
+        let builder = services::Fs::default().root(root.to_str().expect("utf8 root"));
+        Operator::new(builder).expect("operator").finish()
+    }
 
     #[test]
     fn ids_match_contract_prefixes_and_lengths() {
@@ -1234,5 +1299,63 @@ mod tests {
         assert!(validate_source_relative_path(".section/root.json").is_err());
         assert!(validate_source_relative_path(".section/user-note.txt").is_err());
         assert!(validate_source_relative_path(".section/agentfs/fs.json").is_err());
+    }
+
+    #[test]
+    fn event_write_does_not_overwrite_existing_event_id() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let op = fs_operator(temp_dir.path());
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let fs_id = new_fs_id().expect("fs id");
+        let agent_id = new_agent_id().expect("agent id");
+        let event = event_record(
+            &fs_id,
+            "fs.created",
+            &agent_id,
+            &fs_id,
+            None,
+            serde_json::json!({ "name": "project" }),
+        )
+        .expect("event");
+
+        write_event(&rt, &op, &event).expect("write event");
+        let event_path = temp_dir
+            .path()
+            .join(METADATA_ROOT)
+            .join("events")
+            .join(format!("{}.json", event.event_id));
+        let original = fs::read_to_string(&event_path).expect("read event");
+
+        let err = write_event(&rt, &op, &event).expect_err("duplicate event should fail");
+        assert!(
+            err.to_string().contains("metadata_write_conflict"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&event_path).expect("read unchanged event"),
+            original
+        );
+    }
+
+    #[test]
+    fn head_lock_conflicts_until_released() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let op = fs_operator(temp_dir.path());
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let fs_id = new_fs_id().expect("fs id");
+        let agent_a = new_agent_id().expect("agent a");
+        let agent_b = new_agent_id().expect("agent b");
+
+        let lock = acquire_head_lock(&rt, &op, &fs_id, &agent_a).expect("first lock");
+        let err =
+            acquire_head_lock(&rt, &op, &fs_id, &agent_b).expect_err("second lock should fail");
+        assert!(
+            err.to_string().contains("metadata_write_conflict"),
+            "unexpected error: {err}"
+        );
+
+        release_head_lock(&rt, &op, &lock).expect("release lock");
+        let next = acquire_head_lock(&rt, &op, &fs_id, &agent_b).expect("lock after release");
+        assert_ne!(lock.lock_token, next.lock_token);
     }
 }
