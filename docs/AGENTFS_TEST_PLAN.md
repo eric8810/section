@@ -873,7 +873,7 @@ and P1 gaps:
 | Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 部分实现：本地 store 记录 mount/base，E2E 验证篡改 `.section/root.json` 不能绕过 stale-base；外部直接修改 backing source 时，commit 返回 `remote_drift`，不会写 accepted commit。还缺 `base_manifest_hash` 和更完整的 tree diff 证明。 |
 | Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | 已有第一版：`commit apply` 先写 staging snapshot，commit metadata 记录 snapshot，物化从 snapshot 读取。E2E 验证 live root 后续修改仍是 dirty work；本地 marker 更新失败只作为 warning 返回，不推翻已完成的治理真相。 |
 | Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 已有第一版：failed head 阻塞后续 commit，`commit repair` 用原 staging snapshot 修复同一个 commit。 |
-| Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 部分实现：已有 backing root、父子 root、runtime guardrails。还缺持久 `mount_id`/canonical root 完整断言。 |
+| Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 已有第一版：attach 和 source bind 会存 canonical local root；E2E 验证 attach JSON、marker、status 都使用 canonical root；父子 root 和 backing root overlap 会被拒绝。还缺持久 `mount_id`。 |
 | Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
 | Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 event `seq`、事件路径覆盖拒绝、commit accepted 事件失败不推进 head；还缺统一 schema validation、坏数据隔离、backend create-if-absent 断言，以及服务端事件源或 outbox。 |
 | JSON error contract | Agent callers need stable machine-readable failures. | 已有第一版：`agent`、`fs`、`commit`、`watch --agentfs` 在 `--json` 失败时输出稳定 `error.code`、`retryable`、`details`。参数错误是 `invalid_arguments`，普通运行错误统一落到 `operation_failed`。 |
@@ -909,6 +909,7 @@ It covers the product behaviors that are implemented today:
 | `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; 篡改本地 marker 不能绕过 trusted mount base；`fs status` exposes stale state and `sync` next action |
 | `e2e_backing_source_drift_cannot_be_committed_over` | backing source 被外部直接修改后，commit 返回 `remote_drift`；head、backing file、accepted event 数量都不变 |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
+| `e2e_attach_canonicalizes_local_root_identity` | attach 使用带 `..` 的路径拼写时，返回 JSON、root marker、`fs status` 都记录 canonical local root |
 | `e2e_rejects_file_dir_type_replacement_before_acceptance` | file/dir type replacement is rejected before a new accepted commit; head and backing source remain unchanged |
 | `e2e_event_write_failure_does_not_advance_commit_head` | `commit.accepted` event 写失败时，commit 命令失败；head 不前进，用户文件不物化 |
 | `e2e_rejects_non_utf8_commit_paths` | 非 UTF-8 本地文件名不会被 lossy 转成共享路径；commit 返回 `non_utf8_path`，head 和 accepted event 不变 |

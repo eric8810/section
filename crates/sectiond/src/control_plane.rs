@@ -24,7 +24,7 @@ use section_provider::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 
@@ -328,7 +328,7 @@ impl SectiondControlPlane {
         self.cache_credential_binding_record(&issued.binding)?;
         ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
 
-        let local_root = absolutize_path(local_root)?;
+        let local_root = canonicalize_local_root_input(local_root)?;
         ensure_attach_root_does_not_overlap_backing_root(&resolved.source, &local_root)?;
         ensure_local_root_does_not_overlap_existing(
             &self.store,
@@ -1049,7 +1049,7 @@ impl SectiondControlPlane {
     ) -> Result<SourceRegistryEntry> {
         self.ensure_public_source_exists(name)?;
 
-        let local_root = absolutize_path(local_root)?;
+        let local_root = canonicalize_local_root_input(local_root)?;
         ensure_local_root_does_not_overlap_existing(&self.store, name, &local_root)?;
         let previous_root = self.store.get_source_local_root(name)?;
         self.store.set_source_local_root(name, &local_root)?;
@@ -1599,7 +1599,13 @@ fn ensure_local_root_does_not_overlap_existing(
     Ok(())
 }
 
+fn canonicalize_local_root_input(path: &Path) -> Result<PathBuf> {
+    canonicalize_existing_or_future_path(&absolutize_path(path)?)
+}
+
 fn canonicalize_existing_or_future_path(path: &Path) -> Result<PathBuf> {
+    let normalized = normalize_path_components(path);
+    let path = normalized.as_path();
     if path.exists() {
         return Ok(path.canonicalize()?);
     }
@@ -1621,6 +1627,22 @@ fn canonicalize_existing_or_future_path(path: &Path) -> Result<PathBuf> {
         canonical.push(segment);
     }
     Ok(canonical)
+}
+
+fn normalize_path_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    normalized
 }
 
 fn local_mount_from_marker(
@@ -2693,19 +2715,56 @@ mod tests {
             .expect("add source");
 
         let local_root = temp_dir.path().join("bound-root");
+        std::fs::create_dir_all(&local_root).expect("create local root");
+        let canonical_root = local_root.canonicalize().expect("canonical root");
         let entry = control
             .source_bind_local_root("store-only", &local_root)
             .expect("bind local root");
 
-        assert_eq!(entry.local_root, Some(local_root.clone()));
+        assert_eq!(entry.local_root, Some(canonical_root.clone()));
 
-        let marker =
-            std::fs::read(local_root.join(".section").join("root.json")).expect("read root marker");
+        let marker = std::fs::read(canonical_root.join(".section").join("root.json"))
+            .expect("read root marker");
         let marker: RootDiscoveryMarker =
             serde_json::from_slice(&marker).expect("parse root marker");
         assert_eq!(marker.source_id, "store-only");
-        assert_eq!(marker.local_root, local_root);
+        assert_eq!(marker.local_root, canonical_root);
         assert_eq!(marker.control_plane_endpoint, "sectiond://local");
+    }
+
+    #[test]
+    fn source_bind_local_root_canonicalizes_path_spelling() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("section.toml");
+        write_config(temp_dir.path(), &config_path, "config-only");
+
+        let control = SectiondControlPlane::load(Some(&config_path)).expect("control plane");
+        control
+            .source_add(
+                "store-only",
+                "fs",
+                HashMap::from([("root".to_string(), "/tmp/from-store".to_string())]),
+            )
+            .expect("add source");
+
+        let parent = temp_dir.path().join("roots");
+        let alias_parent = parent.join("alias");
+        let local_root = parent.join("bound-root");
+        std::fs::create_dir_all(&alias_parent).expect("create alias parent");
+        std::fs::create_dir_all(&local_root).expect("create local root");
+        let spelled_root = alias_parent.join("..").join("bound-root");
+        let canonical_root = local_root.canonicalize().expect("canonical root");
+
+        let entry = control
+            .source_bind_local_root("store-only", &spelled_root)
+            .expect("bind local root");
+
+        assert_eq!(entry.local_root, Some(canonical_root.clone()));
+        let marker = std::fs::read(canonical_root.join(".section").join("root.json"))
+            .expect("read root marker");
+        let marker: RootDiscoveryMarker =
+            serde_json::from_slice(&marker).expect("parse root marker");
+        assert_eq!(marker.local_root, canonical_root);
     }
 
     #[test]
@@ -2724,6 +2783,8 @@ mod tests {
             .expect("add source");
 
         let local_root = temp_dir.path().join("bound-root");
+        std::fs::create_dir_all(&local_root).expect("create local root");
+        let canonical_root = local_root.canonicalize().expect("canonical root");
         control
             .source_bind_local_root("store-only", &local_root)
             .expect("bind local root");
@@ -2751,7 +2812,7 @@ mod tests {
 
         let inspect = control.path_inspect(&nested).expect("path inspect");
         assert_eq!(inspect.source_id, "store-only");
-        assert_eq!(inspect.local_root, local_root);
+        assert_eq!(inspect.local_root, canonical_root);
         assert_eq!(inspect.local_path, nested);
         assert_eq!(inspect.source_path, "notes/todo.txt");
         assert_eq!(inspect.state, "conflict");
@@ -2779,6 +2840,7 @@ mod tests {
             .expect("add source");
 
         let local_root = temp_dir.path().join("bound-root");
+        std::fs::create_dir_all(&local_root).expect("create local root");
         control
             .source_bind_local_root("store-only", &local_root)
             .expect("bind local root");

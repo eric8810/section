@@ -926,6 +926,41 @@ fn e2e_hardening_rejects_unsafe_backing_source_and_attach_root() {
 }
 
 #[test]
+fn e2e_attach_canonicalizes_local_root_identity() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+
+    let parent = fixture.root.join("roots");
+    let alias_parent = parent.join("alias");
+    let canonical_root = parent.join("canonical-root");
+    fs::create_dir_all(&alias_parent).expect("create alias parent");
+    fs::create_dir_all(&canonical_root).expect("create canonical root");
+    let spelled_root = alias_parent.join("..").join("canonical-root");
+    let canonical_root = canonical_root.canonicalize().expect("canonical root");
+    let canonical_root_str = canonical_root.to_string_lossy().to_string();
+
+    let attach = owner.attach_to(&spelled_root);
+    assert_eq!(
+        attach["attach"]["local_root"].as_str(),
+        Some(canonical_root_str.as_str())
+    );
+    let marker = read_json(canonical_root.join(".section/root.json"));
+    assert_eq!(
+        marker["local_root"].as_str(),
+        Some(canonical_root_str.as_str())
+    );
+
+    let status = owner.fs_status(&canonical_root.to_string_lossy());
+    assert_eq!(
+        status["status"]["local_root"].as_str(),
+        Some(canonical_root_str.as_str())
+    );
+    assert_eq!(status["status"]["stale"], false);
+}
+
+#[test]
 fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
     let fixture = AgentFsFixture::new();
     let owner = fixture.agent("owner");

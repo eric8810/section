@@ -113,13 +113,13 @@ These should be fixed before calling the AgentFS MVP complete.
 | 16 | Non-UTF-8 local paths are lossy-converted instead of rejected. | confirmed | fixed-local |
 | 26 | Accepted commits do not record which grant allowed the mutation. | confirmed | fixed-local |
 | 29 | A committed/materialized mutation can be reported as failed if final local marker write fails. | confirmed | fixed-local |
-| 39 | Local root identity is not canonicalized. | confirmed | open |
+| 39 | Local root identity is not canonicalized. | confirmed | fixed-local |
 | 40 | A bad `fs.json` in an unrelated source can block lookup of a healthy FS. | confirmed | fixed-local |
 | 43 | FS reference resolution does not support local source aliases and can pick the first name collision. | confirmed | fixed-local |
 | 45 | File/directory type replacement is accepted before sync later reports conflict. | confirmed | fixed-local |
 | 46 | AgentFS tests do not cover the test plan. | partial | partial |
-| 47 | Overlapping local roots can make a parent FS treat a child FS marker as user content. | confirmed | open |
-| 48 | Low-level `source bind/unbind/remove` can break AgentFS root markers. | confirmed | open |
+| 47 | Overlapping local roots can make a parent FS treat a child FS marker as user content. | confirmed | fixed-local |
+| 48 | Low-level `source bind/unbind/remove` can break AgentFS root markers. | confirmed | fixed-local |
 | 51 | AgentFS event files are not protected as append-only/immutable records. | partial | partial |
 
 ### P2: Hardening And Contract Cleanup
@@ -222,7 +222,7 @@ This table preserves every reviewer finding for traceability.
 | 36 | Attach ignores sync conflicts. | P0 | confirmed | fixed-local | Keep conflict rejection and rollback. |
 | 37 | Same local root can be stolen by another source. | P1 | confirmed | fixed-local | Keep cross-source collision rejection; add canonical path check separately. |
 | 38 | `fs create` overwrites existing store-owned source. | P1 | confirmed | fixed-local | Keep source-exists guard. |
-| 39 | Local root is not canonicalized. | P1 | confirmed | open | Canonicalize existing roots; handle not-yet-created roots carefully. |
+| 39 | Local root is not canonicalized. | P1 | confirmed | fixed-local | Attach and source bind now store canonical local roots; E2E verifies attach JSON, marker, and status use the canonical root. |
 | 40 | Bad metadata in unrelated source blocks healthy FS lookup. | P1 | confirmed | fixed-local | AgentFS lookup resolves through Control Service records; E2E proves unrelated malformed source metadata does not block healthy FS status/events. |
 | 41 | Manager can self-grant writer. | P0 | confirmed | fixed-local | Keep self-escalation guard. |
 | 42 | Backing root can be attached as working root for `fs` provider. | P0 | confirmed | fixed-local | Reject local roots overlapping provider backing root for local fs provider. |
@@ -230,7 +230,7 @@ This table preserves every reviewer finding for traceability.
 | 44 | Commit commands ignore marker `local_root`. | P0 | confirmed | fixed-local | Use marker root or fail on marker/store mismatch. |
 | 45 | File/dir type replacement is accepted then fails materialization. | P1 | confirmed | fixed-local | Preflight rejects same-path file/dir type conflicts with `path_type_conflict` before writing accepted commit metadata. |
 | 46 | AgentFS tests do not cover the test plan. | P1 | partial | partial | CLI E2E tests now cover the implemented product path; continue converting product-complete gaps into tests as features land. |
-| 47 | Overlapping local roots can leak child markers. | P1 | confirmed | open | Reject overlapping roots after canonicalization. |
+| 47 | Overlapping local roots can leak child markers. | P1 | confirmed | fixed-local | Parent/child roots are rejected after canonicalization so nested root markers cannot become user content. |
 | 48 | Low-level source commands can break AgentFS markers. | P1 | confirmed | fixed-local | Low-level source/path commands reject AgentFS-backed sources by default. |
 | 49 | AgentFS event replay/resume has no control-plane entry. | P0 | covered | fixed-local | `section fs events` supports replay and `--after`; `watch --agentfs` streams the same event records. |
 | 50 | `fs status` swallows corrupt local marker. | P2 | confirmed | open | Report marker error in status output. |
