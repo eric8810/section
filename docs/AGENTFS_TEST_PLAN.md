@@ -935,13 +935,13 @@ It covers the product behaviors that are implemented today:
 | `e2e_commit_success_survives_local_marker_update_failure` | accepted/materialized commit still succeeds when final local marker update fails; warning is returned and trusted mount base is updated |
 | `e2e_hardening_rejects_symlink_commit_paths` | symlink paths cannot materialize files outside the working root |
 
-It intentionally does not mark the core product-complete gaps above as
-passing tests until those product capabilities exist.
+The list above is the current proof set for the AgentFS core. It does not claim
+the P2 extension features below are implemented.
 
 ### Current MVP E2E Non-Goals
 
-Until the future feature E2Es above are implemented, the current MVP E2E suite
-must not claim unsupported behavior:
+Until the future feature E2Es below are implemented, the current MVP E2E suite
+must not claim unsupported P2 behavior:
 
 - no path-scoped grant enforcement,
 - no hook execution,
