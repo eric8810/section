@@ -342,6 +342,20 @@ impl AgentFsError {
         }))
     }
 
+    pub fn non_utf8_path(path: &std::path::Path) -> Self {
+        Self::new(
+            "non_utf8_path",
+            format!(
+                "AgentFS commit only supports UTF-8 source-relative paths: {}",
+                path.display()
+            ),
+            false,
+        )
+        .with_details(json!({
+            "local_path": path.display().to_string(),
+        }))
+    }
+
     pub fn remote_drift(
         path: &str,
         expected_kind: Option<&str>,

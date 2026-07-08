@@ -110,7 +110,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 13 | Materialization retry/repair does not exist. | confirmed | fixed-local |
 | 14 | Event ordering can reverse within the same millisecond due to random suffix sorting. | confirmed | fixed-local |
 | 15 | FS metadata initialization is not failure-safe. | confirmed | open |
-| 16 | Non-UTF-8 local paths are lossy-converted instead of rejected. | confirmed | open |
+| 16 | Non-UTF-8 local paths are lossy-converted instead of rejected. | confirmed | fixed-local |
 | 26 | Accepted commits do not record which grant allowed the mutation. | confirmed | fixed-local |
 | 29 | A committed/materialized mutation can be reported as failed if final local marker write fails. | confirmed | fixed-local |
 | 39 | Local root identity is not canonicalized. | confirmed | open |
@@ -199,7 +199,7 @@ This table preserves every reviewer finding for traceability.
 | 13 | Materialization retry/repair is missing. | P1 | confirmed | fixed-local | `commit repair` reuses the original commit id and staging snapshot. |
 | 14 | Event ordering can reverse within the same millisecond. | P1 | confirmed | fixed-local | Events now carry monotonic per-FS `seq` and replay sorts by `seq`. |
 | 15 | FS metadata initialization is not failure-safe. | P1 | confirmed | open | Stage metadata or add initialization state and recovery. |
-| 16 | Non-UTF-8 paths are lossy converted. | P1 | confirmed | open | Reject non-UTF-8 paths with typed error. |
+| 16 | Non-UTF-8 paths are lossy converted. | P1 | confirmed | fixed-local | AgentFS commit now rejects non-UTF-8 local paths with `non_utf8_path` before acceptance. |
 | 17 | Materialization failure does not emit `fs.error`. | P2 | confirmed | open | Emit both commit failure and FS state event. |
 | 18 | Non-empty backing source can become head-null FS truth. | P0 | confirmed | fixed-local | Reject non-empty backing source or import it as initial commit. |
 | 19 | Stale-base check trusts editable root marker. | P0 | confirmed | fixed-local | Commit/status use the trusted local mount store for base; E2E verifies marker base tampering cannot bypass stale-base. |

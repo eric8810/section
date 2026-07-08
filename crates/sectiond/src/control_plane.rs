@@ -2326,11 +2326,14 @@ fn collect_remote_agent_paths(
 
 fn normalize_local_relative_path(root: &Path, path: &Path) -> Result<String> {
     let relative = path.strip_prefix(root)?;
-    Ok(relative
-        .iter()
-        .map(|segment| segment.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/"))
+    let mut normalized = Vec::new();
+    for segment in relative.iter() {
+        let Some(segment) = segment.to_str() else {
+            anyhow::bail!(AgentFsError::non_utf8_path(path));
+        };
+        normalized.push(segment);
+    }
+    Ok(normalized.join("/"))
 }
 
 fn normalize_agent_source_path(path: &str) -> String {

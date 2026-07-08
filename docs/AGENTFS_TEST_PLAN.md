@@ -714,6 +714,7 @@ This proves low-level source/path commands do not silently bypass AgentFS.
 | 3 | owner | status corrupt metadata with `--json` | `error.code = malformed_shared_metadata` |
 | 4 | writer | commit while head failed materialization with `--json` | `error.code = materialization_failed`, `retryable = true` |
 | 5 | test harness | hold metadata lock, then run grant or commit with `--json` | `error.code = metadata_write_conflict`, `retryable = true` |
+| 6 | writer | commit a local path that is not UTF-8 | `error.code = non_utf8_path`, no accepted commit |
 
 This proves Agent callers can make decisions from stable error codes.
 
@@ -909,6 +910,7 @@ It covers the product behaviors that are implemented today:
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
 | `e2e_rejects_file_dir_type_replacement_before_acceptance` | file/dir type replacement is rejected before a new accepted commit; head and backing source remain unchanged |
 | `e2e_event_write_failure_does_not_advance_commit_head` | `commit.accepted` event 写失败时，commit 命令失败；head 不前进，用户文件不物化 |
+| `e2e_rejects_non_utf8_commit_paths` | 非 UTF-8 本地文件名不会被 lossy 转成共享路径；commit 返回 `non_utf8_path`，head 和 accepted event 不变 |
 | `e2e_commit_success_survives_local_marker_update_failure` | accepted/materialized commit still succeeds when final local marker update fails; warning is returned and trusted mount base is updated |
 | `e2e_hardening_rejects_symlink_commit_paths` | symlink paths cannot materialize files outside the working root |
 

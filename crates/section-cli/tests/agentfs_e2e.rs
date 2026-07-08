@@ -993,6 +993,52 @@ fn e2e_event_write_failure_does_not_advance_commit_head() {
 
 #[cfg(unix)]
 #[test]
+fn e2e_rejects_non_utf8_commit_paths() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    let accepted_before = owner.fs_events(FS_NAME, None)["events"]
+        .as_array()
+        .expect("events before non-utf8")
+        .iter()
+        .filter(|event| event["kind"] == "commit.accepted")
+        .count();
+    let bad_name = OsString::from_vec(vec![b'b', b'a', b'd', b'-', 0xff, b'.', b't', b'x', b't']);
+    fs::write(owner.local_root.join(bad_name), "must stay local").expect("write non-utf8 file");
+
+    let rejected = owner.commit_apply_output("must reject non-utf8");
+    let error = assert_json_error(&rejected, "non_utf8_path");
+    assert!(error["error"]["details"]["local_path"]
+        .as_str()
+        .expect("local path detail")
+        .contains("bad-"));
+
+    let head = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    assert!(head["commit_id"].is_null());
+    let accepted_after = owner.fs_events(FS_NAME, None)["events"]
+        .as_array()
+        .expect("events after non-utf8")
+        .iter()
+        .filter(|event| event["kind"] == "commit.accepted")
+        .count();
+    assert_eq!(
+        accepted_after, accepted_before,
+        "non-utf8 path rejection must not accept a commit"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn e2e_commit_success_survives_local_marker_update_failure() {
     use std::os::unix::fs::PermissionsExt;
 
