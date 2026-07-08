@@ -933,15 +933,66 @@ impl ControlServiceStore {
     }
 
     fn find_filesystem(&self, fs_ref: &str) -> Result<Option<AgentFsRecord>> {
-        self.conn
+        if let Some(fs) = self
+            .conn
             .query_row(
                 "SELECT fs_id, name, owner_agent_id, source_profile_id, source_name, created_at_ms
                  FROM filesystems
-                 WHERE fs_id = ?1 OR name = ?1",
+                 WHERE fs_id = ?1",
                 [fs_ref],
                 read_fs_row,
             )
-            .optional()
+            .optional()?
+        {
+            return Ok(Some(fs));
+        }
+
+        let by_source_name = self.find_filesystems_by("source_name", fs_ref)?;
+        match by_source_name.as_slice() {
+            [] => {}
+            [fs] => return Ok(Some(fs.clone())),
+            matches => {
+                let ids = matches
+                    .iter()
+                    .map(|fs| fs.fs_id.clone())
+                    .collect::<Vec<_>>();
+                anyhow::bail!(AgentFsError::ambiguous_fs_ref(fs_ref, "source_name", &ids));
+            }
+        }
+
+        let by_name = self.find_filesystems_by("name", fs_ref)?;
+        match by_name.as_slice() {
+            [] => Ok(None),
+            [fs] => Ok(Some(fs.clone())),
+            matches => {
+                let ids = matches
+                    .iter()
+                    .map(|fs| fs.fs_id.clone())
+                    .collect::<Vec<_>>();
+                anyhow::bail!(AgentFsError::ambiguous_fs_ref(fs_ref, "name", &ids));
+            }
+        }
+    }
+
+    fn find_filesystems_by(&self, field: &str, value: &str) -> Result<Vec<AgentFsRecord>> {
+        let sql = match field {
+            "name" => {
+                "SELECT fs_id, name, owner_agent_id, source_profile_id, source_name, created_at_ms
+                 FROM filesystems
+                 WHERE name = ?1
+                 ORDER BY fs_id"
+            }
+            "source_name" => {
+                "SELECT fs_id, name, owner_agent_id, source_profile_id, source_name, created_at_ms
+                 FROM filesystems
+                 WHERE source_name = ?1
+                 ORDER BY fs_id"
+            }
+            _ => unreachable!("unsupported AgentFS lookup field"),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([value], read_fs_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 

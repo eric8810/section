@@ -30,6 +30,7 @@ notify.workspace = true
 cucumber.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+rusqlite.workspace = true
 
 [[test]]
 name = "bdd"

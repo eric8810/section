@@ -50,6 +50,33 @@ impl AgentFsFixture {
     fn path(&self, relative_path: &str) -> PathBuf {
         self.remote_root.join(relative_path)
     }
+
+    fn set_fs_source_name(&self, fs_id: &str, source_name: &str) {
+        let conn = rusqlite::Connection::open(&self.control_service_path).expect("control db");
+        conn.execute(
+            "UPDATE filesystems SET source_name = ?1 WHERE fs_id = ?2",
+            rusqlite::params![source_name, fs_id],
+        )
+        .expect("update source_name");
+    }
+
+    fn insert_duplicate_source_name(&self, fs_id: &str, name: &str, source_name: &str) {
+        let conn = rusqlite::Connection::open(&self.control_service_path).expect("control db");
+        let (owner_agent_id, source_profile_id): (String, String) = conn
+            .query_row(
+                "SELECT owner_agent_id, source_profile_id FROM filesystems LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read existing fs fields");
+        conn.execute(
+            "INSERT INTO filesystems (
+                fs_id, name, owner_agent_id, source_profile_id, source_name, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            rusqlite::params![fs_id, name, owner_agent_id, source_profile_id, source_name],
+        )
+        .expect("insert duplicate source_name fs");
+    }
 }
 
 struct AgentFsActor {
@@ -160,7 +187,13 @@ impl AgentFsActor {
     }
 
     fn fs_status(&self, fs_ref: &str) -> Value {
-        self.json_owned(vec![
+        let output = self.fs_status_output(fs_ref);
+        assert_success(&output, "fs status");
+        serde_json::from_slice(&output.stdout).expect("status json")
+    }
+
+    fn fs_status_output(&self, fs_ref: &str) -> Output {
+        self.run_owned(vec![
             "--json".to_string(),
             "fs".to_string(),
             "status".to_string(),
@@ -524,6 +557,39 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
             .expect("owner reads accepted writer content"),
         "hello from writer"
     );
+}
+
+#[test]
+fn e2e_fs_ref_resolves_source_name_and_rejects_ambiguity() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
+
+    fixture.set_fs_source_name(&fs_id, "legacy-source");
+    let status_by_source_name = owner.fs_status("legacy-source");
+    assert_eq!(status_by_source_name["status"]["fs"]["fs_id"], fs_id);
+
+    fixture.insert_duplicate_source_name(
+        "fs_deadbeefdeadbeefdeadbeefdeadbeef",
+        "other",
+        "legacy-source",
+    );
+    let ambiguous = owner.fs_status_output("legacy-source");
+    let error = assert_json_error(&ambiguous, "ambiguous_fs_ref");
+    assert_eq!(error["error"]["details"]["reference"], "legacy-source");
+    assert_eq!(error["error"]["details"]["matched_field"], "source_name");
+    assert_eq!(
+        error["error"]["details"]["matches"]
+            .as_array()
+            .expect("matches")
+            .len(),
+        2
+    );
+
+    let status_by_fs_id = owner.fs_status(&fs_id);
+    assert_eq!(status_by_fs_id["status"]["fs"]["fs_id"], fs_id);
 }
 
 #[test]

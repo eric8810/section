@@ -259,6 +259,21 @@ impl AgentFsError {
         .with_details(json!({ "reference": reference }))
     }
 
+    pub fn ambiguous_fs_ref(reference: &str, matched_field: &str, matches: &[String]) -> Self {
+        Self::new(
+            "ambiguous_fs_ref",
+            format!(
+                "AgentFS reference {reference} matched multiple filesystems by {matched_field}"
+            ),
+            false,
+        )
+        .with_details(json!({
+            "reference": reference,
+            "matched_field": matched_field,
+            "matches": matches,
+        }))
+    }
+
     pub fn grant_denied(message: impl Into<String>) -> Self {
         Self::new("grant_denied", message, false)
     }

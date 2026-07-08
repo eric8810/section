@@ -115,7 +115,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 29 | A committed/materialized mutation can be reported as failed if final local marker write fails. | confirmed | fixed-local |
 | 39 | Local root identity is not canonicalized. | confirmed | open |
 | 40 | A bad `fs.json` in an unrelated source can block lookup of a healthy FS. | confirmed | open |
-| 43 | FS reference resolution does not support local source aliases and can pick the first name collision. | confirmed | open |
+| 43 | FS reference resolution does not support local source aliases and can pick the first name collision. | confirmed | fixed-local |
 | 45 | File/directory type replacement is accepted before sync later reports conflict. | confirmed | fixed-local |
 | 46 | AgentFS tests do not cover the test plan. | partial | partial |
 | 47 | Overlapping local roots can make a parent FS treat a child FS marker as user content. | confirmed | open |
@@ -226,7 +226,7 @@ This table preserves every reviewer finding for traceability.
 | 40 | Bad metadata in unrelated source blocks healthy FS lookup. | P1 | confirmed | open | Only parse candidate source when ref points to source; otherwise collect per-source errors. |
 | 41 | Manager can self-grant writer. | P0 | confirmed | fixed-local | Keep self-escalation guard. |
 | 42 | Backing root can be attached as working root for `fs` provider. | P0 | confirmed | fixed-local | Reject local roots overlapping provider backing root for local fs provider. |
-| 43 | FS ref lookup mishandles local aliases and name collisions. | P1 | confirmed | open | Define lookup precedence and ambiguity errors. |
+| 43 | FS ref lookup mishandles local aliases and name collisions. | P1 | confirmed | fixed-local | Lookup now prefers exact fs id, then source name, then FS name; duplicate source/name matches return `ambiguous_fs_ref`. |
 | 44 | Commit commands ignore marker `local_root`. | P0 | confirmed | fixed-local | Use marker root or fail on marker/store mismatch. |
 | 45 | File/dir type replacement is accepted then fails materialization. | P1 | confirmed | fixed-local | Preflight rejects same-path file/dir type conflicts with `path_type_conflict` before writing accepted commit metadata. |
 | 46 | AgentFS tests do not cover the test plan. | P1 | partial | partial | CLI E2E tests now cover the implemented product path; continue converting product-complete gaps into tests as features land. |
@@ -270,7 +270,7 @@ After the decisions above, prioritize:
 2. safe FS initialization and recovery (#6, #15, #20),
 3. schema validation and backend-level event immutability (#10, #51),
 4. local root canonicalization and overlap (#39, #47),
-5. bad metadata isolation and FS reference ambiguity (#40, #43).
+5. bad metadata isolation (#40).
 
 ## Verification Record
 

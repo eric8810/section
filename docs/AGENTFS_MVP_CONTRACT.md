@@ -538,6 +538,8 @@ Rules:
 规则：
 
 - `status` 可以解析 FS id、FS name、source name、local root。
+- 非本地路径 ref 的解析顺序是：精确 FS id，精确 source name，精确 FS name。
+- 如果 source name 或 FS name 命中多个候选，返回 `ambiguous_fs_ref`。
 - local root 解析必须看本地 mount store，不能只看 `.section/root.json`。
 - `status` 不修改共享状态。
 - 如果 Agent 现在不能行动，`next_actions` 说明下一步安全动作，例如 `login`、`accept`、`attach`、`sync`、`repair`、`request_grant`。

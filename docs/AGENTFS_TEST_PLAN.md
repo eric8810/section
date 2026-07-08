@@ -664,7 +664,7 @@ This proves repair fixes the accepted head instead of creating a second truth.
 | 2 | test harness | create another source with malformed `.section/agentfs/fs.json` | corrupt source exists |
 | 3 | owner | `fs status good --json` | succeeds; may include warning about unrelated bad metadata |
 | 4 | owner | `fs status corrupt --json` | fails with `malformed_shared_metadata` |
-| 5 | test harness | create two FS records with same display name | lookup by name fails with `ambiguous_fs_ref` |
+| 5 | test harness | create two FS records with same source name | lookup by source name fails with `ambiguous_fs_ref` |
 | 6 | owner | lookup by exact `fs_id` | exact id still resolves |
 
 This proves bad metadata is isolated to the affected FS or lookup candidate.
@@ -890,6 +890,7 @@ It covers the product behaviors that are implemented today:
 | Test | E2E Scenarios Covered |
 | --- | --- |
 | `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; staging snapshot、repair、`fs events` replay、`watch --agentfs`、event `seq`、`authorized_by`、JSON error payload 都可验证 |
+| `e2e_fs_ref_resolves_source_name_and_rejects_ambiguity` | `fs status` resolves by source name; duplicate source-name refs fail with `ambiguous_fs_ref`; exact fs id still resolves |
 | `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit; `fs status` exposes role、capabilities、dirty、next_actions |
 | `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; 篡改本地 marker 不能绕过 trusted mount base；`fs status` exposes stale state and `sync` next action |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |

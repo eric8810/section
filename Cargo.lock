@@ -2149,6 +2149,7 @@ dependencies = [
  "futures",
  "notify",
  "opendal",
+ "rusqlite",
  "section-core",
  "section-provider",
  "sectiond",
