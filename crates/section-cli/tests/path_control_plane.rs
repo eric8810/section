@@ -75,14 +75,18 @@ fn source_bind_and_local_path_inspect_work_end_to_end() {
     );
 
     let inspect: Value = serde_json::from_slice(&inspect.stdout).expect("parse inspect json");
+    let canonical_local_root = local_root.canonicalize().expect("canonical local root");
+    let canonical_local_file = local_file.canonicalize().expect("canonical local file");
+    let canonical_local_root = canonical_local_root.to_string_lossy().to_string();
+    let canonical_local_file = canonical_local_file.to_string_lossy().to_string();
     assert_eq!(inspect["source_id"], "local");
     assert_eq!(
         inspect["local_root"].as_str(),
-        Some(local_root.to_str().expect("utf8 local root"))
+        Some(canonical_local_root.as_str())
     );
     assert_eq!(
         inspect["local_path"].as_str(),
-        Some(local_file.to_str().expect("utf8 local file"))
+        Some(canonical_local_file.as_str())
     );
     assert_eq!(inspect["source_path"], "notes/todo.txt");
     assert_eq!(inspect["state"], "ready");
@@ -103,6 +107,6 @@ fn source_bind_and_local_path_inspect_work_end_to_end() {
     assert_eq!(sources[0]["name"], "local");
     assert_eq!(
         sources[0]["local_root"].as_str(),
-        Some(local_root.to_str().expect("utf8 local root"))
+        Some(canonical_local_root.as_str())
     );
 }
