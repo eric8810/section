@@ -431,15 +431,17 @@ impl SectiondControlPlane {
         let rt = tokio::runtime::Runtime::new()?;
         let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
         let resolved = self.find_agentfs(&rt, &resolved_ref)?;
+        let agent = self.require_agent_identity()?;
+        self.control_service.authorize_capability(
+            &resolved.fs.fs_id,
+            &agent.agent_id,
+            AgentFsCapability::Read,
+        )?;
         let materialization_state =
             head_materialization_state(&rt, &resolved.operator, &resolved.head)?;
-        let agent = self.agent_identify()?;
-        let role = match agent.as_ref() {
-            Some(agent) => self
-                .control_service
-                .active_role(&resolved.fs, &agent.agent_id)?,
-            None => None,
-        };
+        let role = self
+            .control_service
+            .active_role(&resolved.fs, &agent.agent_id)?;
         let capabilities = role.map(AgentFsRole::capabilities).unwrap_or_default();
         let local_root = self.store.get_source_local_root(&resolved.source.name)?;
         let mount = self.store.get_agentfs_mount(&resolved.source.name)?;
@@ -471,10 +473,6 @@ impl SectiondControlPlane {
         };
         let dirty = dirty_count > 0;
 
-        if agent.is_none() {
-            warnings.push("agent is not logged in".to_string());
-            next_actions.push("login".to_string());
-        }
         if local_root.is_none() {
             warnings.push("fs is not attached on this installation".to_string());
             next_actions.push("attach".to_string());
@@ -510,7 +508,7 @@ impl SectiondControlPlane {
             head: resolved.head,
             materialization_state,
             local_root,
-            agent_id: agent.map(|agent| agent.agent_id),
+            agent_id: Some(agent.agent_id),
             role,
             capabilities,
             base_commit_id,
@@ -531,6 +529,12 @@ impl SectiondControlPlane {
         let rt = tokio::runtime::Runtime::new()?;
         let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
         let resolved = self.find_agentfs(&rt, &resolved_ref)?;
+        let agent = self.require_agent_identity()?;
+        self.control_service.authorize_capability(
+            &resolved.fs.fs_id,
+            &agent.agent_id,
+            AgentFsCapability::Read,
+        )?;
         let events = agentfs::list_events(&rt, &resolved.operator)?;
         ensure_events_match_fs(&events, &resolved.fs.fs_id)?;
         let after_seq = parse_event_offset(after, &events)?;

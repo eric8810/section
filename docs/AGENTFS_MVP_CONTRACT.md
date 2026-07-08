@@ -118,6 +118,7 @@ Authority rules:
 - Section Control Service is authoritative for identity, grant, share, source profile, and credential decisions.
 - The backing-source metadata namespace is a mirror for materialization, audit, repair, and diagnosis.
 - Normal commits cannot modify mirrored metadata paths.
+- `fs list`, `fs status`, `fs events`, and `watch --agentfs` only expose FS metadata to agents with `read` capability.
 
 ### Metadata Write Lock
 

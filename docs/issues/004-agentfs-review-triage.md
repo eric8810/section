@@ -133,7 +133,7 @@ internal and clearly marked incomplete.
 | 11 | `fs status` role can be stale when multiple active grants exist. | partial | fixed-local |
 | 17 | Materialization failure does not emit `fs.error`. | confirmed | fixed-local |
 | 21 | Failed attach can leave a half-bound working copy. | partial | fixed-local |
-| 22 | `fs list/status` can expose FS metadata without checking read grant. | decision | decision-needed |
+| 22 | `fs list/status` can expose FS metadata without checking read grant. | decision | fixed-local |
 | 27 | `section fs status <attached local path>` does not resolve from a local path. | confirmed | fixed-local |
 | 28 | `fs status` lacks dirty state and full materialization detail. | partial | fixed-local |
 | 30 | Non-empty directory deletion can race parent/child deletes in sync transport. | confirmed | fixed-local |
@@ -205,7 +205,7 @@ This table preserves every reviewer finding for traceability.
 | 19 | Stale-base check trusts editable root marker. | P0 | confirmed | fixed-local | Commit/status use the trusted local mount store for base; E2E verifies marker base tampering cannot bypass stale-base. |
 | 20 | Governance mutation can succeed while event write fails. | P0 | confirmed | partial | Commit accepted/materialized state now writes the required event before advancing head or commit state; still need a service-side event authority or recoverable outbox for all mirrored governance mutations. |
 | 21 | Failed attach can leave half-bound working copy. | P2 | partial | fixed-local | Keep rollback tests; still check failures after event write. |
-| 22 | `fs list/status` expose metadata without read grant. | P2 | decision | decision-needed | Decide whether discoverability is allowed; otherwise filter by grant. |
+| 22 | `fs list/status` expose metadata without read grant. | P2 | decision | fixed-local | Product decision: discovery/status/events require read capability. `fs list` filters by readable FS, and `fs status`, `fs events`, and `watch --agentfs` reject ungranted agents with `grant_denied`. |
 | 23 | `fs attach --json` can leak source credentials. | P0 | confirmed | fixed-local | Use sanitized source result or remove source options from attach JSON. |
 | 24 | Grant/revoke target agent id is not validated. | P2 | confirmed | fixed-local | Keep validation tests. |
 | 25 | Grant downgrade leaves old capability active. | P0 | confirmed | fixed-local | Keep replacement semantics and tests. |
@@ -259,8 +259,10 @@ Recommended commit scope:
 Before more code, settle these contract decisions:
 
 1. Is multi-root per FS required inside one local store for MVP?
-2. Should `fs list/status` reveal FS metadata without read grants?
-3. Is all `.section/**` reserved, or only `.section/agentfs/**` plus local marker?
+2. Is all `.section/**` reserved, or only `.section/agentfs/**` plus local marker?
+
+Resolved decision: `fs list`, `fs status`, `fs events`, and `watch --agentfs`
+do not reveal FS metadata without read capability.
 
 ### Next Implementation Batch
 

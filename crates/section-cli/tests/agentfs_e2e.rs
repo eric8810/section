@@ -233,6 +233,12 @@ impl AgentFsActor {
     }
 
     fn fs_events(&self, fs_ref: &str, after: Option<&str>) -> Value {
+        let output = self.fs_events_output(fs_ref, after);
+        assert_success(&output, "fs events");
+        serde_json::from_slice(&output.stdout).expect("events json")
+    }
+
+    fn fs_events_output(&self, fs_ref: &str, after: Option<&str>) -> Output {
         let mut args = vec![
             "--json".to_string(),
             "fs".to_string(),
@@ -243,7 +249,7 @@ impl AgentFsActor {
             args.push("--after".to_string());
             args.push(after.to_string());
         }
-        self.json_owned(args)
+        self.run_owned(args)
     }
 
     fn watch_agentfs_once(&self, fs_ref: &Path) -> Vec<Value> {
@@ -725,6 +731,11 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
     reader.write_local("reader-draft.txt", "reader local draft");
     let reader_status = reader.fs_status(&reader.local_root.to_string_lossy());
     assert_eq!(reader_status["status"]["role"], "reader");
+    assert!(reader.fs_events(FS_NAME, None)["events"]
+        .as_array()
+        .expect("reader events")
+        .iter()
+        .any(|event| event["kind"] == "fs.created"));
     assert_eq!(reader_status["status"]["dirty"], true);
     assert_eq!(reader_status["status"]["dirty_count"], 1);
     assert!(reader_status["status"]["next_actions"]
@@ -752,6 +763,8 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
         !stranger.local_root.join(".section/root.json").exists(),
         "failed ungranted attach must not write root marker"
     );
+    assert_json_error(&stranger.fs_status_output(FS_NAME), "grant_denied");
+    assert_json_error(&stranger.fs_events_output(FS_NAME, None), "grant_denied");
 
     let writer_id = writer.login("writer");
     owner.grant(&writer_id, "writer");

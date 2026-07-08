@@ -867,8 +867,8 @@ and P1 gaps:
 
 | Gap | Why It Matters | Current Status |
 | --- | --- | --- |
-| Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness。还缺生产服务端、真实 credential TTL 和刷新。 |
-| AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 已有第一版：`fs events` 支持 replay/after，`watch --agentfs` 输出 AgentFS 事件，事件有递增 `seq`。还缺更强的服务端事件 API 和并发顺序保障。 |
+| Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness；`fs list/status/events/watch` 只对有 read capability 的 agent 暴露。还缺生产服务端、真实 credential TTL 和刷新。 |
+| AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 已有第一版：`fs events` 支持 replay/after，`watch --agentfs` 输出 AgentFS 事件，事件有递增 `seq`，且需要 read capability。还缺更强的服务端事件 API 和并发顺序保障。 |
 | Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | 已有第一版：commit record 和 `commit.accepted` event 记录 `authorized_by`，E2E 已通过 `fs events` 验证。 |
 | Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 部分实现：本地 store 记录 mount/base，E2E 验证篡改 `.section/root.json` 不能绕过 stale-base；外部直接修改 backing source 时，commit 返回 `remote_drift`，不会写 accepted commit。还缺 `base_manifest_hash` 和更完整的 tree diff 证明。 |
 | Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | 已有第一版：`commit apply` 先写 staging snapshot，commit metadata 记录 snapshot，物化从 snapshot 读取。E2E 验证 live root 后续修改仍是 dirty work；本地 marker 更新失败只作为 warning 返回，不推翻已完成的治理真相。 |
@@ -906,7 +906,7 @@ It covers the product behaviors that are implemented today:
 | `e2e_fs_ref_resolves_source_name_and_rejects_ambiguity` | `fs status` resolves by source name; duplicate source-name refs fail with `ambiguous_fs_ref`; exact fs id still resolves |
 | `e2e_bad_metadata_in_unrelated_source_does_not_block_fs_lookup` | unrelated source 里坏的 `.section/agentfs/fs.json` 不会阻塞健康 FS 的 `fs status` 和 `fs events` |
 | `e2e_rejects_invalid_shared_metadata_schema_and_links` | corrupted commit schema, wrong head FS link, and wrong event FS link fail with `malformed_shared_metadata` |
-| `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit; `fs status` exposes role、capabilities、dirty、next_actions |
+| `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit but can status/events; ungranted agent denied attach/status/events; downgrade removes commit authority; manager can manage but cannot commit; `fs status` exposes role、capabilities、dirty、next_actions |
 | `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; 篡改本地 marker 不能绕过 trusted mount base；`fs status` exposes stale state and `sync` next action |
 | `e2e_backing_source_drift_cannot_be_committed_over` | backing source 被外部直接修改后，commit 返回 `remote_drift`；head、backing file、accepted event 数量都不变 |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
