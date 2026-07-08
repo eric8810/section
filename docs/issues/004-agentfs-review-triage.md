@@ -137,7 +137,7 @@ internal and clearly marked incomplete.
 | 27 | `section fs status <attached local path>` does not resolve from a local path. | confirmed | fixed-local |
 | 28 | `fs status` lacks dirty state and full materialization detail. | partial | fixed-local |
 | 30 | Non-empty directory deletion can race parent/child deletes in sync transport. | confirmed | open |
-| 32 | `commit.materialized` event lacks path/state details. | confirmed | open |
+| 32 | `commit.materialized` event lacks path/state details. | confirmed | fixed-local |
 | 35 | `.section/**` filtering is broader than the written contract's `.section/agentfs/**` reservation. | decision | decision-needed |
 | 50 | `fs status` swallows corrupt local root markers. | confirmed | open |
 
@@ -215,7 +215,7 @@ This table preserves every reviewer finding for traceability.
 | 29 | Successful commit can be reported as failed after marker write failure. | P1 | confirmed | fixed-local | Marker/store update happens after materialization as a local finalization step; marker failure returns a warning while the accepted/materialized commit succeeds. |
 | 30 | Directory delete can race child deletes. | P2 | confirmed | open | Order delete plans deepest-first or coalesce subtree deletes. |
 | 31 | `fs.attached` leaks local absolute path. | P2 | confirmed | fixed-local | Keep event payload free of local paths. |
-| 32 | `commit.materialized` lacks paths/state details. | P2 | confirmed | open | Include path summary and state in event data. |
+| 32 | `commit.materialized` lacks paths/state details. | P2 | confirmed | fixed-local | Event data now includes `materialization_state` and commit path summary; E2E verifies it through `fs events`. |
 | 33 | Reattach new empty root can delete remote due to old sync state. | P0 | confirmed | fixed-local | Keep clear-sync-state-before-attach behavior. |
 | 34 | Symlinks can expose files outside working root. | P0 | confirmed | fixed-local | Reject symlinks or treat them as unsupported local entry types. |
 | 35 | `.section/**` filtering is broader than contract. | P2 | decision | decision-needed | Either reserve all `.section/**` or narrow filters to `.section/agentfs/**` plus local marker. |

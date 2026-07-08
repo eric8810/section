@@ -210,7 +210,7 @@ Required codes:
 
 | Case | Steps | Expected |
 | --- | --- | --- |
-| successful materialization | commit accepted | commit state becomes `materialized`, event `commit.materialized` |
+| successful materialization | commit accepted | commit state becomes `materialized`, event `commit.materialized` includes materialization state and changed paths |
 | materialization failure | make backing source unwritable or invalid | commit remains head, state becomes `failed_to_materialize`, event emitted |
 | retry materialization | retry failed commit | same commit id used; no duplicate accepted commit |
 | block next commit | head failed materialization | next `commit apply` fails |

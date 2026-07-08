@@ -739,7 +739,7 @@ impl SectiondControlPlane {
                     &actor.agent_id,
                     &commit.commit_id,
                     None,
-                    serde_json::json!({ "pushed": sync.pushed, "pulled": sync.pulled }),
+                    materialized_event_data(&commit, &sync, false),
                 )?;
                 agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
                 agentfs::write_commit(&rt, &resolved.operator, &commit)?;
@@ -890,7 +890,7 @@ impl SectiondControlPlane {
                     &actor.agent_id,
                     &commit.commit_id,
                     None,
-                    serde_json::json!({ "pushed": sync.pushed, "pulled": sync.pulled, "repair": true }),
+                    materialized_event_data(&commit, &sync, true),
                 )?;
                 agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
                 agentfs::write_commit(&rt, &resolved.operator, &commit)?;
@@ -1754,6 +1754,23 @@ fn write_materialization_failed_event(
         serde_json::json!({ "error": commit.error }),
     )?;
     agentfs::write_event(rt, operator, &event)
+}
+
+fn materialized_event_data(
+    commit: &AgentFsCommitRecord,
+    sync: &SourceSyncResult,
+    repair: bool,
+) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "pushed": sync.pushed,
+        "pulled": sync.pulled,
+        "materialization_state": commit.materialization_state,
+        "paths": commit.paths.clone(),
+    });
+    if repair {
+        data["repair"] = serde_json::json!(true);
+    }
+    data
 }
 
 fn prepare_staging_snapshot(

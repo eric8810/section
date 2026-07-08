@@ -499,6 +499,22 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
         accepted_event["data"]["authorized_by"]["grant_id"],
         grant["grant"]["grant_id"]
     );
+    let materialized_event = replay_events
+        .iter()
+        .find(|event| event["kind"] == "commit.materialized")
+        .expect("commit.materialized event");
+    assert_eq!(materialized_event["subject_id"], commit_id);
+    assert_eq!(
+        materialized_event["data"]["materialization_state"],
+        "materialized"
+    );
+    assert!(materialized_event["data"]["paths"]
+        .as_array()
+        .expect("materialized paths")
+        .iter()
+        .any(|path| path["path"] == "docs/note.txt"
+            && path["op"] == "create"
+            && path["kind"] == "file"));
 
     let first_seq = replay_events[0]["seq"].as_i64().expect("first seq");
     let after = writer.fs_events(FS_NAME, Some(&first_seq.to_string()));
