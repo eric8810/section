@@ -710,7 +710,7 @@ impl SectiondControlPlane {
             )?;
             Ok(commit)
         })();
-        agentfs::release_head_lock(&rt, &resolved.operator, &lock)?;
+        let mut release_error = agentfs::release_head_lock(&rt, &resolved.operator, &lock).err();
         let mut commit = accepted?;
 
         match materialize_staged_commit(
@@ -738,7 +738,18 @@ impl SectiondControlPlane {
                 )?;
                 agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
                 agentfs::write_commit(&rt, &resolved.operator, &commit)?;
-                let warnings = self.record_local_materialized_commit(
+                if release_error.is_some() {
+                    release_error =
+                        agentfs::release_head_lock(&rt, &resolved.operator, &lock).err();
+                }
+                let mut warnings = Vec::new();
+                if let Some(err) = release_error {
+                    warnings.push(format!(
+                        "failed to release AgentFS head lock {}; lock will expire: {err}",
+                        lock.lock_token
+                    ));
+                }
+                let local_update_warnings = self.record_local_materialized_commit(
                     &resolved.source.name,
                     &local_root,
                     &resolved.fs.fs_id,
@@ -747,6 +758,7 @@ impl SectiondControlPlane {
                     &actor.installation_id,
                     &commit.commit_id,
                 );
+                warnings.extend(local_update_warnings);
                 Ok(AgentFsCommitApplyResult {
                     commit,
                     sync,
@@ -1077,7 +1089,7 @@ impl SectiondControlPlane {
     }
 
     pub fn path_inspect(&self, input_path: &Path) -> Result<PathInspectSnapshot> {
-        let local_path = absolutize_path(input_path)?;
+        let local_path = canonicalize_existing_or_future_path(&absolutize_path(input_path)?)?;
         let marker = discover_root_marker(&local_path)?;
         self.ensure_source_is_not_agentfs_owned(
             &marker.source_id,
@@ -1313,7 +1325,7 @@ impl SectiondControlPlane {
     }
 
     fn resolve_local_path(&self, input_path: &Path) -> Result<(String, PathBuf, PathBuf, String)> {
-        let local_path = absolutize_path(input_path)?;
+        let local_path = canonicalize_existing_or_future_path(&absolutize_path(input_path)?)?;
         let marker = discover_root_marker(&local_path)?;
         self.ensure_source_is_not_agentfs_owned(
             &marker.source_id,
@@ -1538,23 +1550,14 @@ fn merged_agentfs_events(events: Vec<crate::AgentFsEventRecord>) -> Vec<crate::A
 
     let mut events = by_id.into_values().collect::<Vec<_>>();
     events.sort_by(|left, right| {
-        event_sort_seq(left)
-            .cmp(&event_sort_seq(right))
-            .then_with(|| left.created_at_ms.cmp(&right.created_at_ms))
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
             .then_with(|| left.event_id.cmp(&right.event_id))
     });
     for (index, event) in events.iter_mut().enumerate() {
         event.seq = index as i64 + 1;
     }
     events
-}
-
-fn event_sort_seq(event: &crate::AgentFsEventRecord) -> i64 {
-    if event.seq > 0 {
-        event.seq
-    } else {
-        i64::MAX
-    }
 }
 
 fn mirror_grant_mutation(
@@ -2725,13 +2728,17 @@ fn discover_root_marker(path: &Path) -> Result<RootDiscoveryMarker> {
 }
 
 fn relative_source_path(local_root: &Path, local_path: &Path) -> Result<String> {
-    let relative = local_path.strip_prefix(local_root).map_err(|_| {
-        anyhow::anyhow!(
-            "{} is outside the bound local root {}",
-            local_path.display(),
-            local_root.display()
-        )
-    })?;
+    let canonical_root = canonicalize_existing_or_future_path(local_root)?;
+    let canonical_local_path = canonicalize_existing_or_future_path(local_path)?;
+    let relative = canonical_local_path
+        .strip_prefix(&canonical_root)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{} is outside the bound local root {}",
+                local_path.display(),
+                local_root.display()
+            )
+        })?;
 
     let raw = relative
         .iter()
@@ -2874,6 +2881,49 @@ mod tests {
             data_dir.to_string_lossy()
         );
         fs::write(path, config).expect("write config");
+    }
+
+    fn event(event_id: &str, seq: i64, created_at_ms: i64, kind: &str) -> AgentFsEventRecord {
+        AgentFsEventRecord {
+            schema_version: agentfs::SCHEMA_VERSION,
+            event_id: event_id.to_string(),
+            seq,
+            fs_id: "fs_11111111111111111111111111111111".to_string(),
+            kind: kind.to_string(),
+            actor_agent_id: "agt_11111111111111111111111111111111".to_string(),
+            subject_id: "sub_11111111111111111111111111111111".to_string(),
+            path: None,
+            created_at_ms,
+            data: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn merged_agentfs_events_uses_stable_created_order_for_cursor() {
+        let first_poll = merged_agentfs_events(vec![
+            event("evt_fs", 1, 10, "fs.created"),
+            event("evt_accepted", 2, 20, "commit.accepted"),
+            event("evt_materialized", 3, 30, "commit.materialized"),
+        ]);
+        let after_seq = first_poll
+            .iter()
+            .find(|event| event.event_id == "evt_materialized")
+            .expect("materialized event")
+            .seq;
+        assert_eq!(after_seq, 3);
+
+        let second_poll = merged_agentfs_events(vec![
+            event("evt_fs", 1, 10, "fs.created"),
+            event("evt_accepted", 2, 20, "commit.accepted"),
+            event("evt_materialized", 3, 30, "commit.materialized"),
+            event("evt_grant", 2, 40, "grant.created"),
+        ]);
+        let replayed = second_poll
+            .into_iter()
+            .filter(|event| event.seq > after_seq)
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>();
+        assert_eq!(replayed, vec!["evt_grant"]);
     }
 
     #[test]
@@ -3029,7 +3079,10 @@ mod tests {
         let inspect = control.path_inspect(&nested).expect("path inspect");
         assert_eq!(inspect.source_id, "store-only");
         assert_eq!(inspect.local_root, canonical_root);
-        assert_eq!(inspect.local_path, nested);
+        assert_eq!(
+            inspect.local_path,
+            nested.canonicalize().expect("canonical nested")
+        );
         assert_eq!(inspect.source_path, "notes/todo.txt");
         assert_eq!(inspect.state, "conflict");
         assert!(inspect.detail.local_present);
@@ -3038,6 +3091,47 @@ mod tests {
         assert!(inspect.detail.stale);
         assert_eq!(inspect.base_remote_version.as_deref(), Some("v1"));
         assert_eq!(inspect.current_remote_version.as_deref(), Some("v2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_inspect_accepts_canonical_alias_path() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("section.toml");
+        write_config(temp_dir.path(), &config_path, "config-only");
+
+        let control = SectiondControlPlane::load(Some(&config_path)).expect("control plane");
+        control
+            .source_add(
+                "store-only",
+                "fs",
+                HashMap::from([("root".to_string(), "/tmp/from-store".to_string())]),
+            )
+            .expect("add source");
+
+        let local_root = temp_dir.path().join("bound-root");
+        std::fs::create_dir_all(local_root.join("notes")).expect("create local root");
+        let canonical_root = local_root.canonicalize().expect("canonical root");
+        control
+            .source_bind_local_root("store-only", &local_root)
+            .expect("bind local root");
+
+        let real_nested = local_root.join("notes").join("todo.txt");
+        std::fs::write(&real_nested, "hello").expect("write local file");
+        let alias_root = temp_dir.path().join("alias-root");
+        std::os::unix::fs::symlink(&local_root, &alias_root).expect("create root alias");
+        let alias_nested = alias_root.join("notes").join("todo.txt");
+
+        let inspect = control
+            .path_inspect(&alias_nested)
+            .expect("path inspect through alias");
+        assert_eq!(inspect.source_id, "store-only");
+        assert_eq!(inspect.local_root, canonical_root);
+        assert_eq!(
+            inspect.local_path,
+            real_nested.canonicalize().expect("canonical nested")
+        );
+        assert_eq!(inspect.source_path, "notes/todo.txt");
     }
 
     #[test]

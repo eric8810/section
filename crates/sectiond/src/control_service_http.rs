@@ -53,7 +53,9 @@ pub async fn serve_control_service_listener(
 pub fn control_service_app(config_path: Option<&Path>) -> Result<Router> {
     let config = SectionConfig::load(config_path)?;
     config.ensure_dirs()?;
-    let store = Arc::new(Mutex::new(ControlServiceStore::open(&config)?));
+    let store = Arc::new(Mutex::new(ControlServiceStore::open_authoritative(
+        &config,
+    )?));
     Ok(Router::new()
         .route("/v1/rpc", post(handle_rpc))
         .with_state(store))

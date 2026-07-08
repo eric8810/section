@@ -690,8 +690,25 @@ fn unexpected_rpc_response<T>(response: ControlServiceResponse) -> Result<T> {
     anyhow::bail!("unexpected Section Control Service response: {response:?}")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceProfileSeedMode {
+    InsertOnly,
+    UpdateExisting,
+}
+
 impl ControlServiceStore {
     pub fn open(config: &SectionConfig) -> Result<Self> {
+        Self::open_with_source_profile_seed_mode(config, SourceProfileSeedMode::InsertOnly)
+    }
+
+    pub fn open_authoritative(config: &SectionConfig) -> Result<Self> {
+        Self::open_with_source_profile_seed_mode(config, SourceProfileSeedMode::UpdateExisting)
+    }
+
+    fn open_with_source_profile_seed_mode(
+        config: &SectionConfig,
+        seed_mode: SourceProfileSeedMode,
+    ) -> Result<Self> {
         let path = control_service_path(config);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -702,7 +719,7 @@ impl ControlServiceStore {
         })?;
         let store = Self { conn, path };
         store.init_tables()?;
-        store.seed_source_profiles(&config.control_service)?;
+        store.seed_source_profiles(&config.control_service, seed_mode)?;
         Ok(store)
     }
 
@@ -801,20 +818,37 @@ impl ControlServiceStore {
         Ok(())
     }
 
-    fn seed_source_profiles(&self, config: &ControlServiceConfig) -> Result<()> {
+    fn seed_source_profiles(
+        &self,
+        config: &ControlServiceConfig,
+        mode: SourceProfileSeedMode,
+    ) -> Result<()> {
         for (name, source) in &config.source_profiles {
             let now = agentfs::now_ms();
             let options_json = serde_json::to_string(&source.options)?;
-            let existing: Option<String> = self
+            let existing: Option<(String, String, String)> = self
                 .conn
                 .query_row(
-                    "SELECT source_profile_id FROM source_profiles WHERE name = ?1",
+                    "SELECT source_profile_id, provider, options_json
+                     FROM source_profiles
+                     WHERE name = ?1",
                     [name],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
             match existing {
-                Some(_) => {}
+                Some((source_profile_id, provider, existing_options_json)) => {
+                    if mode == SourceProfileSeedMode::UpdateExisting
+                        && (provider != source.provider || existing_options_json != options_json)
+                    {
+                        self.conn.execute(
+                            "UPDATE source_profiles
+                             SET provider = ?1, options_json = ?2, updated_at_ms = ?3
+                             WHERE source_profile_id = ?4",
+                            params![source.provider, options_json, now, source_profile_id],
+                        )?;
+                    }
+                }
                 None => {
                     self.conn.execute(
                         "INSERT INTO source_profiles (
@@ -2010,4 +2044,76 @@ fn read_source_profile_row(
 
 fn json_to_sql_error(err: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn config_for_profile(root: &std::path::Path, db_path: &std::path::Path) -> SectionConfig {
+        let mut config = SectionConfig::default();
+        config.data_dir = root.join("data");
+        config.control_service.path = Some(db_path.to_path_buf());
+        config.control_service.source_profiles.insert(
+            "default".to_string(),
+            SourceConfig {
+                provider: "fs".to_string(),
+                options: HashMap::from([(
+                    "root".to_string(),
+                    root.join("remote").display().to_string(),
+                )]),
+                cache: Default::default(),
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn local_harness_open_keeps_existing_source_profile() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("control.sqlite");
+        let first_root = temp_dir.path().join("first");
+        let second_root = temp_dir.path().join("second");
+
+        ControlServiceStore::open(&config_for_profile(&first_root, &db_path)).expect("first open");
+        let store =
+            ControlServiceStore::open(&config_for_profile(&second_root, &db_path)).expect("open");
+        let (_profile, source) = store
+            .source_profile_by_name("default")
+            .expect("source profile");
+        let expected_root = first_root.join("remote").display().to_string();
+
+        assert_eq!(source.options.get("root"), Some(&expected_root));
+    }
+
+    #[test]
+    fn authoritative_open_updates_existing_source_profile() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("control.sqlite");
+        let first_root = temp_dir.path().join("first");
+        let second_root = temp_dir.path().join("second");
+
+        let first_store =
+            ControlServiceStore::open_authoritative(&config_for_profile(&first_root, &db_path))
+                .expect("first open");
+        let (first_profile, _) = first_store
+            .source_profile_by_name("default")
+            .expect("source profile");
+        drop(first_store);
+
+        let second_store =
+            ControlServiceStore::open_authoritative(&config_for_profile(&second_root, &db_path))
+                .expect("second open");
+        let (second_profile, source) = second_store
+            .source_profile_by_name("default")
+            .expect("source profile");
+        let expected_root = second_root.join("remote").display().to_string();
+
+        assert_eq!(
+            second_profile.source_profile_id,
+            first_profile.source_profile_id
+        );
+        assert_eq!(source.options.get("root"), Some(&expected_root));
+    }
 }
