@@ -1302,6 +1302,165 @@ mod tests {
     }
 
     #[test]
+    fn metadata_records_validate_schema_and_required_fields() {
+        let now = now_ms();
+        let fs_id = new_fs_id().expect("fs id");
+        let agent_id = new_agent_id().expect("agent id");
+        let source_profile_id = new_source_profile_id().expect("source profile id");
+        let grant_id = new_grant_id().expect("grant id");
+        let commit_id = new_commit_id().expect("commit id");
+        let event_id = new_event_id(now).expect("event id");
+
+        let fs = AgentFsRecord {
+            schema_version: SCHEMA_VERSION,
+            fs_id: fs_id.clone(),
+            name: "project".to_string(),
+            owner_agent_id: agent_id.clone(),
+            source_profile_id: source_profile_id.clone(),
+            source_name: fs_id.clone(),
+            created_at_ms: now,
+        };
+        fs.validate_metadata(FS_PATH).expect("fs metadata");
+
+        let source_profile = AgentFsSourceProfileRecord {
+            schema_version: SCHEMA_VERSION,
+            source_profile_id: source_profile_id.clone(),
+            name: "test-profile".to_string(),
+            provider: "fs".to_string(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        source_profile
+            .validate_metadata("source_profiles/test-profile.json")
+            .expect("source profile metadata");
+
+        let grant = AgentFsGrantRecord {
+            schema_version: SCHEMA_VERSION,
+            grant_id: grant_id.clone(),
+            fs_id: fs_id.clone(),
+            agent_id: agent_id.clone(),
+            role: AgentFsRole::Writer,
+            capabilities: AgentFsRole::Writer.capabilities(),
+            granted_by: agent_id.clone(),
+            created_at_ms: now,
+            revoked_at_ms: None,
+            revoked_by: None,
+        };
+        grant
+            .validate_metadata("grants/grant.json")
+            .expect("grant metadata");
+
+        let share = AgentFsShareRecord {
+            schema_version: SCHEMA_VERSION,
+            share_id: new_share_id().expect("share id"),
+            fs_id: fs_id.clone(),
+            target_agent_id: agent_id.clone(),
+            grant_id: grant_id.clone(),
+            role: AgentFsRole::Writer,
+            source_profile_id: source_profile_id.clone(),
+            created_by: agent_id.clone(),
+            created_at_ms: now,
+            expires_at_ms: None,
+            accepted_at_ms: None,
+            revoked_at_ms: None,
+        };
+        share
+            .validate_metadata("shares/share.json")
+            .expect("share metadata");
+
+        let credential = AgentFsCredentialBindingRecord {
+            schema_version: SCHEMA_VERSION,
+            credential_binding_id: new_credential_binding_id().expect("credential id"),
+            fs_id: fs_id.clone(),
+            agent_id: agent_id.clone(),
+            installation_id: new_installation_id().expect("installation id"),
+            source_profile_id: source_profile_id.clone(),
+            issued_at_ms: now,
+            expires_at_ms: now + 1,
+        };
+        credential
+            .validate_metadata("credentials/credential.json")
+            .expect("credential metadata");
+
+        let head = AgentFsHeadRecord {
+            schema_version: SCHEMA_VERSION,
+            fs_id: fs_id.clone(),
+            commit_id: Some(commit_id.clone()),
+            updated_at_ms: now,
+        };
+        head.validate_metadata(HEAD_PATH).expect("head metadata");
+
+        let lock = AgentFsHeadLockRecord {
+            schema_version: SCHEMA_VERSION,
+            fs_id: fs_id.clone(),
+            lock_token: new_lock_token().expect("lock token"),
+            owner_agent_id: agent_id.clone(),
+            created_at_ms: now,
+            expires_at_ms: now + 1,
+        };
+        lock.validate_metadata("locks/head/lock.json")
+            .expect("lock metadata");
+
+        let commit = AgentFsCommitRecord {
+            schema_version: SCHEMA_VERSION,
+            commit_id: commit_id.clone(),
+            fs_id: fs_id.clone(),
+            parent_commit_id: None,
+            base_commit_id: None,
+            base_manifest_hash: None,
+            agent_id: agent_id.clone(),
+            summary: "Update docs".to_string(),
+            paths: vec![AgentFsCommitPathRecord {
+                path: "docs/readme.md".to_string(),
+                kind: "file".to_string(),
+                op: "create".to_string(),
+                local_version: Some("sha256:test".to_string()),
+                previous_version: None,
+            }],
+            authorized_by: Some(AgentFsAuthorization::Grant {
+                grant_id,
+                role: AgentFsRole::Writer,
+                capabilities: AgentFsRole::Writer.capabilities(),
+            }),
+            staging_snapshot: Some(AgentFsCommitStagingRecord {
+                manifest_path: "agentfs/staging/manifest.json".to_string(),
+                manifest_hash: "sha256:manifest".to_string(),
+            }),
+            created_at_ms: now,
+            materialization_state: AgentFsMaterializationState::Pending,
+            materialized_at_ms: None,
+            error: None,
+        };
+        commit
+            .validate_metadata("commits/commit.json")
+            .expect("commit metadata");
+
+        let event = AgentFsEventRecord {
+            schema_version: SCHEMA_VERSION,
+            event_id,
+            seq: 1,
+            fs_id,
+            kind: "commit.accepted".to_string(),
+            actor_agent_id: agent_id,
+            subject_id: commit_id,
+            path: None,
+            created_at_ms: now,
+            data: serde_json::json!({}),
+        };
+        event
+            .validate_metadata("events/event.json")
+            .expect("event metadata");
+
+        let mut bad_schema = fs.clone();
+        bad_schema.schema_version = SCHEMA_VERSION + 1;
+        assert!(bad_schema.validate_metadata(FS_PATH).is_err());
+        assert!(serde_json::from_value::<AgentFsRecord>(serde_json::json!({
+            "schema_version": SCHEMA_VERSION
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn event_write_does_not_overwrite_existing_event_id() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let op = fs_operator(temp_dir.path());

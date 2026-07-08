@@ -704,7 +704,7 @@ This proves events are append-only and replayable.
 | 2 | owner | run `source sync` on that source | rejected with AgentFS guardrail error |
 | 3 | owner | run `source remove` or `source bind` | rejected with AgentFS guardrail error |
 | 4 | owner | try any low-level force path | rejected; MVP has no low-level bypass |
-| 5 | owner | run `path inspect/compare/resolve` under the root | command works as diagnostic and warns it is not the governance surface |
+| 5 | owner | run `path inspect/compare/resolve` under the root | rejected with AgentFS guardrail error |
 
 This proves low-level source/path commands do not silently bypass AgentFS.
 
@@ -726,13 +726,14 @@ This proves Agent callers can make decisions from stable error codes.
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
 | 1 | writer | commit file `docs/api` | file materializes |
-| 2 | writer | replace `docs/api` with directory `docs/api/index.md` | commit succeeds; remote has directory and child |
-| 3 | writer | replace directory `docs/api` with file `docs/api` | commit succeeds; remote has file only |
-| 4 | harness | repeat with provider configured to reject required delete/create plan | commit fails before metadata write |
-| 5 | test | inspect head and remote after failure | no half-materialized accepted commit |
+| 2 | writer | replace `docs/api` with directory `docs/api/index.md` in one commit | rejected with `path_type_conflict` before metadata write |
+| 3 | test | inspect head and remote after failure | head is unchanged; remote still has the original file |
+| 4 | writer | delete a non-empty directory as an explicit delete commit | commit succeeds; remote subtree is removed cleanly |
+| 5 | test | inspect working copy after delete | dirty paths are clean |
 
-This proves commit acceptance knows whether materialization can execute the path
-plan safely.
+This proves commit acceptance rejects ambiguous same-path type replacement
+before shared truth advances, and that explicit directory deletes materialize
+cleanly.
 
 #### 25. Local Root Identity And Overlap
 
@@ -870,12 +871,12 @@ and P1 gaps:
 
 | Gap | Why It Matters | Current Status |
 | --- | --- | --- |
-| Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness；`fs list/status/events/watch` 只对有 read capability 的 agent 暴露。还缺生产服务端、真实 credential TTL 和刷新。 |
+| Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness；pending share 在 backing grant 被 revoke 后不能再 available/accept；`fs list/status/events/watch` 只对有 read capability 的 agent 暴露。还缺生产服务端、真实 credential TTL 和刷新。 |
 | AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 已有第一版：`fs events` 支持 replay/after，`watch --agentfs` 输出 AgentFS 事件，事件有递增 `seq`，且需要 read capability；grant/revoke 事件以 Control Service 为权威，并和 backing event mirror 合并输出。还缺生产服务端并发顺序保障。 |
 | Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | 已有第一版：commit record 和 `commit.accepted` event 记录 `authorized_by`，E2E 已通过 `fs events` 验证。 |
-| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 部分实现：本地 store 记录 mount/base，E2E 验证篡改 `.section/root.json` 不能绕过 stale-base；外部直接修改 backing source 时，commit 返回 `remote_drift`，不会写 accepted commit。还缺 `base_manifest_hash` 和更完整的 tree diff 证明。 |
+| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 已有第一版：本地 store 记录 mount/base，E2E 验证篡改 `.section/root.json` 不能绕过 stale-base；外部直接修改 backing source 时，commit 返回 `remote_drift`，不会写 accepted commit。更完整的 tree diff 证明可作为后续增强。 |
 | Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | 已有第一版：`commit apply` 先写 staging snapshot，commit metadata 记录 snapshot，物化从 snapshot 读取。E2E 验证 live root 后续修改仍是 dirty work；本地 marker 更新失败只作为 warning 返回，不推翻已完成的治理真相。 |
-| Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 已有第一版：failed head 阻塞后续 commit，`commit repair` 用原 staging snapshot 修复同一个 commit。 |
+| Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 已有第一版：failed head 阻塞后续 commit，`commit repair` 用原 staging snapshot 修复同一个 commit，repair 后可以继续接受新 commit。 |
 | Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 已有第一版：attach 和 source bind 会存 canonical local root；E2E 验证 attach JSON、marker、status 都使用 canonical root；父子 root 和 backing root overlap 会被拒绝；同一 FS 在同一 local store 只有一个 active local root，reattach 会移动 root。 |
 | Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
 | Metadata schema, lock, and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 已有第一版：schema/version/ID/path validation、head/commit/event FS 一致性检查、初始化失败回滚、service event authority、event `seq`、event 文件用 backend `if_not_exists` 写入、active head lock 会阻塞 commit，commit accepted 事件失败不推进 head。后端必须支持条件创建和锁目录一致列举，不做 fallback。 |
@@ -896,20 +897,24 @@ implemented.
 | Proposal/approval | Some collaborators should propose changes without direct commit authority. | Design defined: `propose` capability, proposal lifecycle, accept/reject; implementation open. |
 | Path-scoped grants | Coarse FS-wide writer grants may be too broad. | Design defined: allow-only path scopes on grants; implementation open. |
 
-### Current E2E Implementation
+### Current CLI Product Test Implementation
 
-The current CLI E2E implementation lives in
-`crates/section-cli/tests/agentfs_e2e.rs`.
+The current CLI product tests live mainly in:
+
+- `crates/section-cli/tests/agentfs_e2e.rs`
+- `crates/section-cli/tests/agentfs_control_plane.rs`
 
 It covers the product behaviors that are implemented today:
 
 | Test | E2E Scenarios Covered |
 | --- | --- |
-| `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; staging snapshot、repair、`fs events` replay、`watch --agentfs`、event `seq`、`authorized_by`、JSON error payload 都可验证 |
+| `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; staging snapshot、repair、repair 后继续 commit、`fs events` replay、`watch --agentfs`、event `seq`、`authorized_by`、JSON error payload 都可验证 |
 | `e2e_fs_ref_resolves_source_name_and_rejects_ambiguity` | `fs status` resolves by source name; duplicate source-name refs fail with `ambiguous_fs_ref`; exact fs id still resolves |
 | `e2e_bad_metadata_in_unrelated_source_does_not_block_fs_lookup` | unrelated source 里坏的 `.section/agentfs/fs.json` 不会阻塞健康 FS 的 `fs status` 和 `fs events` |
 | `e2e_rejects_invalid_shared_metadata_schema_and_links` | corrupted commit schema, wrong head FS link, and wrong event FS link fail with `malformed_shared_metadata` |
 | `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit but can status/events; ungranted agent denied attach/status/events; downgrade removes commit authority; manager can manage but cannot commit; `fs status` exposes role、capabilities、dirty、next_actions |
+| `e2e_revoke_removes_commit_access_and_blocks_pending_share_accept` | `fs revoke` removes commit access from an attached writer, emits replayable `grant.revoked`, prevents owner grant revoke, and blocks pending share accept after backing grant revoke |
+| `agentfs_control_plane::reader_cannot_commit_and_ungranted_agent_cannot_attach` | reader cannot commit; ungranted attach fails; low-level `source sync`、`source bind`、`source remove`、`write`、`path inspect` cannot mutate or inspect AgentFS-backed source as normal source/path |
 | `e2e_grant_survives_backing_event_mirror_failure` | grant 的 backing event mirror 写失败时，Control Service 事件仍能通过 `fs events` 看到，writer 仍能 accept、attach、commit |
 | `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; 篡改本地 marker 不能绕过 trusted mount base；`fs status` exposes stale state and `sync` next action |
 | `e2e_backing_source_drift_cannot_be_committed_over` | backing source 被外部直接修改后，commit 返回 `remote_drift`；head、backing file、accepted event 数量都不变 |
@@ -918,6 +923,7 @@ It covers the product behaviors that are implemented today:
 | `e2e_attach_canonicalizes_local_root_identity` | attach 使用带 `..` 的路径拼写时，返回 JSON、root marker、`fs status` 都记录 canonical local root |
 | `e2e_fs_status_reports_corrupt_local_marker` | corrupt `.section/root.json` is reported as `malformed_shared_metadata` by `fs status <local path> --json` instead of being swallowed as `unknown_fs` |
 | `e2e_section_directory_is_not_committed_as_user_content` | local `.section/**` files are ignored by commit dirty detection and do not become shared user content |
+| `e2e_commit_preflight_rejects_empty_message_and_empty_commit` | empty commit message and empty dirty set fail before head advances or new accepted event is created |
 | `e2e_reattach_moves_single_local_root` | reattaching the same FS moves the active local root, removes the old marker, and status resolves only from the new root |
 | `e2e_rejects_file_dir_type_replacement_before_acceptance` | file/dir type replacement is rejected before a new accepted commit; head and backing source remain unchanged |
 | `e2e_non_empty_directory_delete_materializes_cleanly` | non-empty directory delete commits as shared truth; remote subtree is removed and working copy becomes clean |
@@ -987,6 +993,28 @@ AgentFS 核心完整完成，必须同时满足：
 - 现有 source/path 回归测试仍然通过。
 - 未实现的 P2 功能不能暴露成可用功能。
 - 设计文档、测试计划、CLI 行为一致。
+
+### 核心完成标准覆盖审计
+
+| 完成标准 | 当前证据 | 状态 |
+| --- | --- | --- |
+| P0 和 P1 场景都有 E2E | `agentfs_e2e.rs` 覆盖 owner/writer/reader/manager、share/accept/attach、commit、events/status、failure/repair、metadata lock、guardrails；`agentfs_control_plane.rs` 覆盖服务端 source profile/credential/cache 和低层 source/path 拒绝 | covered |
+| 所有 E2E 都通过公开 CLI 跑通 | E2E 使用 `run_section` 执行 `section` CLI，不直接调用 `sectiond` API | covered |
+| owner、reader、writer、manager 权限行为都有测试 | `e2e_grants_control_attach_manage_and_commit_authority`，并覆盖 manager grant/revoke、owner grant 不可 revoke | covered |
+| share、available、accept、attach 的跨机业务路径有测试 | `e2e_writer_commit_becomes_shared_truth_for_owner`、`e2e_revoke_removes_commit_access_and_blocks_pending_share_accept`、`writer_share_accept_attach_commit_and_owner_observes_truth`、`client_seed_cannot_overwrite_existing_source_profile` | covered |
+| commit 检查权限、base、dirty、reserved path | 权限：`e2e_grants_control_attach_manage_and_commit_authority`；base：`e2e_stale_writer_cannot_overwrite_new_truth`；dirty：`e2e_commit_preflight_rejects_empty_message_and_empty_commit`；reserved path：`e2e_section_directory_is_not_committed_as_user_content` | covered |
+| commit 使用 staging snapshot，metadata 和物化文件一致 | `e2e_writer_commit_becomes_shared_truth_for_owner` 检查 staging manifest；同一测试里 live root 后续修改保持 dirty work，repair 用原 snapshot 物化原内容 | covered |
+| 本地 marker 更新失败不会让已 accepted/materialized 的 commit 被报告为失败 | `e2e_commit_success_survives_local_marker_update_failure` | covered |
+| accepted commit 记录 `authorized_by` | `e2e_writer_commit_becomes_shared_truth_for_owner` 和 `writer_share_accept_attach_commit_and_owner_observes_truth` 检查 commit/event 的 grant authority | covered |
+| materialization 失败会阻塞后续 commit | `e2e_materialization_failure_emits_fs_error_event` 和 `e2e_writer_commit_becomes_shared_truth_for_owner` 的 failed-head block | covered |
+| `commit repair` 修复同一个 commit | `e2e_writer_commit_becomes_shared_truth_for_owner` 检查 repair 返回同一 `commit_id`、恢复原 staging 内容，并且 repair 后新 commit 可以继续 | covered |
+| `fs status --json` 能告诉 Agent 当前能不能行动 | `e2e_grants_control_attach_manage_and_commit_authority`、`e2e_stale_writer_cannot_overwrite_new_truth`、`e2e_fs_status_reports_corrupt_local_marker` | covered |
+| `fs events` 和 `watch --agentfs` 能让 Agent 观察变化 | `e2e_writer_commit_becomes_shared_truth_for_owner`、`e2e_grant_survives_backing_event_mirror_failure` | covered |
+| 每个公开 AgentFS JSON 错误都有稳定 `error.code`、`retryable`、`details` | `assert_json_error` 在 E2E/control-plane tests 中统一检查 `code`、`retryable`、`details`；覆盖 `grant_denied`、`stale_base`、`remote_drift`、`materialization_failed`、`metadata_write_conflict`、`malformed_shared_metadata`、`non_utf8_path`、`unknown_fs`、`ambiguous_fs_ref`、`operation_failed` | covered |
+| 低层 `source/path` 命令不能绕过 AgentFS | `reader_cannot_commit_and_ungranted_agent_cannot_attach`、`config_source_named_like_agentfs_source_cannot_bypass_file_router` | covered |
+| 现有 source/path 回归测试仍然通过 | Regression Tests section defines `cargo test -p section-cli --tests`; verification record is kept in issue triage | covered |
+| 未实现的 P2 功能不能暴露成可用功能 | MVP Out-Of-Scope Assertions keeps Hooks、`AGENTS.md` enforcement、path-scoped grants、proposals out of core completion | covered |
+| 设计文档、测试计划、CLI 行为一致 | This audit is the source of truth for #46; inconsistent path diagnostic wording was removed | covered |
 
 P2 功能单独完成。每个 P2 功能完成时，必须满足：
 

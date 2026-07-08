@@ -119,6 +119,25 @@ impl Actor {
         ])
     }
 
+    fn source_bind_output(&self, source_name: &str, local_root: &Path) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "source".to_string(),
+            "bind".to_string(),
+            source_name.to_string(),
+            local_root.to_str().expect("utf8 local root").to_string(),
+        ])
+    }
+
+    fn source_remove_output(&self, source_name: &str) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "source".to_string(),
+            "remove".to_string(),
+            source_name.to_string(),
+        ])
+    }
+
     fn status(&self, fs: &str) -> Value {
         self.json_owned(vec![
             "--json".to_string(),
@@ -723,6 +742,25 @@ fn reader_cannot_commit_and_ungranted_agent_cannot_attach() {
         "reader unexpectedly synced AgentFS-backed source through low-level source command\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&source_sync.stdout),
         String::from_utf8_lossy(&source_sync.stderr)
+    );
+    let rebound_root = fixture.root.join("reader-rebound-root");
+    let source_bind = reader.source_bind_output(&fs_id, &rebound_root);
+    assert!(
+        !source_bind.status.success(),
+        "reader unexpectedly rebound AgentFS-backed source through low-level source command\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&source_bind.stdout),
+        String::from_utf8_lossy(&source_bind.stderr)
+    );
+    let source_remove = reader.source_remove_output(&fs_id);
+    assert!(
+        !source_remove.status.success(),
+        "reader unexpectedly removed AgentFS-backed source through low-level source command\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&source_remove.stdout),
+        String::from_utf8_lossy(&source_remove.stderr)
+    );
+    assert!(
+        reader.local_root.join(".section/root.json").exists(),
+        "failed low-level source remove must not remove AgentFS root marker"
     );
     let write = reader.write_output(&format!("{fs_id}/bypass.txt"));
     assert!(

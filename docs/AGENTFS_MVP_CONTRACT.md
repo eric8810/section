@@ -207,7 +207,6 @@ that point at another FS. The JSON error code is `malformed_shared_metadata`.
   "fs_id": "fs_...",
   "parent_commit_id": "cmt_...",
   "base_commit_id": "cmt_...",
-  "base_manifest_hash": "sha256:...",
   "agent_id": "agt_...",
   "summary": "Update docs",
   "authorized_by": {
@@ -550,8 +549,7 @@ Rules:
     "attached": true,
     "mount_id": "hash(fs_id + canonical_local_root)",
     "local_root": "/abs/path/project",
-    "base_commit_id": "cmt_...",
-    "base_manifest_hash": "sha256:..."
+    "base_commit_id": "cmt_..."
   },
   "worktree": {
     "dirty": true,

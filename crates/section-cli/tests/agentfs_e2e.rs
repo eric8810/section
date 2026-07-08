@@ -143,6 +143,26 @@ impl AgentFsActor {
         ])
     }
 
+    fn revoke(&self, agent_id: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "revoke".to_string(),
+            FS_NAME.to_string(),
+            agent_id.to_string(),
+        ])
+    }
+
+    fn revoke_output(&self, agent_id: &str) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "revoke".to_string(),
+            FS_NAME.to_string(),
+            agent_id.to_string(),
+        ])
+    }
+
     fn share(&self, agent_id: &str) -> Value {
         self.json_owned(vec![
             "--json".to_string(),
@@ -584,12 +604,23 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
         "repair must materialize the original staging snapshot"
     );
 
+    let after_repair_commit = writer.commit_apply("commit after repair");
+    assert_eq!(
+        after_repair_commit["commit"]["parent_commit_id"], commit_id,
+        "new commit after repair must build on the repaired head"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/blocked.txt"))
+            .expect("read post-repair committed file"),
+        "blocked while head failed"
+    );
+
     let owner_fresh_root = fixture.root.join("owner-fresh-root");
     owner.attach_to(&owner_fresh_root);
     assert_eq!(
         fs::read_to_string(owner_fresh_root.join("docs/note.txt"))
             .expect("owner reads accepted writer content"),
-        "hello from writer"
+        "writer next draft"
     );
 }
 
@@ -820,6 +851,11 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
     let manager_grant = manager.grant(&stranger_id, "reader");
     assert_eq!(manager_grant["grant"]["agent_id"], stranger_id);
     assert_eq!(manager_grant["grant"]["role"], "reader");
+    let manager_revoke = manager.revoke(&stranger_id);
+    assert_eq!(
+        manager_revoke["revoked"][0]["agent_id"], stranger_id,
+        "manager should be able to revoke grants"
+    );
     manager.attach();
     manager.write_local("manager-draft.txt", "manager local draft");
     let manager_status = manager.fs_status(&manager.local_root.to_string_lossy());
@@ -847,6 +883,70 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
         !fixture.path("manager-draft.txt").exists(),
         "manager draft must not become shared truth without commit capability"
     );
+}
+
+#[test]
+fn e2e_revoke_removes_commit_access_and_blocks_pending_share_accept() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    let writer = fixture.agent("writer");
+    let pending = fixture.agent("pending");
+
+    let owner_id = owner.login("owner");
+    owner.create_fs();
+
+    let writer_id = writer.login("writer");
+    owner.grant(&writer_id, "writer");
+    let writer_share = owner.share(&writer_id);
+    let writer_share_id = writer_share["share"]["share_id"]
+        .as_str()
+        .expect("writer share id");
+    writer.accept(writer_share_id);
+    writer.attach();
+
+    let revoked = owner.revoke(&writer_id);
+    assert_eq!(revoked["revoked"][0]["agent_id"], writer_id);
+    let events = owner.fs_events(FS_NAME, None);
+    assert!(events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .any(|event| event["kind"] == "grant.revoked" && event["data"]["agent_id"] == writer_id));
+
+    writer.write_local("docs/revoked.txt", "must stay local");
+    assert_json_error(
+        &writer.commit_apply_output("writer after revoke"),
+        "grant_denied",
+    );
+    assert!(
+        !fixture.path("docs/revoked.txt").exists(),
+        "revoked writer draft must not become shared truth"
+    );
+
+    assert_json_error(&owner.revoke_output(&owner_id), "grant_denied");
+
+    let pending_id = pending.login("pending");
+    owner.grant(&pending_id, "writer");
+    let pending_share = owner.share(&pending_id);
+    let pending_share_id = pending_share["share"]["share_id"]
+        .as_str()
+        .expect("pending share id")
+        .to_string();
+    owner.revoke(&pending_id);
+
+    let available_after_revoke = pending.available();
+    assert!(!available_after_revoke["available"]
+        .as_array()
+        .expect("available shares")
+        .iter()
+        .any(|share| share["share"]["share_id"] == pending_share_id));
+    let accept_after_revoke = pending.run_owned(vec![
+        "--json".to_string(),
+        "fs".to_string(),
+        "accept".to_string(),
+        pending_share_id,
+    ]);
+    assert_json_error(&accept_after_revoke, "grant_denied");
 }
 
 #[cfg(unix)]
@@ -1231,6 +1331,61 @@ fn e2e_section_directory_is_not_committed_as_user_content() {
     assert!(
         !fixture.path(".section/user-note.txt").exists(),
         ".section files must not become shared user content"
+    );
+}
+
+#[test]
+fn e2e_commit_preflight_rejects_empty_message_and_empty_commit() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    owner.write_local("docs/preflight.txt", "draft");
+    let empty_message = owner.commit_apply_output("   ");
+    assert_json_error(&empty_message, "operation_failed");
+    let head = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    assert!(
+        head["commit_id"].is_null(),
+        "empty commit message must not advance head"
+    );
+    assert!(
+        !fixture.path("docs/preflight.txt").exists(),
+        "empty commit message must not materialize local draft"
+    );
+
+    owner.commit_apply("commit preflight draft");
+    let clean_status = owner.commit_status();
+    assert!(
+        clean_status["status"]["dirty_paths"]
+            .as_array()
+            .expect("dirty paths")
+            .is_empty(),
+        "working copy should be clean before empty commit check"
+    );
+    let accepted_before = owner.fs_events(FS_NAME, None)["events"]
+        .as_array()
+        .expect("events before empty commit")
+        .iter()
+        .filter(|event| event["kind"] == "commit.accepted")
+        .count();
+
+    let empty_commit = owner.commit_apply_output("no dirty paths");
+    assert_json_error(&empty_commit, "operation_failed");
+    let accepted_after = owner.fs_events(FS_NAME, None)["events"]
+        .as_array()
+        .expect("events after empty commit")
+        .iter()
+        .filter(|event| event["kind"] == "commit.accepted")
+        .count();
+    assert_eq!(
+        accepted_after, accepted_before,
+        "empty commit must not create a new accepted commit"
     );
 }
 

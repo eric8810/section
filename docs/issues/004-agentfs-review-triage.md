@@ -69,13 +69,11 @@ local edit != shared truth
 accepted commit == shared truth mutation
 ```
 
-The highest-priority remaining work is therefore:
+Current status: the P0/P1 review findings for the MVP core are marked
+`fixed-local` or `fixed-contract`.
 
-1. protect AgentFS governance from source/path escape hatches,
-2. make commit freshness and dirty detection use a trustworthy mounted base,
-3. make AgentFS events replayable and observable,
-4. make shared metadata writes failure-safe enough for the MVP,
-5. settle discovery/invite semantics for a granted second agent.
+This does not mean every future AgentFS feature exists. Hooks, `AGENTS.md`
+enforcement, proposals, and path-scoped grants remain separate future gates.
 
 ## Priority Buckets
 
@@ -118,7 +116,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 40 | A bad `fs.json` in an unrelated source can block lookup of a healthy FS. | confirmed | fixed-local |
 | 43 | FS reference resolution does not support local source aliases and can pick the first name collision. | confirmed | fixed-local |
 | 45 | File/directory type replacement is accepted before sync later reports conflict. | confirmed | fixed-local |
-| 46 | AgentFS tests do not cover the test plan. | partial | partial |
+| 46 | AgentFS tests do not cover the test plan. | partial | fixed-local |
 | 47 | Overlapping local roots can make a parent FS treat a child FS marker as user content. | confirmed | fixed-local |
 | 48 | Low-level `source bind/unbind/remove` can break AgentFS root markers. | confirmed | fixed-local |
 | 51 | AgentFS event files are not protected as append-only/immutable records. | partial | fixed-local |
@@ -176,12 +174,8 @@ of the recorded baseline.
 
 ### Partially Addressed In Current Local Branch
 
-These findings have useful mitigation, but remain open as design or backend
-correctness work.
-
-| ID | Finding | Remaining Gap |
-| --- | --- | --- |
-| 46 | AgentFS tests do not cover the full test plan. | Current E2E covers the implemented core paths, but the test plan still needs a requirement-by-requirement coverage audit before AgentFS can be called complete. |
+No P0/P1 AgentFS review finding is currently tracked as partial for the MVP
+core. Future features still need their own E2E gates before they are exposed.
 
 ## Full Finding Ledger
 
@@ -234,7 +228,7 @@ This table preserves every reviewer finding for traceability.
 | 43 | FS ref lookup mishandles local aliases and name collisions. | P1 | confirmed | fixed-local | Lookup now prefers exact fs id, then source name, then FS name; duplicate source/name matches return `ambiguous_fs_ref`. |
 | 44 | Commit commands ignore marker `local_root`. | P0 | confirmed | fixed-local | Use marker root or fail on marker/store mismatch. |
 | 45 | File/dir type replacement is accepted then fails materialization. | P1 | confirmed | fixed-local | Preflight rejects same-path file/dir type conflicts with `path_type_conflict` before writing accepted commit metadata. |
-| 46 | AgentFS tests do not cover the test plan. | P1 | partial | partial | CLI E2E tests now cover the implemented product path; continue converting product-complete gaps into tests as features land. |
+| 46 | AgentFS tests do not cover the test plan. | P1 | partial | fixed-local | The test plan now has a requirement-by-requirement core completion audit, and CLI E2E/control-plane tests cover the MVP core paths. Future features remain separate gates. |
 | 47 | Overlapping local roots can leak child markers. | P1 | confirmed | fixed-local | Parent/child roots are rejected after canonicalization so nested root markers cannot become user content. |
 | 48 | Low-level source commands can break AgentFS markers. | P1 | confirmed | fixed-local | Low-level source/path commands reject AgentFS-backed sources by default. |
 | 49 | AgentFS event replay/resume has no control-plane entry. | P0 | covered | fixed-local | `section fs events` supports replay and `--after`; `watch --agentfs` streams the same event records. |
@@ -266,9 +260,8 @@ Resolved decisions:
 
 ### Next Implementation Batch
 
-After the decisions above, prioritize:
-
-1. remaining AgentFS test-plan coverage audit (#46).
+The P0/P1 review ledger is closed for the MVP core. Future implementation
+batches should start from new product scope, not from unresolved review triage.
 
 ## Verification Record
 
