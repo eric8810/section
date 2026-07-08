@@ -1068,6 +1068,73 @@ fn e2e_fs_status_reports_corrupt_local_marker() {
 }
 
 #[test]
+fn e2e_section_directory_is_not_committed_as_user_content() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    fs::write(
+        owner.local_root.join(".section/user-note.txt"),
+        "must stay local",
+    )
+    .expect("write local section file");
+    owner.write_local("docs/visible.txt", "visible");
+
+    let commit = owner.commit_apply("commit visible file only");
+    let paths = commit["commit"]["paths"].as_array().expect("commit paths");
+    assert!(
+        paths.iter().all(|path| !path["path"]
+            .as_str()
+            .expect("commit path")
+            .starts_with(".section")),
+        "commit paths must not include .section content: {paths:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/visible.txt")).expect("remote visible file"),
+        "visible"
+    );
+    assert!(
+        !fixture.path(".section/user-note.txt").exists(),
+        ".section files must not become shared user content"
+    );
+}
+
+#[test]
+fn e2e_reattach_moves_single_local_root() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    let old_marker = owner.local_root.join(".section/root.json");
+    assert!(old_marker.exists(), "initial attach should write marker");
+
+    let second_root = fixture.root.join("owner-second-root");
+    owner.attach_to(&second_root);
+    assert!(
+        !old_marker.exists(),
+        "reattach should remove previous local root marker"
+    );
+    assert!(
+        second_root.join(".section/root.json").exists(),
+        "reattach should write marker at the new local root"
+    );
+
+    assert_json_error(
+        &owner.fs_status_output(&owner.local_root.to_string_lossy()),
+        "unknown_fs",
+    );
+    let status = owner.fs_status(&second_root.to_string_lossy());
+    assert_eq!(
+        status["status"]["local_root"].as_str(),
+        Some(second_root.to_str().expect("utf8 second root"))
+    );
+}
+
+#[test]
 fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
     let fixture = AgentFsFixture::new();
     let owner = fixture.agent("owner");

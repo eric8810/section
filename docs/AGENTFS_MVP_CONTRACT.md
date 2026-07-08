@@ -26,7 +26,7 @@ IDs are stable, opaque strings. Display names are metadata and can change.
 | `source_profile_id` | `srcp_` + 32 lowercase hex chars | Server-side backing source profile |
 | `share_id` | `shr_` + 32 lowercase hex chars | Server-side share record |
 | `credential_binding_id` | `cred_` + 32 lowercase hex chars | Short-lived sync credential audit record |
-| `mount_id` | derived from `fs_id + canonical_local_root` in MVP | No persistent mount id required in the first implementation |
+| `mount_id` | derived from `fs_id + canonical_local_root` in MVP | One active local root per FS per local installation store |
 | `commit_id` | `cmt_` + 32 lowercase hex chars | Generated before commit metadata is written |
 | `event_id` | `evt_` + 13 digit epoch-ms + `_` + 16 lowercase hex chars | Event identity only; ordering uses `seq` |
 | `event_seq` | per-FS integer, starts at 1 | Strictly increases inside one FS |
@@ -39,7 +39,7 @@ Path strings are UTF-8, slash-separated, source-root-relative paths:
 - no leading slash
 - no `..` segments
 - no empty segment except the root path represented as `""`
-- `.section/agentfs/**` is reserved control metadata
+- `.section/**` is reserved Section metadata
 
 ## 2. Authority Model
 
@@ -105,10 +105,10 @@ AgentFS metadata may be mirrored under the backing source:
 
 Rules:
 
-- `.section/agentfs/**` is reserved.
+- `.section/**` is reserved.
 - Normal commits cannot modify reserved metadata paths.
 - The local mount may expose `.section/root.json` for discovery.
-- The local mount should not expose `.section/agentfs/**` as normal user content when it can avoid it.
+- The local mount should not expose `.section/**` as normal user content when it can avoid it.
 - If reserved metadata appears in a working copy, `commit apply` must ignore it for dirty detection and reject explicit attempts to commit it.
 
 Metadata files are rewritten as whole JSON documents. The MVP does not use JSONL append files because object backends do not provide portable append semantics.
@@ -334,7 +334,7 @@ Rules:
 
 - summary is required and must be non-empty after trimming whitespace.
 - empty commits are rejected.
-- commits containing `.section/agentfs/**` are rejected.
+- commits containing `.section/**` are rejected.
 - reserved metadata paths are ignored in dirty detection.
 - external backing-source drift is treated as conflict or stale state before commit acceptance.
 
@@ -424,6 +424,12 @@ Attach behavior:
 - syncs current materialized backing-source state into the local root,
 - records `base_commit_id` in the trusted local mount store and mirrors it into `.section/root.json`.
 
+MVP local root rule:
+
+- one accepted FS has one active local root per local installation store,
+- attaching the same FS to another local root moves the active root,
+- the old root marker is removed when reattach succeeds.
+
 `root.json` fields:
 
 ```json
@@ -472,7 +478,7 @@ Errors must have stable codes for JSON output.
 | `unknown_fs` | FS metadata cannot be found | no, check name/id |
 | `grant_denied` | Agent lacks required capability | no, request grant |
 | `stale_base` | local `base_commit_id` differs from current head | yes, sync/refresh first |
-| `reserved_metadata_path` | operation attempts to commit `.section/agentfs/**` | no |
+| `reserved_metadata_path` | operation attempts to commit `.section/**` | no |
 | `materialization_failed` | accepted commit could not update backing source | yes, repair/retry materialization |
 | `malformed_shared_metadata` | shared metadata failed schema validation | no, repair metadata |
 | `metadata_write_conflict` | lock or head update conflict | yes |

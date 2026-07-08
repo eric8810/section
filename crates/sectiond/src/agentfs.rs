@@ -445,7 +445,7 @@ pub fn new_lock_token() -> Result<String> {
 
 pub fn is_reserved_metadata_path(path: &str) -> bool {
     let path = path.trim_matches('/');
-    path == METADATA_ROOT || path.starts_with(&format!("{METADATA_ROOT}/"))
+    path == ".section" || path.starts_with(".section/")
 }
 
 pub fn validate_source_relative_path(path: &str) -> Result<()> {
@@ -459,7 +459,7 @@ pub fn validate_source_relative_path(path: &str) -> Result<()> {
     if is_reserved_metadata_path(path) {
         anyhow::bail!(AgentFsError::new(
             "reserved_metadata_path",
-            format!("path {path} is reserved AgentFS metadata"),
+            format!("path {path} is reserved Section metadata"),
             false,
         ));
     }
@@ -1231,6 +1231,8 @@ mod tests {
         assert!(validate_source_relative_path("/docs/readme.md").is_err());
         assert!(validate_source_relative_path("docs//readme.md").is_err());
         assert!(validate_source_relative_path("docs/../secret").is_err());
+        assert!(validate_source_relative_path(".section/root.json").is_err());
+        assert!(validate_source_relative_path(".section/user-note.txt").is_err());
         assert!(validate_source_relative_path(".section/agentfs/fs.json").is_err());
     }
 }

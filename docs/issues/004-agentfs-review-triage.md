@@ -50,6 +50,7 @@ The reviewed implementation is centered on:
 | Status | Meaning |
 | --- | --- |
 | `fixed-local` | Addressed in the current local branch or working tree; uncommitted fixes still need commit/review. |
+| `fixed-contract` | Closed by an explicit product contract decision and matching implementation/test coverage. |
 | `open` | No implementation fix yet. |
 | `partial` | Some mitigation exists, but the finding is not fully closed. |
 | `decision-needed` | Requires a contract/product decision before implementation. |
@@ -104,7 +105,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | --- | --- | --- | --- |
 | 2 | Metadata writes need a real head lock and conflict path. | partial | partial |
 | 6 | `fs create` can partially mutate local source registry before remote metadata validation succeeds. | partial | partial |
-| 8 | Multiple local roots per FS are not implemented; current store is still source-level single-root. | decision | decision-needed |
+| 8 | Multiple local roots per FS are not implemented; current store is still source-level single-root. | decision | fixed-contract |
 | 9 | AgentFS JSON error contract is incomplete and inconsistent. | confirmed | fixed-local |
 | 10 | Shared metadata lacks schema/version/cross-record consistency validation. | confirmed | fixed-local |
 | 13 | Materialization retry/repair does not exist. | confirmed | fixed-local |
@@ -138,7 +139,7 @@ internal and clearly marked incomplete.
 | 28 | `fs status` lacks dirty state and full materialization detail. | partial | fixed-local |
 | 30 | Non-empty directory deletion can race parent/child deletes in sync transport. | confirmed | fixed-local |
 | 32 | `commit.materialized` event lacks path/state details. | confirmed | fixed-local |
-| 35 | `.section/**` filtering is broader than the written contract's `.section/agentfs/**` reservation. | decision | decision-needed |
+| 35 | `.section/**` filtering is broader than the written contract's `.section/agentfs/**` reservation. | decision | fixed-contract |
 | 50 | `fs status` swallows corrupt local root markers. | confirmed | fixed-local |
 
 ### Fixed In Current Local Branch
@@ -191,7 +192,7 @@ This table preserves every reviewer finding for traceability.
 | 5 | Commit dirty detection uses current remote, not mounted base/path sync state. | P0 | confirmed | fixed-local | Commit now checks current backing source against trusted path sync base first; external drift returns `remote_drift` before acceptance. |
 | 6 | `fs create` mutates source registry before validating remote metadata. | P1 | partial | partial | Remote preflight and source rollback are in place; add staged initialization/recovery for partial remote metadata. |
 | 7 | Granted second agent cannot attach by grant alone. | P0 | confirmed | fixed-local | Keep service-backed `fs share`, `fs available`, `fs accept`, and attach tests. |
-| 8 | Multiple local roots per FS are not supported. | P1 | decision | decision-needed | Decide whether MVP really requires same-local-store multi-root; otherwise update contract. |
+| 8 | Multiple local roots per FS are not supported. | P1 | decision | fixed-contract | Product decision: MVP has one active local root per FS per local installation store; reattach moves the root and removes the old marker. |
 | 9 | JSON error contract is incomplete. | P1 | confirmed | fixed-local | AgentFS CLI JSON errors now include stable `code`, `retryable`, and `details`; argument failures use `invalid_arguments`, generic runtime failures use `operation_failed`. |
 | 10 | Shared metadata lacks schema/version/consistency validation. | P1 | confirmed | fixed-local | Shared metadata reads now validate schema/version, IDs, paths, grants, commits, events, and head/commit/event FS consistency; E2E verifies corrupted schema and cross-record links return `malformed_shared_metadata`. |
 | 11 | `fs status` role can be wrong with multiple grants. | P2 | partial | fixed-local | Keep grant replacement tests; handle legacy duplicate active grants if needed. |
@@ -218,7 +219,7 @@ This table preserves every reviewer finding for traceability.
 | 32 | `commit.materialized` lacks paths/state details. | P2 | confirmed | fixed-local | Event data now includes `materialization_state` and commit path summary; E2E verifies it through `fs events`. |
 | 33 | Reattach new empty root can delete remote due to old sync state. | P0 | confirmed | fixed-local | Keep clear-sync-state-before-attach behavior. |
 | 34 | Symlinks can expose files outside working root. | P0 | confirmed | fixed-local | Reject symlinks or treat them as unsupported local entry types. |
-| 35 | `.section/**` filtering is broader than contract. | P2 | decision | decision-needed | Either reserve all `.section/**` or narrow filters to `.section/agentfs/**` plus local marker. |
+| 35 | `.section/**` filtering is broader than contract. | P2 | decision | fixed-contract | Product decision: all `.section/**` is reserved Section metadata; dirty detection skips it and path validation rejects it. |
 | 36 | Attach ignores sync conflicts. | P0 | confirmed | fixed-local | Keep conflict rejection and rollback. |
 | 37 | Same local root can be stolen by another source. | P1 | confirmed | fixed-local | Keep cross-source collision rejection; add canonical path check separately. |
 | 38 | `fs create` overwrites existing store-owned source. | P1 | confirmed | fixed-local | Keep source-exists guard. |
@@ -256,13 +257,11 @@ Recommended commit scope:
 
 ### Next Design Pass
 
-Before more code, settle these contract decisions:
+Resolved decisions:
 
-1. Is multi-root per FS required inside one local store for MVP?
-2. Is all `.section/**` reserved, or only `.section/agentfs/**` plus local marker?
-
-Resolved decision: `fs list`, `fs status`, `fs events`, and `watch --agentfs`
-do not reveal FS metadata without read capability.
+- MVP does not support multiple active local roots for the same FS inside one local installation store; reattach moves the root.
+- All `.section/**` paths are reserved Section metadata.
+- `fs list`, `fs status`, `fs events`, and `watch --agentfs` do not reveal FS metadata without read capability.
 
 ### Next Implementation Batch
 
