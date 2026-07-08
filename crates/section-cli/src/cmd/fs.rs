@@ -1,6 +1,6 @@
 use crate::{FsAction, FsRoleArg};
 use anyhow::{bail, Result};
-use sectiond::{AgentFsError, AgentFsRole, SectiondControlPlane};
+use sectiond::{AgentFsRole, SectiondControlPlane};
 use serde_json::json;
 use std::path::Path;
 
@@ -8,9 +8,7 @@ pub fn run(config_path: Option<&Path>, action: FsAction, json_mode: bool) -> Res
     let result = run_inner(config_path, action, json_mode);
     if let Err(err) = &result {
         if json_mode {
-            if let Some(agentfs_error) = err.downcast_ref::<AgentFsError>() {
-                println!("{}", json!({ "error": agentfs_error.payload() }));
-            }
+            super::print_agentfs_json_error(err, "fs");
         }
     }
     result

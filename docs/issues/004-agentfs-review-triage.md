@@ -105,7 +105,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 2 | Metadata writes need a real head lock and conflict path. | partial | partial |
 | 6 | `fs create` can partially mutate local source registry before remote metadata validation succeeds. | partial | partial |
 | 8 | Multiple local roots per FS are not implemented; current store is still source-level single-root. | decision | decision-needed |
-| 9 | AgentFS JSON error contract is incomplete and inconsistent. | confirmed | open |
+| 9 | AgentFS JSON error contract is incomplete and inconsistent. | confirmed | fixed-local |
 | 10 | Shared metadata lacks schema/version/cross-record consistency validation. | confirmed | open |
 | 13 | Materialization retry/repair does not exist. | confirmed | fixed-local |
 | 14 | Event ordering can reverse within the same millisecond due to random suffix sorting. | confirmed | fixed-local |
@@ -192,7 +192,7 @@ This table preserves every reviewer finding for traceability.
 | 6 | `fs create` mutates source registry before validating remote metadata. | P1 | partial | partial | Remote preflight and source rollback are in place; add staged initialization/recovery for partial remote metadata. |
 | 7 | Granted second agent cannot attach by grant alone. | P0 | confirmed | fixed-local | Keep service-backed `fs share`, `fs available`, `fs accept`, and attach tests. |
 | 8 | Multiple local roots per FS are not supported. | P1 | decision | decision-needed | Decide whether MVP really requires same-local-store multi-root; otherwise update contract. |
-| 9 | JSON error contract is incomplete. | P1 | confirmed | open | Route all AgentFS CLI errors through typed error payloads. |
+| 9 | JSON error contract is incomplete. | P1 | confirmed | fixed-local | AgentFS CLI JSON errors now include stable `code`, `retryable`, and `details`; argument failures use `invalid_arguments`, generic runtime failures use `operation_failed`. |
 | 10 | Shared metadata lacks schema/version/consistency validation. | P1 | confirmed | open | Add validation traits for every metadata record. |
 | 11 | `fs status` role can be wrong with multiple grants. | P2 | partial | fixed-local | Keep grant replacement tests; handle legacy duplicate active grants if needed. |
 | 12 | Commit record can differ from actual materialized bytes. | P0 | confirmed | fixed-local | Commit now stages dirty paths first and materializes from the staging snapshot. |
@@ -270,7 +270,7 @@ After the decisions above, prioritize:
 2. safe FS initialization and recovery (#6, #15, #20),
 3. schema validation and backend-level event immutability (#10, #51),
 4. local root canonicalization and overlap (#39, #47),
-5. complete JSON error contract (#9).
+5. file/dir replacement preflight (#45).
 
 ## Verification Record
 

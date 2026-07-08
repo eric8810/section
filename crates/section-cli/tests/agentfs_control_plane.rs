@@ -270,7 +270,7 @@ impl Actor {
     }
 }
 
-fn assert_json_error(output: &Output, code: &str) {
+fn assert_json_error(output: &Output, code: &str) -> Value {
     assert!(
         !output.status.success(),
         "command unexpectedly succeeded\nstdout: {}\nstderr: {}",
@@ -279,6 +279,15 @@ fn assert_json_error(output: &Output, code: &str) {
     );
     let error: Value = serde_json::from_slice(&output.stdout).expect("error json");
     assert_eq!(error["error"]["code"], code);
+    assert!(
+        error["error"]["retryable"].is_boolean(),
+        "error retryable must be a boolean: {error:?}"
+    );
+    assert!(
+        error["error"]["details"].is_object(),
+        "error details must be an object: {error:?}"
+    );
+    error
 }
 
 fn read_json(path: impl AsRef<Path>) -> Value {

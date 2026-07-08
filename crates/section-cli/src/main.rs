@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{error::ErrorKind, Parser, Subcommand, ValueEnum};
 use section_core::SectionConfig;
 use section_provider::ProviderStore;
 use std::path::PathBuf;
@@ -341,7 +341,21 @@ fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            if json_arg_requested()
+                && !matches!(
+                    err.kind(),
+                    ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+                )
+            {
+                print_json_parse_error(&err);
+                std::process::exit(err.exit_code());
+            }
+            err.exit();
+        }
+    };
     let json = cli.json;
 
     match cli.command {
@@ -404,6 +418,26 @@ fn main() -> Result<()> {
             cmd::init::run(&store)
         }
     }
+}
+
+fn json_arg_requested() -> bool {
+    std::env::args_os().any(|arg| arg == "--json")
+}
+
+fn print_json_parse_error(err: &clap::Error) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "error": {
+                "code": "invalid_arguments",
+                "message": err.to_string(),
+                "retryable": false,
+                "details": {
+                    "kind": format!("{:?}", err.kind()),
+                },
+            }
+        })
+    );
 }
 
 fn load_config(config_path: Option<&std::path::Path>) -> Result<SectionConfig> {

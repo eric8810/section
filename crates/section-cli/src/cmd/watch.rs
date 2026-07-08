@@ -13,6 +13,23 @@ pub fn run(
     interval_ms: u64,
     json_mode: bool,
 ) -> Result<()> {
+    let result = run_inner(config_path, path, agentfs, once, interval_ms, json_mode);
+    if let Err(err) = &result {
+        if json_mode && agentfs {
+            super::print_agentfs_json_error(err, "watch_agentfs");
+        }
+    }
+    result
+}
+
+fn run_inner(
+    config_path: Option<&Path>,
+    path: &Path,
+    agentfs: bool,
+    once: bool,
+    interval_ms: u64,
+    json_mode: bool,
+) -> Result<()> {
     let control_plane = SectiondControlPlane::load(config_path)?;
     if agentfs {
         return run_agentfs_watch_loop(&control_plane, path, once, interval_ms, json_mode);

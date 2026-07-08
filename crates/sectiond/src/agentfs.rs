@@ -217,6 +217,7 @@ pub struct AgentFsErrorPayload {
     pub code: &'static str,
     pub message: String,
     pub retryable: bool,
+    pub details: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -231,8 +232,14 @@ impl AgentFsError {
                 code,
                 message: message.into(),
                 retryable,
+                details: json!({}),
             },
         }
+    }
+
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.payload.details = details;
+        self
     }
 
     pub fn unknown_agent() -> Self {
@@ -249,6 +256,7 @@ impl AgentFsError {
             format!("AgentFS {reference} was not found in registered sources"),
             false,
         )
+        .with_details(json!({ "reference": reference }))
     }
 
     pub fn grant_denied(message: impl Into<String>) -> Self {
@@ -269,14 +277,21 @@ impl AgentFsError {
             ),
             true,
         )
+        .with_details(json!({
+            "fs_id": fs_id,
+            "base_commit_id": base,
+            "head_commit_id": head,
+        }))
     }
 
     pub fn materialization_failed(fs_id: &str, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self::new(
             "materialization_failed",
-            format!("fs {fs_id} is not ready: {}", message.into()),
+            format!("fs {fs_id} is not ready: {message}"),
             true,
         )
+        .with_details(json!({ "fs_id": fs_id }))
     }
 
     pub fn metadata_write_conflict(fs_id: &str) -> Self {
@@ -285,6 +300,7 @@ impl AgentFsError {
             format!("metadata head lock is held for fs {fs_id}"),
             true,
         )
+        .with_details(json!({ "fs_id": fs_id }))
     }
 
     pub fn missing_commit_snapshot(commit_id: &str) -> Self {
@@ -293,6 +309,7 @@ impl AgentFsError {
             format!("staging snapshot for commit {commit_id} is missing"),
             false,
         )
+        .with_details(json!({ "commit_id": commit_id }))
     }
 
     pub fn payload(&self) -> &AgentFsErrorPayload {

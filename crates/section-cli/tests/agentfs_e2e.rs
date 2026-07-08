@@ -254,7 +254,7 @@ impl AgentFsActor {
     }
 }
 
-fn assert_json_error(output: &Output, code: &str) {
+fn assert_json_error(output: &Output, code: &str) -> Value {
     assert!(
         !output.status.success(),
         "command unexpectedly succeeded\nstdout: {}\nstderr: {}",
@@ -263,6 +263,15 @@ fn assert_json_error(output: &Output, code: &str) {
     );
     let error: Value = serde_json::from_slice(&output.stdout).expect("error json");
     assert_eq!(error["error"]["code"], code);
+    assert!(
+        error["error"]["retryable"].is_boolean(),
+        "error retryable must be a boolean: {error:?}"
+    );
+    assert!(
+        error["error"]["details"].is_object(),
+        "error details must be an object: {error:?}"
+    );
+    error
 }
 
 fn read_json(path: impl AsRef<Path>) -> Value {
@@ -297,6 +306,38 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
     let writer = fixture.agent("writer");
 
     let owner_id = owner.login("owner");
+    let missing_source_profile = owner.run_owned(vec![
+        "--json".to_string(),
+        "fs".to_string(),
+        "create".to_string(),
+        "missing-source-profile".to_string(),
+    ]);
+    let missing_source_profile_error =
+        assert_json_error(&missing_source_profile, "operation_failed");
+    assert_eq!(missing_source_profile_error["error"]["retryable"], false);
+    assert_eq!(
+        missing_source_profile_error["error"]["details"]["command"],
+        "fs"
+    );
+    let invalid_args = owner.run_owned(vec![
+        "--json".to_string(),
+        "fs".to_string(),
+        "status".to_string(),
+    ]);
+    let invalid_args_error = assert_json_error(&invalid_args, "invalid_arguments");
+    assert!(invalid_args_error["error"]["details"]["kind"].is_string());
+    let missing_watch = owner.run_owned(vec![
+        "--json".to_string(),
+        "watch".to_string(),
+        "missing-agentfs".to_string(),
+        "--agentfs".to_string(),
+        "--once".to_string(),
+    ]);
+    let missing_watch_error = assert_json_error(&missing_watch, "unknown_fs");
+    assert_eq!(
+        missing_watch_error["error"]["details"]["reference"],
+        "missing-agentfs"
+    );
     let create = owner.create_fs();
     let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
     assert_eq!(create["fs"]["owner_agent_id"], owner_id);

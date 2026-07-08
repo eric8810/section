@@ -5,6 +5,16 @@ use serde_json::json;
 use std::path::Path;
 
 pub fn run(config_path: Option<&Path>, action: AgentAction, json_mode: bool) -> Result<()> {
+    let result = run_inner(config_path, action, json_mode);
+    if let Err(err) = &result {
+        if json_mode {
+            super::print_agentfs_json_error(err, "agent");
+        }
+    }
+    result
+}
+
+fn run_inner(config_path: Option<&Path>, action: AgentAction, json_mode: bool) -> Result<()> {
     let control_plane = SectiondControlPlane::load(config_path)?;
 
     match action {
