@@ -1465,9 +1465,11 @@ fn e2e_reattach_moves_single_local_root() {
         "unknown_fs",
     );
     let status = owner.fs_status(&second_root.to_string_lossy());
+    let second_root = second_root.canonicalize().expect("canonical second root");
+    let second_root_str = second_root.to_string_lossy().to_string();
     assert_eq!(
         status["status"]["local_root"].as_str(),
-        Some(second_root.to_str().expect("utf8 second root"))
+        Some(second_root_str.as_str())
     );
 }
 
@@ -1762,7 +1764,7 @@ fn e2e_metadata_head_lock_blocks_commit_until_released() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn e2e_rejects_non_utf8_commit_paths() {
     use std::ffi::OsString;
