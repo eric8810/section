@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -26,9 +27,16 @@ struct Cli {
 enum Commands {
     /// Print the current sectiond runtime contract and merged source snapshot
     Inspect,
+    /// Run the Section Control Service HTTP API
+    Serve {
+        /// Listen address
+        #[arg(long, default_value = "127.0.0.1:7373")]
+        addr: SocketAddr,
+    },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -36,6 +44,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Inspect => inspect(cli.config.as_deref(), cli.json),
+        Commands::Serve { addr } => {
+            sectiond::serve_control_service(cli.config.as_deref(), addr, cli.json).await
+        }
     }
 }
 

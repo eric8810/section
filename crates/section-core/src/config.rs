@@ -41,6 +41,10 @@ pub struct SourceConfig {
 /// File-backed Section Control Service configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ControlServiceConfig {
+    /// Remote Section Control Service endpoint. When set, AgentFS governance
+    /// calls use this service instead of opening a local file-backed harness.
+    pub endpoint: Option<String>,
+
     /// SQLite database path for the file-backed control service harness.
     pub path: Option<PathBuf>,
 

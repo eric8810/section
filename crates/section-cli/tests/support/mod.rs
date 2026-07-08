@@ -42,6 +42,18 @@ pub fn write_agentfs_config(
     .expect("write AgentFS config");
 }
 
+pub fn write_agentfs_endpoint_config(path: &Path, data_dir: &Path, endpoint: &str) {
+    fs::write(
+        path,
+        format!(
+            "data_dir = {:?}\nmount_point = \"/tmp/section-mount-test\"\n\n[control_service]\nendpoint = {:?}\n",
+            data_dir.to_string_lossy(),
+            endpoint,
+        ),
+    )
+    .expect("write AgentFS endpoint config");
+}
+
 pub fn run_section(config_path: &Path, args: &[&str]) -> Output {
     let bin = env!("CARGO_BIN_EXE_section");
     Command::new(bin)

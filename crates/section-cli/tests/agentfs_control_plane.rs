@@ -1,10 +1,14 @@
 mod support;
 
-use crate::support::{assert_success, run_section, write_agentfs_config, write_config};
+use crate::support::{
+    assert_success, run_section, write_agentfs_config, write_agentfs_endpoint_config, write_config,
+};
 use serde_json::Value;
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::thread;
 
 const FS_NAME: &str = "project";
 const SOURCE_PROFILE: &str = "test-profile";
@@ -47,6 +51,18 @@ impl Fixture {
         );
         Actor {
             config_path,
+            data_dir,
+            local_root: self.root.join(format!("{name}-root")),
+        }
+    }
+
+    fn agent_with_endpoint(&self, name: &str, endpoint: &str) -> Actor {
+        let data_dir = self.root.join(format!("{name}-data"));
+        let config_path = self.root.join(format!("{name}.toml"));
+        write_agentfs_endpoint_config(&config_path, &data_dir, endpoint);
+        Actor {
+            config_path,
+            data_dir,
             local_root: self.root.join(format!("{name}-root")),
         }
     }
@@ -56,8 +72,28 @@ impl Fixture {
     }
 }
 
+fn start_control_service_server(config_path: PathBuf) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind control service test listener");
+    let addr = listener.local_addr().expect("control service local addr");
+    listener
+        .set_nonblocking(true)
+        .expect("set listener nonblocking");
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().expect("control service runtime");
+        runtime
+            .block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener)
+                    .expect("tokio control service listener");
+                sectiond::serve_control_service_listener(Some(&config_path), listener).await
+            })
+            .expect("control service server");
+    });
+    format!("http://{addr}")
+}
+
 struct Actor {
     config_path: PathBuf,
+    data_dir: PathBuf,
     local_root: PathBuf,
 }
 
@@ -171,6 +207,14 @@ impl Actor {
 
     fn available(&self) -> Value {
         self.json(&["--json", "fs", "available"], "fs available")
+    }
+
+    fn available_output(&self) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "available".to_string(),
+        ])
     }
 
     fn accept(&self, share_id: &str) -> Value {
@@ -354,6 +398,80 @@ fn assert_json_output_omits(output: &Output, forbidden: &[&str], context: &str) 
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn http_control_service_shares_without_client_source_profile_or_keys() {
+    let fixture = Fixture::new();
+    let server_config = fixture.root.join("control-server.toml");
+    let server_data = fixture.root.join("control-server-data");
+    write_agentfs_config(
+        &server_config,
+        &server_data,
+        &fixture.control_service_path,
+        SOURCE_PROFILE,
+        &fixture.remote_root,
+    );
+    let endpoint = start_control_service_server(server_config);
+    let owner = fixture.agent_with_endpoint("owner", &endpoint);
+    let writer = fixture.agent_with_endpoint("writer", &endpoint);
+
+    let owner_config = fs::read_to_string(&owner.config_path).expect("read owner config");
+    let writer_config = fs::read_to_string(&writer.config_path).expect("read writer config");
+    let remote_root = fixture.remote_root.to_string_lossy();
+    assert!(!owner_config.contains(SOURCE_PROFILE));
+    assert!(!writer_config.contains(SOURCE_PROFILE));
+    assert!(!owner_config.contains(remote_root.as_ref()));
+    assert!(!writer_config.contains(remote_root.as_ref()));
+
+    owner.login("owner");
+    let create = owner.create_fs();
+    assert_eq!(create["fs"]["name"], FS_NAME);
+    owner.attach();
+
+    let writer_id = login_agent_id(&writer.login("writer"));
+    let writer_store = section_provider::ProviderStore::open(&writer.data_dir)
+        .expect("open writer provider store");
+    let original_writer_identity = writer_store
+        .get_agent_identity()
+        .expect("read writer identity")
+        .expect("writer identity");
+    let mut tampered_writer_identity = original_writer_identity.clone();
+    tampered_writer_identity.auth_token = "auth_invalid".to_string();
+    writer_store
+        .cache_agent_identity(&tampered_writer_identity)
+        .expect("tamper writer identity");
+    assert_json_error(&writer.available_output(), "unknown_agent");
+    writer_store
+        .cache_agent_identity(&original_writer_identity)
+        .expect("restore writer identity");
+
+    owner.grant(&writer_id, "writer");
+    let share = owner.share(&writer_id);
+    let share_id = share["share"]["share_id"].as_str().expect("share id");
+    assert!(writer.available()["available"]
+        .as_array()
+        .expect("available shares")
+        .iter()
+        .any(|available| available["share"]["share_id"] == share_id));
+    let accept = writer.accept(share_id);
+    assert_eq!(accept["fs"]["name"], FS_NAME);
+    assert!(
+        accept["credential_binding"]["credential_binding_id"]
+            .as_str()
+            .expect("credential binding id")
+            .starts_with("cred_"),
+        "accept must return a service-issued credential binding"
+    );
+    writer.attach();
+
+    writer.write_local("docs/remote-service.txt", "from http control service");
+    writer.commit_apply("commit through http control service");
+    assert_eq!(
+        fs::read_to_string(fixture.remote_path("docs/remote-service.txt"))
+            .expect("read remote committed file"),
+        "from http control service"
+    );
 }
 
 #[test]

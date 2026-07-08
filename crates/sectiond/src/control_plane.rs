@@ -9,7 +9,7 @@ use crate::{
     agentfs, AgentFsAcceptResult, AgentFsAvailableShare, AgentFsCapability,
     AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsCommitStagingRecord, AgentFsError,
     AgentFsEventRecord, AgentFsGrantRecord, AgentFsHeadRecord, AgentFsMaterializationState,
-    AgentFsRecord, AgentFsRole, AgentFsShareResult, ControlServiceStore,
+    AgentFsRecord, AgentFsRole, AgentFsShareResult, ControlService,
 };
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
@@ -172,7 +172,7 @@ struct PreparedAgentFsCommit {
 pub struct SectiondControlPlane {
     config: SectionConfig,
     store: ProviderStore,
-    control_service: ControlServiceStore,
+    control_service: ControlService,
 }
 
 impl SectiondControlPlane {
@@ -180,7 +180,7 @@ impl SectiondControlPlane {
         let config = SectionConfig::load(config_path)?;
         config.ensure_dirs()?;
         let store = ProviderStore::open(&config.data_dir)?;
-        let control_service = ControlServiceStore::open(&config)?;
+        let control_service = ControlService::open(&config)?;
         Ok(Self {
             config,
             store,
@@ -215,7 +215,7 @@ impl SectiondControlPlane {
         let agent = self.require_agent_identity()?;
         let (_source_profile, source) = self
             .control_service
-            .source_profile_by_name(source_profile_name)?;
+            .source_profile_by_name(source_profile_name, &agent)?;
         let operator = build_operator(&source.provider, &source.options)?;
         let rt = tokio::runtime::Runtime::new()?;
 
@@ -235,7 +235,7 @@ impl SectiondControlPlane {
         })();
 
         if let Err(err) = initialized {
-            let cleanup_errors = self.rollback_failed_fs_create(&rt, &operator, &created);
+            let cleanup_errors = self.rollback_failed_fs_create(&rt, &operator, &created, &agent);
             if cleanup_errors.is_empty() {
                 return Err(err);
             }
@@ -249,8 +249,7 @@ impl SectiondControlPlane {
 
     pub fn fs_list(&self) -> Result<Vec<AgentFsRecord>> {
         let agent = self.require_agent_identity()?;
-        self.control_service
-            .list_filesystems_for_agent(&agent.agent_id)
+        self.control_service.list_filesystems_for_agent(&agent)
     }
 
     pub fn fs_grant(
@@ -262,9 +261,9 @@ impl SectiondControlPlane {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
         let resolved = self.find_agentfs(&rt, fs_ref, &actor)?;
-        let mutation =
-            self.control_service
-                .fs_grant(&resolved.fs.fs_id, &actor.agent_id, agent_id, role)?;
+        let mutation = self
+            .control_service
+            .fs_grant(&resolved.fs.fs_id, &actor, agent_id, role)?;
         let _ = mirror_grant_mutation(&rt, &resolved.operator, &resolved.fs.fs_id, &mutation);
         Ok(mutation.grant)
     }
@@ -273,9 +272,9 @@ impl SectiondControlPlane {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
         let resolved = self.find_agentfs(&rt, fs_ref, &actor)?;
-        let mutation =
-            self.control_service
-                .fs_revoke(&resolved.fs.fs_id, &actor.agent_id, agent_id)?;
+        let mutation = self
+            .control_service
+            .fs_revoke(&resolved.fs.fs_id, &actor, agent_id)?;
         let _ = mirror_revoke_mutation(&rt, &resolved.operator, &resolved.fs.fs_id, &mutation);
         Ok(mutation.revoked)
     }
@@ -285,19 +284,17 @@ impl SectiondControlPlane {
         let rt = tokio::runtime::Runtime::new()?;
         let resolved = self.find_agentfs(&rt, fs_ref, &actor)?;
         self.control_service
-            .fs_share(&resolved.fs.fs_id, &actor.agent_id, agent_id)
+            .fs_share(&resolved.fs.fs_id, &actor, agent_id)
     }
 
     pub fn fs_available(&self) -> Result<Vec<AgentFsAvailableShare>> {
         let actor = self.require_agent_identity()?;
-        self.control_service.available_shares(&actor.agent_id)
+        self.control_service.available_shares(&actor)
     }
 
     pub fn fs_accept(&self, share_id: &str) -> Result<AgentFsAcceptResult> {
         let actor = self.require_agent_identity()?;
-        let (accepted, source) =
-            self.control_service
-                .accept_share(share_id, &actor.agent_id, &actor.installation_id)?;
+        let (accepted, source) = self.control_service.accept_share(share_id, &actor)?;
         self.ensure_agentfs_source_from_service(&accepted.fs.source_name, &source)?;
         self.cache_accepted_filesystem(
             &accepted.fs,
@@ -422,14 +419,12 @@ impl SectiondControlPlane {
         let resolved = self.find_agentfs(&rt, &resolved_ref, &agent)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
-            &agent.agent_id,
+            &agent,
             AgentFsCapability::Read,
         )?;
         let materialization_state =
             head_materialization_state(&rt, &resolved.operator, &resolved.head)?;
-        let role = self
-            .control_service
-            .active_role(&resolved.fs, &agent.agent_id)?;
+        let role = self.control_service.active_role(&resolved.fs, &agent)?;
         let capabilities = role.map(AgentFsRole::capabilities).unwrap_or_default();
         let local_root = self.store.get_source_local_root(&resolved.source.name)?;
         let mount = self.store.get_agentfs_mount(&resolved.source.name)?;
@@ -520,11 +515,13 @@ impl SectiondControlPlane {
         let resolved = self.find_agentfs(&rt, &resolved_ref, &agent)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
-            &agent.agent_id,
+            &agent,
             AgentFsCapability::Read,
         )?;
         let mut events = agentfs::list_events(&rt, &resolved.operator)?;
-        let mut service_events = self.control_service.list_events(&resolved.fs.fs_id)?;
+        let mut service_events = self
+            .control_service
+            .list_events(&resolved.fs.fs_id, &agent)?;
         ensure_events_match_fs(&events, &resolved.fs.fs_id)?;
         ensure_events_match_fs(&service_events, &resolved.fs.fs_id)?;
         events.append(&mut service_events);
@@ -548,7 +545,7 @@ impl SectiondControlPlane {
         let resolved = self.find_agentfs(&rt, &fs_id, &actor)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
-            &actor.agent_id,
+            &actor,
             AgentFsCapability::Read,
         )?;
         ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
@@ -599,7 +596,7 @@ impl SectiondControlPlane {
         let resolved = self.find_agentfs(&rt, &fs_id, &actor)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
-            &actor.agent_id,
+            &actor,
             AgentFsCapability::Commit,
         )?;
         ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
@@ -652,7 +649,7 @@ impl SectiondControlPlane {
             ensure_head_matches_fs(&current_head, &resolved.fs.fs_id)?;
             let authorized_by = self.control_service.authorize_capability(
                 &resolved.fs.fs_id,
-                &actor.agent_id,
+                &actor,
                 AgentFsCapability::Commit,
             )?;
             ensure_head_is_materialized(
@@ -806,7 +803,7 @@ impl SectiondControlPlane {
         let resolved = self.find_agentfs(&rt, &resolved_ref, &actor)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
-            &actor.agent_id,
+            &actor,
             AgentFsCapability::Commit,
         )?;
 
@@ -1354,12 +1351,10 @@ impl SectiondControlPlane {
         fs_ref: &str,
         actor: &AgentIdentityRecord,
     ) -> Result<ResolvedAgentFs> {
-        let resolved = self.control_service.resolve_filesystem(fs_ref)?;
-        let issued = self.control_service.issue_credential(
-            &resolved.fs.fs_id,
-            &actor.agent_id,
-            &actor.installation_id,
-        )?;
+        let resolved = self.control_service.resolve_filesystem(fs_ref, actor)?;
+        let issued = self
+            .control_service
+            .issue_credential(&resolved.fs.fs_id, actor)?;
         self.ensure_agentfs_source_from_service(&resolved.fs.source_name, &issued.source)?;
         self.cache_accepted_filesystem(&resolved.fs, issued.binding.issued_at_ms)?;
         self.cache_credential_binding_record(&issued.binding)?;
@@ -1479,6 +1474,7 @@ impl SectiondControlPlane {
         rt: &tokio::runtime::Runtime,
         operator: &Operator,
         created: &FilesystemCreateResult,
+        owner: &AgentIdentityRecord,
     ) -> Vec<String> {
         let mut errors = Vec::new();
 
@@ -1493,7 +1489,7 @@ impl SectiondControlPlane {
         }
         if let Err(err) = self
             .control_service
-            .rollback_created_filesystem(&created.fs.fs_id)
+            .rollback_created_filesystem(&created.fs.fs_id, owner)
         {
             errors.push(format!("control service rollback failed: {err}"));
         }

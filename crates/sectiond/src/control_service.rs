@@ -1,8 +1,8 @@
 use crate::agentfs;
 use crate::{
     AgentFsAuthorization, AgentFsCapability, AgentFsCredentialBindingRecord, AgentFsError,
-    AgentFsEventRecord, AgentFsGrantRecord, AgentFsRecord, AgentFsRole, AgentFsShareRecord,
-    AgentFsSourceProfileRecord,
+    AgentFsErrorPayload, AgentFsEventRecord, AgentFsGrantRecord, AgentFsRecord, AgentFsRole,
+    AgentFsShareRecord, AgentFsSourceProfileRecord,
 };
 use anyhow::{Context, Result};
 use ring::digest::{digest, SHA256};
@@ -10,27 +10,27 @@ use rusqlite::{params, Connection, OptionalExtension};
 use section_core::config::{ControlServiceConfig, SourceConfig};
 use section_core::SectionConfig;
 use section_provider::AgentIdentityRecord;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const CREDENTIAL_TTL_MS: i64 = 60 * 60 * 1000;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentFsAvailableShare {
     pub share: AgentFsShareRecord,
     pub fs: AgentFsRecord,
     pub source_profile: AgentFsSourceProfileRecord,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentFsShareResult {
     pub share: AgentFsShareRecord,
     pub fs: AgentFsRecord,
     pub source_profile: AgentFsSourceProfileRecord,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentFsAcceptResult {
     pub share: AgentFsShareRecord,
     pub fs: AgentFsRecord,
@@ -38,14 +38,14 @@ pub struct AgentFsAcceptResult {
     pub credential_binding: AgentFsCredentialBindingRecord,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssuedAgentFsCredential {
     pub binding: AgentFsCredentialBindingRecord,
     pub source_profile: AgentFsSourceProfileRecord,
     pub source: SourceConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemCreateResult {
     pub fs: AgentFsRecord,
     pub owner_grant: AgentFsGrantRecord,
@@ -54,20 +54,20 @@ pub struct FilesystemCreateResult {
     pub source: SourceConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GrantMutationResult {
     pub grant: AgentFsGrantRecord,
     pub revoked: Vec<AgentFsGrantRecord>,
     pub events: Vec<AgentFsEventRecord>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RevokeMutationResult {
     pub revoked: Vec<AgentFsGrantRecord>,
     pub events: Vec<AgentFsEventRecord>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedServiceFilesystem {
     pub fs: AgentFsRecord,
     pub source_profile: AgentFsSourceProfileRecord,
@@ -78,6 +78,616 @@ pub struct ResolvedServiceFilesystem {
 pub struct ControlServiceStore {
     conn: Connection,
     path: PathBuf,
+}
+
+pub enum ControlService {
+    Local(ControlServiceStore),
+    Remote(HttpControlServiceClient),
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpControlServiceClient {
+    endpoint: String,
+    client: reqwest::blocking::Client,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentIdentityWire {
+    pub agent_id: String,
+    pub installation_id: String,
+    pub name: String,
+    pub auth_token: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+impl From<AgentIdentityRecord> for AgentIdentityWire {
+    fn from(record: AgentIdentityRecord) -> Self {
+        Self {
+            agent_id: record.agent_id,
+            installation_id: record.installation_id,
+            name: record.name,
+            auth_token: record.auth_token,
+            created_at_ms: record.created_at_ms,
+            updated_at_ms: record.updated_at_ms,
+        }
+    }
+}
+
+impl From<AgentIdentityWire> for AgentIdentityRecord {
+    fn from(record: AgentIdentityWire) -> Self {
+        Self {
+            agent_id: record.agent_id,
+            installation_id: record.installation_id,
+            name: record.name,
+            auth_token: record.auth_token,
+            created_at_ms: record.created_at_ms,
+            updated_at_ms: record.updated_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "method", content = "params", rename_all = "snake_case")]
+pub enum ControlServiceRequest {
+    LoginAgent {
+        name: String,
+        existing_installation_id: Option<String>,
+        auth_token: Option<String>,
+    },
+    SourceProfileByName {
+        name: String,
+        actor: AgentIdentityWire,
+    },
+    CreateFilesystem {
+        name: String,
+        source_profile_name: String,
+        owner: AgentIdentityWire,
+    },
+    RollbackCreatedFilesystem {
+        fs_id: String,
+        actor: AgentIdentityWire,
+    },
+    ListFilesystemsForAgent {
+        actor: AgentIdentityWire,
+    },
+    ResolveFilesystem {
+        fs_ref: String,
+        actor: AgentIdentityWire,
+    },
+    ListEvents {
+        fs_id: String,
+        actor: AgentIdentityWire,
+    },
+    ActiveRole {
+        fs: AgentFsRecord,
+        actor: AgentIdentityWire,
+    },
+    AuthorizeCapability {
+        fs_id: String,
+        actor: AgentIdentityWire,
+        capability: AgentFsCapability,
+    },
+    FsGrant {
+        fs_id: String,
+        actor: AgentIdentityWire,
+        target_agent_id: String,
+        role: AgentFsRole,
+    },
+    FsRevoke {
+        fs_id: String,
+        actor: AgentIdentityWire,
+        target_agent_id: String,
+    },
+    FsShare {
+        fs_id: String,
+        actor: AgentIdentityWire,
+        target_agent_id: String,
+    },
+    AvailableShares {
+        actor: AgentIdentityWire,
+    },
+    AcceptShare {
+        share_id: String,
+        actor: AgentIdentityWire,
+    },
+    IssueCredential {
+        fs_id: String,
+        actor: AgentIdentityWire,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum ControlServiceResponse {
+    AgentIdentity(AgentIdentityWire),
+    SourceProfile {
+        source_profile: AgentFsSourceProfileRecord,
+        source: SourceConfig,
+    },
+    FilesystemCreate(FilesystemCreateResult),
+    Unit,
+    Filesystems(Vec<AgentFsRecord>),
+    ResolvedFilesystem(ResolvedServiceFilesystem),
+    Events(Vec<AgentFsEventRecord>),
+    ActiveRole(Option<AgentFsRole>),
+    Authorization(AgentFsAuthorization),
+    GrantMutation(GrantMutationResult),
+    RevokeMutation(RevokeMutationResult),
+    Share(AgentFsShareResult),
+    AvailableShares(Vec<AgentFsAvailableShare>),
+    AcceptShare {
+        accepted: AgentFsAcceptResult,
+        source: SourceConfig,
+    },
+    IssuedCredential(IssuedAgentFsCredential),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ControlServiceRpcResult {
+    Ok { response: ControlServiceResponse },
+    Err { error: AgentFsErrorPayload },
+}
+
+impl ControlService {
+    pub fn open(config: &SectionConfig) -> Result<Self> {
+        match config.control_service.endpoint.as_deref() {
+            Some(endpoint) if !endpoint.trim().is_empty() => {
+                Ok(Self::Remote(HttpControlServiceClient::new(endpoint)))
+            }
+            _ => Ok(Self::Local(ControlServiceStore::open(config)?)),
+        }
+    }
+
+    pub fn endpoint(&self) -> String {
+        match self {
+            Self::Local(store) => store.endpoint(),
+            Self::Remote(client) => client.endpoint().to_string(),
+        }
+    }
+
+    pub fn login_agent(
+        &self,
+        name: &str,
+        existing_installation_id: Option<&str>,
+        auth_token: Option<&str>,
+    ) -> Result<AgentIdentityRecord> {
+        match self {
+            Self::Local(store) => store.login_agent(name, existing_installation_id, auth_token),
+            Self::Remote(client) => client.login_agent(name, existing_installation_id, auth_token),
+        }
+    }
+
+    pub fn source_profile_by_name(
+        &self,
+        name: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<(AgentFsSourceProfileRecord, SourceConfig)> {
+        match self {
+            Self::Local(store) => store.source_profile_by_name(name),
+            Self::Remote(client) => client.source_profile_by_name(name, actor),
+        }
+    }
+
+    pub fn create_filesystem(
+        &self,
+        name: &str,
+        source_profile_name: &str,
+        owner: &AgentIdentityRecord,
+    ) -> Result<FilesystemCreateResult> {
+        match self {
+            Self::Local(store) => store.create_filesystem(name, source_profile_name, owner),
+            Self::Remote(client) => client.create_filesystem(name, source_profile_name, owner),
+        }
+    }
+
+    pub fn rollback_created_filesystem(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<()> {
+        match self {
+            Self::Local(store) => store.rollback_created_filesystem(fs_id),
+            Self::Remote(client) => client.rollback_created_filesystem(fs_id, actor),
+        }
+    }
+
+    pub fn list_filesystems_for_agent(
+        &self,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Vec<AgentFsRecord>> {
+        match self {
+            Self::Local(store) => store.list_filesystems_for_agent(&actor.agent_id),
+            Self::Remote(client) => client.list_filesystems_for_agent(actor),
+        }
+    }
+
+    pub fn resolve_filesystem(
+        &self,
+        fs_ref: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<ResolvedServiceFilesystem> {
+        match self {
+            Self::Local(store) => store.resolve_filesystem(fs_ref),
+            Self::Remote(client) => client.resolve_filesystem(fs_ref, actor),
+        }
+    }
+
+    pub fn list_events(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Vec<AgentFsEventRecord>> {
+        match self {
+            Self::Local(store) => store.list_events(fs_id),
+            Self::Remote(client) => client.list_events(fs_id, actor),
+        }
+    }
+
+    pub fn active_role(
+        &self,
+        fs: &AgentFsRecord,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Option<AgentFsRole>> {
+        match self {
+            Self::Local(store) => store.active_role(fs, &actor.agent_id),
+            Self::Remote(client) => client.active_role(fs, actor),
+        }
+    }
+
+    pub fn authorize_capability(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        capability: AgentFsCapability,
+    ) -> Result<AgentFsAuthorization> {
+        match self {
+            Self::Local(store) => store.authorize_capability(fs_id, &actor.agent_id, capability),
+            Self::Remote(client) => client.authorize_capability(fs_id, actor, capability),
+        }
+    }
+
+    pub fn fs_grant(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        target_agent_id: &str,
+        role: AgentFsRole,
+    ) -> Result<GrantMutationResult> {
+        match self {
+            Self::Local(store) => store.fs_grant(fs_id, &actor.agent_id, target_agent_id, role),
+            Self::Remote(client) => client.fs_grant(fs_id, actor, target_agent_id, role),
+        }
+    }
+
+    pub fn fs_revoke(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        target_agent_id: &str,
+    ) -> Result<RevokeMutationResult> {
+        match self {
+            Self::Local(store) => store.fs_revoke(fs_id, &actor.agent_id, target_agent_id),
+            Self::Remote(client) => client.fs_revoke(fs_id, actor, target_agent_id),
+        }
+    }
+
+    pub fn fs_share(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        target_agent_id: &str,
+    ) -> Result<AgentFsShareResult> {
+        match self {
+            Self::Local(store) => store.fs_share(fs_id, &actor.agent_id, target_agent_id),
+            Self::Remote(client) => client.fs_share(fs_id, actor, target_agent_id),
+        }
+    }
+
+    pub fn available_shares(
+        &self,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Vec<AgentFsAvailableShare>> {
+        match self {
+            Self::Local(store) => store.available_shares(&actor.agent_id),
+            Self::Remote(client) => client.available_shares(actor),
+        }
+    }
+
+    pub fn accept_share(
+        &self,
+        share_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<(AgentFsAcceptResult, SourceConfig)> {
+        match self {
+            Self::Local(store) => {
+                store.accept_share(share_id, &actor.agent_id, &actor.installation_id)
+            }
+            Self::Remote(client) => client.accept_share(share_id, actor),
+        }
+    }
+
+    pub fn issue_credential(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<IssuedAgentFsCredential> {
+        match self {
+            Self::Local(store) => {
+                store.issue_credential(fs_id, &actor.agent_id, &actor.installation_id)
+            }
+            Self::Remote(client) => client.issue_credential(fs_id, actor),
+        }
+    }
+}
+
+impl HttpControlServiceClient {
+    pub fn new(endpoint: &str) -> Self {
+        Self {
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            client: reqwest::blocking::Client::new(),
+        }
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn rpc(&self, request: ControlServiceRequest) -> Result<ControlServiceResponse> {
+        let response = self
+            .client
+            .post(format!("{}/v1/rpc", self.endpoint))
+            .json(&request)
+            .send()
+            .with_context(|| {
+                format!("failed to reach Section Control Service {}", self.endpoint)
+            })?;
+        let status = response.status();
+        let rpc: ControlServiceRpcResult = response.json().with_context(|| {
+            format!(
+                "Section Control Service {} returned non-JSON response with status {status}",
+                self.endpoint
+            )
+        })?;
+        match rpc {
+            ControlServiceRpcResult::Ok { response } if status.is_success() => Ok(response),
+            ControlServiceRpcResult::Ok { .. } => anyhow::bail!(
+                "Section Control Service {} returned unexpected status {status}",
+                self.endpoint
+            ),
+            ControlServiceRpcResult::Err { error } => {
+                anyhow::bail!(AgentFsError::from_payload(error))
+            }
+        }
+    }
+
+    pub fn login_agent(
+        &self,
+        name: &str,
+        existing_installation_id: Option<&str>,
+        auth_token: Option<&str>,
+    ) -> Result<AgentIdentityRecord> {
+        match self.rpc(ControlServiceRequest::LoginAgent {
+            name: name.to_string(),
+            existing_installation_id: existing_installation_id.map(str::to_string),
+            auth_token: auth_token.map(str::to_string),
+        })? {
+            ControlServiceResponse::AgentIdentity(identity) => Ok(identity.into()),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn source_profile_by_name(
+        &self,
+        name: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<(AgentFsSourceProfileRecord, SourceConfig)> {
+        match self.rpc(ControlServiceRequest::SourceProfileByName {
+            name: name.to_string(),
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::SourceProfile {
+                source_profile,
+                source,
+            } => Ok((source_profile, source)),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn create_filesystem(
+        &self,
+        name: &str,
+        source_profile_name: &str,
+        owner: &AgentIdentityRecord,
+    ) -> Result<FilesystemCreateResult> {
+        match self.rpc(ControlServiceRequest::CreateFilesystem {
+            name: name.to_string(),
+            source_profile_name: source_profile_name.to_string(),
+            owner: owner.clone().into(),
+        })? {
+            ControlServiceResponse::FilesystemCreate(result) => Ok(result),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn rollback_created_filesystem(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<()> {
+        match self.rpc(ControlServiceRequest::RollbackCreatedFilesystem {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::Unit => Ok(()),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn list_filesystems_for_agent(
+        &self,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Vec<AgentFsRecord>> {
+        match self.rpc(ControlServiceRequest::ListFilesystemsForAgent {
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::Filesystems(filesystems) => Ok(filesystems),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn resolve_filesystem(
+        &self,
+        fs_ref: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<ResolvedServiceFilesystem> {
+        match self.rpc(ControlServiceRequest::ResolveFilesystem {
+            fs_ref: fs_ref.to_string(),
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::ResolvedFilesystem(resolved) => Ok(resolved),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn list_events(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Vec<AgentFsEventRecord>> {
+        match self.rpc(ControlServiceRequest::ListEvents {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::Events(events) => Ok(events),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn active_role(
+        &self,
+        fs: &AgentFsRecord,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Option<AgentFsRole>> {
+        match self.rpc(ControlServiceRequest::ActiveRole {
+            fs: fs.clone(),
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::ActiveRole(role) => Ok(role),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn authorize_capability(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        capability: AgentFsCapability,
+    ) -> Result<AgentFsAuthorization> {
+        match self.rpc(ControlServiceRequest::AuthorizeCapability {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+            capability,
+        })? {
+            ControlServiceResponse::Authorization(authorization) => Ok(authorization),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn fs_grant(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        target_agent_id: &str,
+        role: AgentFsRole,
+    ) -> Result<GrantMutationResult> {
+        match self.rpc(ControlServiceRequest::FsGrant {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+            target_agent_id: target_agent_id.to_string(),
+            role,
+        })? {
+            ControlServiceResponse::GrantMutation(result) => Ok(result),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn fs_revoke(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        target_agent_id: &str,
+    ) -> Result<RevokeMutationResult> {
+        match self.rpc(ControlServiceRequest::FsRevoke {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+            target_agent_id: target_agent_id.to_string(),
+        })? {
+            ControlServiceResponse::RevokeMutation(result) => Ok(result),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn fs_share(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        target_agent_id: &str,
+    ) -> Result<AgentFsShareResult> {
+        match self.rpc(ControlServiceRequest::FsShare {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+            target_agent_id: target_agent_id.to_string(),
+        })? {
+            ControlServiceResponse::Share(result) => Ok(result),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn available_shares(
+        &self,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Vec<AgentFsAvailableShare>> {
+        match self.rpc(ControlServiceRequest::AvailableShares {
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::AvailableShares(shares) => Ok(shares),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn accept_share(
+        &self,
+        share_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<(AgentFsAcceptResult, SourceConfig)> {
+        match self.rpc(ControlServiceRequest::AcceptShare {
+            share_id: share_id.to_string(),
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::AcceptShare { accepted, source } => Ok((accepted, source)),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn issue_credential(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<IssuedAgentFsCredential> {
+        match self.rpc(ControlServiceRequest::IssueCredential {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::IssuedCredential(result) => Ok(result),
+            other => unexpected_rpc_response(other),
+        }
+    }
+}
+
+fn unexpected_rpc_response<T>(response: ControlServiceResponse) -> Result<T> {
+    anyhow::bail!("unexpected Section Control Service response: {response:?}")
 }
 
 impl ControlServiceStore {
@@ -322,6 +932,52 @@ impl ControlServiceStore {
             })
         })();
         finish_transaction(&self.conn, result)
+    }
+
+    pub fn authenticate_agent(&self, agent: &AgentIdentityRecord) -> Result<()> {
+        if agent.auth_token.trim().is_empty() {
+            anyhow::bail!(AgentFsError::new(
+                "unknown_agent",
+                format!("agent {} did not provide an auth token", agent.agent_id),
+                false,
+            ));
+        }
+        let stored_hash: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT auth_token_hash FROM agents WHERE agent_id = ?1",
+                [agent.agent_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stored_hash) = stored_hash else {
+            anyhow::bail!(AgentFsError::new(
+                "unknown_agent",
+                format!(
+                    "agent {} is not known to the control service",
+                    agent.agent_id
+                ),
+                false,
+            ));
+        };
+        if !verify_auth_token(&agent.auth_token, &stored_hash) {
+            anyhow::bail!(AgentFsError::new(
+                "unknown_agent",
+                format!("agent {} auth token is invalid", agent.agent_id),
+                false,
+            ));
+        }
+        if !self.installation_belongs_to_agent(&agent.installation_id, &agent.agent_id)? {
+            anyhow::bail!(AgentFsError::new(
+                "unknown_agent",
+                format!(
+                    "installation {} does not belong to agent {}",
+                    agent.installation_id, agent.agent_id
+                ),
+                false,
+            ));
+        }
+        Ok(())
     }
 
     pub fn create_filesystem(

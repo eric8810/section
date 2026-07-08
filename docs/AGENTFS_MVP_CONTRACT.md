@@ -629,9 +629,14 @@ MVP 不提供兜底修复路径。
 
 ## 14. 服务端合同
 
-测试里的 file-backed Control Service 只是本地 harness。
+AgentFS 支持两种 Control Service 接入方式：
 
-正式产品里，服务端负责：
+- `control_service.endpoint`：通过 `sectiond serve` 提供的 HTTP Control Service。
+- `control_service.path`：本地 file-backed Control Service，主要用于开发和单机测试。
+
+跨机 / 多 agent 分享必须使用 `control_service.endpoint`。客户端只配置 endpoint，不配置 SourceProfile 或 backing source 密钥。
+
+服务端负责：
 
 - agent login
 - installation registration
@@ -643,21 +648,16 @@ MVP 不提供兜底修复路径。
 - AgentFS event replay
 - audit records
 
-API 分组：
+当前 MVP 暴露一个 HTTP RPC 入口：
 
 ```text
-/agents/login
-/installations
-/filesystems
-/grants
-/shares
-/credentials
-/events
+POST /v1/rpc
 ```
 
 规则：
 
 - 跨机 sharing 必须走服务端。
+- HTTP Control Service 请求必须携带当前 agent 的 auth token 和 installation id；服务端不能只信客户端传来的 `agent_id`。
 - SourceProfile 由服务端决定。
 - source 长期密钥不能出现在 share record、local root marker、CLI JSON 输出里。
 - 本地 CLI 可以缓存 identity、accepted FS、mount state、短期 credential binding。

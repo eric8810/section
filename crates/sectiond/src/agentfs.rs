@@ -215,7 +215,7 @@ pub struct AgentFsEventRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentFsErrorPayload {
-    pub code: &'static str,
+    pub code: String,
     pub message: String,
     pub retryable: bool,
     pub details: serde_json::Value,
@@ -230,12 +230,16 @@ impl AgentFsError {
     pub fn new(code: &'static str, message: impl Into<String>, retryable: bool) -> Self {
         Self {
             payload: AgentFsErrorPayload {
-                code,
+                code: code.to_string(),
                 message: message.into(),
                 retryable,
                 details: json!({}),
             },
         }
+    }
+
+    pub fn from_payload(payload: AgentFsErrorPayload) -> Self {
+        Self { payload }
     }
 
     pub fn with_details(mut self, details: serde_json::Value) -> Self {

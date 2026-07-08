@@ -65,3 +65,24 @@ The runtime boundary is:
 3. build routing and runtime state
 4. expose that state to control-plane clients
 5. emit state-change events
+
+## AgentFS Control Service
+
+`sectiond serve` runs the HTTP Section Control Service used by AgentFS
+cross-machine sharing.
+
+```bash
+sectiond --config server.toml serve --addr 127.0.0.1:7373
+```
+
+Agent clients point at it with:
+
+```toml
+[control_service]
+endpoint = "http://127.0.0.1:7373"
+```
+
+In this mode, client configs do not contain SourceProfile or backing-source
+credentials. The service owns agent identity, installation identity, grants,
+shares, SourceProfile selection, credential issuance, and service-side AgentFS
+events.
