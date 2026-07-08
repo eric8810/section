@@ -156,6 +156,7 @@ Required codes:
 | create event | create FS | `fs.created` event exists |
 | duplicate source name | create existing FS/source | stable error; no partial metadata overwrite |
 | create without agent | no local identity | `unknown_agent` |
+| metadata init failure | backing source becomes unwritable during create | create fails; Control Service rows, local source cache, and remote `.section` metadata are cleaned; retry create succeeds |
 
 ### FS Listing And Lookup
 
@@ -495,8 +496,9 @@ watch.
 | --- | --- | --- | --- |
 | 1 | owner | `fs create` over a non-empty backing source | rejected; no source registration |
 | 2 | owner | attach backing source root as working root | rejected; no local marker |
-| 3 | writer | commit symlink path | rejected; target outside root does not materialize |
-| 4 | writer | inspect `fs attach --json` | source options and credentials are not exposed |
+| 3 | owner | metadata initialization fails during `fs create` | rejected; service rows and local source cache are rolled back; retry works |
+| 4 | writer | commit symlink path | rejected; target outside root does not materialize |
+| 5 | writer | inspect `fs attach --json` | source options and credentials are not exposed |
 
 This proves common filesystem edge cases do not collapse the product boundary.
 
@@ -876,7 +878,7 @@ and P1 gaps:
 | Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 已有第一版：failed head 阻塞后续 commit，`commit repair` 用原 staging snapshot 修复同一个 commit。 |
 | Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 已有第一版：attach 和 source bind 会存 canonical local root；E2E 验证 attach JSON、marker、status 都使用 canonical root；父子 root 和 backing root overlap 会被拒绝；同一 FS 在同一 local store 只有一个 active local root，reattach 会移动 root。 |
 | Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
-| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 schema/version/ID/path validation、head/commit/event FS 一致性检查、event `seq`、事件路径覆盖拒绝、commit accepted 事件失败不推进 head。还缺 backend create-if-absent 断言，以及服务端事件源或 outbox。 |
+| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 schema/version/ID/path validation、head/commit/event FS 一致性检查、初始化失败回滚、event `seq`、事件路径覆盖拒绝、commit accepted 事件失败不推进 head。还缺 backend create-if-absent 断言，以及服务端事件源或 outbox。 |
 | JSON error contract | Agent callers need stable machine-readable failures. | 已有第一版：`agent`、`fs`、`commit`、`watch --agentfs` 在 `--json` 失败时输出稳定 `error.code`、`retryable`、`details`。参数错误是 `invalid_arguments`，普通运行错误统一落到 `operation_failed`。 |
 | File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 已有第一版：同一路径文件/目录类型替换会在 accepted commit 写入前失败，返回 `path_type_conflict`；非空目录删除会物化为干净的远端删除。 |
 | FS status decision surface | Agents need one command to know whether they can act. | 已有第一版：`fs status --json` 支持本地 path，输出 role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
@@ -911,6 +913,7 @@ It covers the product behaviors that are implemented today:
 | `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; 篡改本地 marker 不能绕过 trusted mount base；`fs status` exposes stale state and `sync` next action |
 | `e2e_backing_source_drift_cannot_be_committed_over` | backing source 被外部直接修改后，commit 返回 `remote_drift`；head、backing file、accepted event 数量都不变 |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
+| `e2e_create_failure_rolls_back_service_and_local_cache` | create metadata 初始化失败时，Control Service rows、本地 AgentFS source cache、远端 `.section` metadata 都会回滚；恢复后可以重新 create |
 | `e2e_attach_canonicalizes_local_root_identity` | attach 使用带 `..` 的路径拼写时，返回 JSON、root marker、`fs status` 都记录 canonical local root |
 | `e2e_fs_status_reports_corrupt_local_marker` | corrupt `.section/root.json` is reported as `malformed_shared_metadata` by `fs status <local path> --json` instead of being swallowed as `unknown_fs` |
 | `e2e_section_directory_is_not_committed_as_user_content` | local `.section/**` files are ignored by commit dirty detection and do not become shared user content |
@@ -934,7 +937,7 @@ must not claim unsupported behavior:
 - no path-scoped grant enforcement,
 - no hook execution,
 - no `AGENTS.md` enforcement,
-- no guarantee that low-level `source` commands preserve governance.
+- no low-level force bypass mode for AgentFS-backed sources.
 
 Low-level source/path tests remain regression tests for the sync substrate. They
 are not proof of AgentFS governance.

@@ -465,6 +465,62 @@ impl ProviderStore {
         Ok(())
     }
 
+    pub fn remove_agentfs_filesystem_cache(
+        &self,
+        fs_id: &str,
+        source_name: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> anyhow::Result<()> {
+            self.conn
+                .execute("DELETE FROM sources WHERE name = ?1", [source_name])?;
+            self.conn.execute(
+                "DELETE FROM source_local_roots WHERE source_name = ?1",
+                [source_name],
+            )?;
+            self.conn.execute(
+                "DELETE FROM path_sync_state WHERE source_name = ?1",
+                [source_name],
+            )?;
+            self.conn.execute(
+                "DELETE FROM local_scan_cache WHERE source_name = ?1",
+                [source_name],
+            )?;
+            self.conn.execute(
+                "DELETE FROM remote_manifest WHERE source_name = ?1",
+                [source_name],
+            )?;
+            self.conn.execute(
+                "DELETE FROM sync_events WHERE source_name = ?1",
+                [source_name],
+            )?;
+            self.conn.execute(
+                "DELETE FROM agentfs_mounts WHERE source_name = ?1 OR fs_id = ?2",
+                rusqlite::params![source_name, fs_id],
+            )?;
+            self.conn.execute(
+                "DELETE FROM agentfs_accepted_filesystems WHERE source_name = ?1 OR fs_id = ?2",
+                rusqlite::params![source_name, fs_id],
+            )?;
+            self.conn.execute(
+                "DELETE FROM agentfs_credential_bindings WHERE fs_id = ?1",
+                [fs_id],
+            )?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
     pub fn list_agentfs_mounts(&self) -> anyhow::Result<Vec<AgentFsMountRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT

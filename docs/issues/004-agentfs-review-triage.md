@@ -87,8 +87,10 @@ These must be handled before making stronger claims about AgentFS correctness.
 | --- | --- | --- | --- |
 | 3 / 49 | `watch` and replay cannot observe AgentFS events. | confirmed | fixed-local |
 | 5 | Commit dirty detection compares local tree to current remote, not the mounted base/path sync state. | confirmed | fixed-local |
+| 6 | `fs create` can partially mutate local source registry before remote metadata validation succeeds. | partial | fixed-local |
 | 7 | A second granted agent cannot attach by grant alone; it still needs manual source setup. | confirmed | fixed-local |
 | 12 | Commit record and actual materialization have a TOCTOU gap. | confirmed | fixed-local |
+| 15 | FS metadata initialization is not failure-safe. | confirmed | fixed-local |
 | 18 | `fs create` can create `head=null` over a non-empty backing source. | confirmed | fixed-local |
 | 19 | Stale-base checks trust editable `.section/root.json`. | confirmed | fixed-local |
 | 20 | Governance state can advance before event writes succeed. | confirmed | partial |
@@ -104,13 +106,11 @@ These should be fixed before calling the AgentFS MVP complete.
 | ID | Finding | Validity | Status |
 | --- | --- | --- | --- |
 | 2 | Metadata writes need a real head lock and conflict path. | partial | partial |
-| 6 | `fs create` can partially mutate local source registry before remote metadata validation succeeds. | partial | partial |
 | 8 | Multiple local roots per FS are not implemented; current store is still source-level single-root. | decision | fixed-contract |
 | 9 | AgentFS JSON error contract is incomplete and inconsistent. | confirmed | fixed-local |
 | 10 | Shared metadata lacks schema/version/cross-record consistency validation. | confirmed | fixed-local |
 | 13 | Materialization retry/repair does not exist. | confirmed | fixed-local |
 | 14 | Event ordering can reverse within the same millisecond due to random suffix sorting. | confirmed | fixed-local |
-| 15 | FS metadata initialization is not failure-safe. | confirmed | open |
 | 16 | Non-UTF-8 local paths are lossy-converted instead of rejected. | confirmed | fixed-local |
 | 26 | Accepted commits do not record which grant allowed the mutation. | confirmed | fixed-local |
 | 29 | A committed/materialized mutation can be reported as failed if final local marker write fails. | confirmed | fixed-local |
@@ -152,7 +152,9 @@ of the recorded baseline.
 | --- | --- |
 | 1 | `fs attach` could publish local files without accepted commit. | Attach now requires an empty target root and rolls back failed attach. |
 | 4 | Attach/status did not handle failed materialization. | Attach rejects non-materialized head; status reports materialization state. |
+| 6 | `fs create` could leave service/local/remote initialization state behind after shared metadata setup failed. | Failed create now rolls back Control Service FS/grant/event rows, removes local AgentFS source cache, cleans partial remote `.section` metadata, and E2E verifies retry create succeeds. |
 | 11 | Status role could be wrong with replaced grants. | Grant replacement now revokes previous active grants for that agent. |
+| 15 | Shared FS metadata initialization was not failure-safe. | Metadata mirror failures now trigger service/local/remote rollback; a unit test covers partial remote metadata written before event failure. |
 | 18 | Non-empty backing source can become head-null FS truth. | `fs_create` now requires an empty backing source before source registration. |
 | 21 | Attach failure could leave binding/marker behind. | Attach now rolls back binding and marker on sync failure/conflict. |
 | 23 | `fs attach --json` could leak source credentials. | Attach returns a sanitized source summary without provider options. |
@@ -176,7 +178,6 @@ correctness work.
 
 | ID | Finding | Remaining Gap |
 | --- | --- | --- |
-| 6 | `fs create` can partially mutate source registry before remote metadata validation succeeds. | Source registration now happens after remote preflight and is rolled back on initialization failure; partial remote metadata still needs initialization recovery. |
 | 51 | AgentFS event files are not immutable. | Event writes now reject an already-existing event path, but this is not backend-level create-if-absent/CAS semantics. |
 
 ## Full Finding Ledger
@@ -190,7 +191,7 @@ This table preserves every reviewer finding for traceability.
 | 3 | `watch` cannot observe AgentFS events. | P0 | confirmed | fixed-local | `fs events` and `watch --agentfs` now expose AgentFS events with `seq`. |
 | 4 | Attach/status do not enforce or expose failed materialization. | P2 | partial | fixed-local | Keep tests for attach rejection and status output. |
 | 5 | Commit dirty detection uses current remote, not mounted base/path sync state. | P0 | confirmed | fixed-local | Commit now checks current backing source against trusted path sync base first; external drift returns `remote_drift` before acceptance. |
-| 6 | `fs create` mutates source registry before validating remote metadata. | P1 | partial | partial | Remote preflight and source rollback are in place; add staged initialization/recovery for partial remote metadata. |
+| 6 | `fs create` mutates source registry before validating remote metadata. | P1 | partial | fixed-local | Failed create now rolls back service rows, local AgentFS source cache, and partial remote initialization metadata; E2E verifies retry create succeeds. |
 | 7 | Granted second agent cannot attach by grant alone. | P0 | confirmed | fixed-local | Keep service-backed `fs share`, `fs available`, `fs accept`, and attach tests. |
 | 8 | Multiple local roots per FS are not supported. | P1 | decision | fixed-contract | Product decision: MVP has one active local root per FS per local installation store; reattach moves the root and removes the old marker. |
 | 9 | JSON error contract is incomplete. | P1 | confirmed | fixed-local | AgentFS CLI JSON errors now include stable `code`, `retryable`, and `details`; argument failures use `invalid_arguments`, generic runtime failures use `operation_failed`. |
@@ -199,7 +200,7 @@ This table preserves every reviewer finding for traceability.
 | 12 | Commit record can differ from actual materialized bytes. | P0 | confirmed | fixed-local | Commit now stages dirty paths first and materializes from the staging snapshot. |
 | 13 | Materialization retry/repair is missing. | P1 | confirmed | fixed-local | `commit repair` reuses the original commit id and staging snapshot. |
 | 14 | Event ordering can reverse within the same millisecond. | P1 | confirmed | fixed-local | Events now carry monotonic per-FS `seq` and replay sorts by `seq`. |
-| 15 | FS metadata initialization is not failure-safe. | P1 | confirmed | open | Stage metadata or add initialization state and recovery. |
+| 15 | FS metadata initialization is not failure-safe. | P1 | confirmed | fixed-local | Metadata initialization failure now triggers rollback; unit coverage verifies partial remote metadata cleanup after event write conflict. |
 | 16 | Non-UTF-8 paths are lossy converted. | P1 | confirmed | fixed-local | AgentFS commit now rejects non-UTF-8 local paths with `non_utf8_path` before acceptance. |
 | 17 | Materialization failure does not emit `fs.error`. | P2 | confirmed | fixed-local | Materialization failure now emits both `commit.materialization_failed` and `fs.error`; E2E verifies a real backing-source failure. |
 | 18 | Non-empty backing source can become head-null FS truth. | P0 | confirmed | fixed-local | Reject non-empty backing source or import it as initial commit. |
@@ -267,11 +268,9 @@ Resolved decisions:
 
 After the decisions above, prioritize:
 
-1. trusted mount base and commit dirty detection (#5, #19, #44),
-2. safe FS initialization and recovery (#6, #15, #20),
-3. schema validation and backend-level event immutability (#10, #51),
-4. local root canonicalization and overlap (#39, #47),
-5. bad metadata isolation (#40).
+1. service-side event authority / outbox for governance mutations (#20),
+2. backend-level CAS / create-if-absent semantics for head and event metadata (#2, #51),
+3. remaining AgentFS test-plan coverage audit (#46).
 
 ## Verification Record
 

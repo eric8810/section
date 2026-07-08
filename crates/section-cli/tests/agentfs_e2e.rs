@@ -77,6 +77,18 @@ impl AgentFsFixture {
         )
         .expect("insert duplicate source_name fs");
     }
+
+    fn control_row_count(&self, table: &str) -> i64 {
+        let table = match table {
+            "filesystems" | "grants" | "events" | "shares" | "credential_bindings" => table,
+            other => panic!("unsupported control table {other}"),
+        };
+        let conn = rusqlite::Connection::open(&self.control_service_path).expect("control db");
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .expect("count control rows")
+    }
 }
 
 struct AgentFsActor {
@@ -1008,6 +1020,56 @@ fn e2e_hardening_rejects_unsafe_backing_source_and_attach_root() {
         !overlap.remote_root.join(".section/root.json").exists(),
         "rejected attach must not write a local root marker into backing source"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_create_failure_rolls_back_service_and_local_cache() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+
+    let original_mode = fs::metadata(&fixture.remote_root)
+        .expect("remote root metadata")
+        .permissions()
+        .mode();
+    let mut readonly = fs::metadata(&fixture.remote_root)
+        .expect("remote root metadata")
+        .permissions();
+    readonly.set_mode(0o500);
+    fs::set_permissions(&fixture.remote_root, readonly).expect("make remote root read-only");
+
+    let rejected = owner.create_fs_output();
+
+    let mut restored = fs::metadata(&fixture.remote_root)
+        .expect("remote root metadata")
+        .permissions();
+    restored.set_mode(original_mode);
+    fs::set_permissions(&fixture.remote_root, restored).expect("restore remote root permissions");
+
+    assert_json_error(&rejected, "operation_failed");
+    assert_eq!(fixture.control_row_count("filesystems"), 0);
+    assert_eq!(fixture.control_row_count("grants"), 0);
+    assert_eq!(fixture.control_row_count("events"), 0);
+    assert_eq!(
+        owner
+            .list_sources()
+            .as_array()
+            .expect("source list array")
+            .len(),
+        0,
+        "failed create must remove the local AgentFS source cache"
+    );
+    assert!(
+        !fixture.remote_root.join(".section").exists(),
+        "failed create must not leave shared metadata behind"
+    );
+
+    owner.create_fs();
+    assert_eq!(fixture.control_row_count("filesystems"), 1);
+    assert!(fixture.path(".section/agentfs/fs.json").exists());
 }
 
 #[test]

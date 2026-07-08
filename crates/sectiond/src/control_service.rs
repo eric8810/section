@@ -401,6 +401,24 @@ impl ControlServiceStore {
         finish_transaction(&self.conn, result)
     }
 
+    pub fn rollback_created_filesystem(&self, fs_id: &str) -> Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            self.conn
+                .execute("DELETE FROM credential_bindings WHERE fs_id = ?1", [fs_id])?;
+            self.conn
+                .execute("DELETE FROM shares WHERE fs_id = ?1", [fs_id])?;
+            self.conn
+                .execute("DELETE FROM grants WHERE fs_id = ?1", [fs_id])?;
+            self.conn
+                .execute("DELETE FROM events WHERE fs_id = ?1", [fs_id])?;
+            self.conn
+                .execute("DELETE FROM filesystems WHERE fs_id = ?1", [fs_id])?;
+            Ok(())
+        })();
+        finish_transaction(&self.conn, result)
+    }
+
     pub fn list_filesystems_for_agent(&self, agent_id: &str) -> Result<Vec<AgentFsRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT fs_id, name, owner_agent_id, source_profile_id, source_name, created_at_ms

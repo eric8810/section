@@ -447,7 +447,8 @@ MVP local root rule:
 
 Rules:
 
-- multiple local roots may attach to the same FS if their paths are distinct.
+- 一个本地安装 store 里，同一个 FS 只有一个 active local root。
+- 同一个 FS 重新 attach 到另一个 local root，会移动 active root，并移除旧 root marker。
 - reader mounts can be edited locally by the OS, but reader commits are denied.
 - attach should fail or report non-ready state when current head is not materialized.
 
@@ -459,6 +460,11 @@ Rules:
 
 - `fs create` asks Section Control Service to bind a SourceProfile.
 - Section Control Service makes the final SourceProfile decision.
+- `fs create` 必须完整初始化 shared metadata；不能留下半个 FS。
+- 如果 shared metadata 初始化失败，必须回滚 Control Service 的 FS/grant/event 记录。
+- 如果 shared metadata 初始化失败，必须清理本地 AgentFS source cache。
+- 如果 shared metadata 初始化失败，必须尽量清理远端 `.section/**` 初始化残留。
+- 初始化失败后的同名创建必须可以重试。
 - upgrading an existing source into an FS is deferred.
 - low-level `source` commands remain sync infrastructure, not the AgentFS product surface.
 - AgentFS-backed sources must be guarded from ordinary source mutation commands.
