@@ -1312,6 +1312,8 @@ proposal/approval 不是当前核心路径。
 
 - `fs create` 可以传一个 source profile 请求。
 - 最终绑定哪个 SourceProfile，由 Section Control Service 决定。
+- 远程服务端必须显式允许某个 agent 使用某个 SourceProfile 创建 FS。
+- `fs create` 的 backing source 检查和 AgentFS metadata 初始化在服务端完成。
 - 本地 CLI 不创建跨机分享用的 source profile。
 - 被分享的 Agent 不能自己选择远程 source。
 
@@ -1319,6 +1321,7 @@ proposal/approval 不是当前核心路径。
 
 - sync credential 只短期有效。
 - credential 由 Section Control Service 按 grant 发放。
+- 普通 resolve/list/status 不返回 backing source options。
 - grant revoke 后，不再发新 credential。
 - 已发 credential 到期后自然失效。
 - CLI 输出和 share record 都不能包含 source 长期密钥。

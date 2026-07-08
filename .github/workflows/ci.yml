@@ -28,17 +28,23 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
       # Keep CI truthful: the FUSE runtime path is still being validated
       # separately per platform, so this workflow only covers the non-mount
       # crates and scenarios that should stay portable.
       - name: cargo check (non-FUSE crates)
-        run: cargo check -p section-core -p section-provider -p section-cli -p sectiond
+        run: cargo check --locked -p section-core -p section-provider -p section-cli -p sectiond
+
+      - name: cargo clippy (non-FUSE crates)
+        run: cargo clippy --locked -p section-core -p section-provider -p section-cli -p sectiond --all-targets -- -D warnings
 
       - name: cargo test section-core + section-provider
-        run: cargo test -p section-core -p section-provider -p sectiond
+        run: cargo test --locked -p section-core -p section-provider -p sectiond
 
       - name: cargo test section-cli
-        run: cargo test -p section-cli
+        run: cargo test --locked -p section-cli
 
   section_fuse_linux:
     name: section-fuse checks (ubuntu-latest)
@@ -57,8 +63,11 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: cargo clippy section-fuse
+        run: cargo clippy --locked -p section-fuse --all-targets -- -D warnings
+
       - name: cargo test section-fuse
-        run: cargo test -p section-fuse
+        run: cargo test --locked -p section-fuse
 
   npm_distribution:
     name: npm distribution checks (ubuntu-latest)

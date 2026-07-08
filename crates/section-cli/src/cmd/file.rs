@@ -206,7 +206,7 @@ fn source_kind(
         return Ok(CopyKind::Dir);
     }
 
-    Ok(metadata_kind(&source_stat(rt, op, sub_path, raw)?, raw)?)
+    metadata_kind(&source_stat(rt, op, sub_path, raw)?, raw)
 }
 
 fn local_kind(path: &Path, raw: &str) -> Result<CopyKind> {
@@ -451,7 +451,7 @@ pub fn ls(
     let rt = tokio::runtime::Runtime::new()?;
     let mut entries = rt.block_on(op.list(&sub_path))?;
     entries.retain(|entry| !relative_to_source_root(&sub_path, entry.path()).is_empty());
-    entries.sort_by(|left, right| entry_name(left).cmp(&entry_name(right)));
+    entries.sort_by_key(entry_name);
     let hydrate_metadata = json_mode || long_mode;
 
     if json_mode {
@@ -866,7 +866,7 @@ pub fn exec(
         .unwrap_or_else(|| std::ffi::OsStr::new("section-exec"));
     let tmp_path = tmp_dir.join(format!("section-exec-{}", file_name.to_string_lossy()));
 
-    std::fs::write(&tmp_path, &data.to_vec())?;
+    std::fs::write(&tmp_path, data.to_vec())?;
 
     // Make executable
     #[cfg(unix)]

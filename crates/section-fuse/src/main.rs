@@ -21,6 +21,11 @@ struct Args {
     /// Run in foreground (don't daemonize)
     #[arg(short, long, default_value_t = true)]
     foreground: bool,
+
+    /// Allow other local users to access the mount.
+    #[cfg(target_os = "linux")]
+    #[arg(long, default_value_t = false)]
+    allow_other: bool,
 }
 
 fn main() -> Result<()> {
@@ -40,11 +45,14 @@ fn main() -> Result<()> {
 
     let section_fs = fs::SectionFs::new(&config, router);
     #[cfg(target_os = "linux")]
-    let options = vec![
+    let mut options = vec![
         fuser::MountOption::FSName("section".to_string()),
         fuser::MountOption::AutoUnmount,
-        fuser::MountOption::AllowOther,
     ];
+    #[cfg(target_os = "linux")]
+    if args.allow_other {
+        options.push(fuser::MountOption::AllowOther);
+    }
 
     #[cfg(not(target_os = "linux"))]
     let options = vec![

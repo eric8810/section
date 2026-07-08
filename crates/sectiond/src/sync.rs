@@ -250,7 +250,7 @@ pub fn sync_source_with_options(
         .map(|record| (record.path.clone(), record))
         .collect::<HashMap<String, RemoteManifestRecord>>();
 
-    let coordinator = DefaultSyncCoordinator::default();
+    let coordinator = DefaultSyncCoordinator;
     let SyncPlan { paths } = coordinator.plan(source_id, inputs)?;
 
     let transport = OpenDalTransport::new(
@@ -625,6 +625,7 @@ pub fn list_watch_events(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_executed_path_plans(
     rt: &tokio::runtime::Runtime,
     operator: &Operator,
@@ -1008,6 +1009,7 @@ fn apply_use_local(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_use_remote(
     rt: &tokio::runtime::Runtime,
     operator: &Operator,

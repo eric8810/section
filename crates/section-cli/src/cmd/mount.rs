@@ -178,7 +178,7 @@ pub(crate) fn is_mount_active(mount_point: &Path) -> bool {
 fn unmount_commands(mount_point: &Path) -> Vec<CommandSpec> {
     #[cfg(target_os = "linux")]
     {
-        return vec![
+        vec![
             CommandSpec::new(
                 "fusermount3",
                 vec![OsString::from("-u"), mount_point.as_os_str().to_os_string()],
@@ -188,7 +188,7 @@ fn unmount_commands(mount_point: &Path) -> Vec<CommandSpec> {
                 vec![OsString::from("-u"), mount_point.as_os_str().to_os_string()],
             ),
             CommandSpec::new("umount", vec![mount_point.as_os_str().to_os_string()]),
-        ];
+        ]
     }
 
     #[cfg(target_os = "macos")]

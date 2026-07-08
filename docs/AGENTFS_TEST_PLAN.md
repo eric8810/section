@@ -677,9 +677,9 @@ This proves repair fixes the accepted head instead of creating a second truth.
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
 | 1 | owner | create valid FS `good` | status succeeds |
-| 2 | test harness | create another source with malformed `.section/agentfs/fs.json` | corrupt source exists |
+| 2 | test harness | create another lookup candidate with malformed `.section/agentfs/fs.json` | corrupt candidate exists |
 | 3 | owner | `fs status good --json` | succeeds; may include warning about unrelated bad metadata |
-| 4 | owner | `fs status corrupt --json` | fails with `malformed_shared_metadata` |
+| 4 | owner | resolve the corrupt candidate directly | fails with `malformed_shared_metadata` |
 | 5 | test harness | create two FS records with same source name | lookup by source name fails with `ambiguous_fs_ref` |
 | 6 | owner | lookup by exact `fs_id` | exact id still resolves |
 

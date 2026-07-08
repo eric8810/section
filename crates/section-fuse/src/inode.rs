@@ -76,6 +76,7 @@ impl InodeTable {
     }
 
     /// Allocate or update an inode for the given parent + name.
+    #[allow(clippy::too_many_arguments)]
     pub fn ensure(
         &mut self,
         parent: u64,
@@ -89,7 +90,7 @@ impl InodeTable {
         if let Some(&ino) = self.lookup_map.get(&(parent, name.to_string())) {
             if let Some(entry) = self.entries.get_mut(&ino) {
                 entry.attr.size = size;
-                entry.attr.blocks = (size + 511) / 512;
+                entry.attr.blocks = size.div_ceil(512);
                 entry.attr.mtime = mtime;
                 entry.attr.atime = mtime;
                 entry.attr.kind = kind;
@@ -107,7 +108,7 @@ impl InodeTable {
         let attr = FileAttr {
             ino,
             size,
-            blocks: (size + 511) / 512,
+            blocks: size.div_ceil(512),
             atime: mtime,
             mtime,
             ctime: mtime,

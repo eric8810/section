@@ -122,6 +122,30 @@ impl SectionFs {
         }
     }
 
+    fn ensure_setattr_allowed(
+        permission: &Permission,
+        request_uid: u32,
+        request_gid: u32,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+    ) -> Result<(), i32> {
+        if request_uid == 0 {
+            return Ok(());
+        }
+        if uid.is_some() || gid.is_some() {
+            return Err(libc::EPERM);
+        }
+        if mode.is_some() && request_uid != permission.uid {
+            return Err(libc::EPERM);
+        }
+        if size.is_some() && !permission.can_write(request_uid, request_gid) {
+            return Err(libc::EACCES);
+        }
+        Ok(())
+    }
+
     fn is_virtual_directory(path: &str) -> bool {
         !path.is_empty() && !path.contains('/')
     }
@@ -287,7 +311,7 @@ impl Filesystem for SectionFs {
 
     fn setattr(
         &mut self,
-        _req: &Request,
+        req: &Request,
         ino: u64,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -304,9 +328,22 @@ impl Filesystem for SectionFs {
         reply: ReplyAttr,
     ) {
         if let Some(entry) = self.inodes.get_mut(ino) {
+            let permission = Permission::new(entry.attr.uid, entry.attr.gid, entry.attr.perm);
+            if let Err(errno) = Self::ensure_setattr_allowed(
+                &permission,
+                req.uid(),
+                req.gid(),
+                mode,
+                uid,
+                gid,
+                size,
+            ) {
+                reply.error(errno);
+                return;
+            }
             if let Some(new_size) = size {
                 entry.attr.size = new_size;
-                entry.attr.blocks = (new_size + 511) / 512;
+                entry.attr.blocks = new_size.div_ceil(512);
             }
             if let Some(new_mode) = mode {
                 entry.attr.perm = new_mode as u16;
@@ -1192,5 +1229,59 @@ mod tests {
         fs.put_cached_content(&file, b"hello");
 
         assert!(fs.cached_content(&file).is_none());
+    }
+
+    #[test]
+    fn setattr_rejects_unauthorized_metadata_changes() {
+        let permission = Permission::new(1000, 1000, 0o640);
+
+        assert_eq!(
+            SectionFs::ensure_setattr_allowed(
+                &permission,
+                2000,
+                2000,
+                Some(0o666),
+                None,
+                None,
+                None
+            ),
+            Err(libc::EPERM)
+        );
+        assert_eq!(
+            SectionFs::ensure_setattr_allowed(
+                &permission,
+                1000,
+                1000,
+                None,
+                Some(2000),
+                None,
+                None
+            ),
+            Err(libc::EPERM)
+        );
+        assert_eq!(
+            SectionFs::ensure_setattr_allowed(&permission, 2000, 2000, None, None, None, Some(0)),
+            Err(libc::EACCES)
+        );
+        assert!(SectionFs::ensure_setattr_allowed(
+            &permission,
+            1000,
+            1000,
+            Some(0o600),
+            None,
+            None,
+            Some(0),
+        )
+        .is_ok());
+        assert!(SectionFs::ensure_setattr_allowed(
+            &permission,
+            0,
+            0,
+            Some(0o600),
+            Some(2000),
+            Some(2000),
+            Some(0),
+        )
+        .is_ok());
     }
 }

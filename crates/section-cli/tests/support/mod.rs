@@ -31,7 +31,7 @@ pub fn write_agentfs_config(
     fs::write(
         path,
         format!(
-            "data_dir = {:?}\nmount_point = \"/tmp/section-mount-test\"\n\n[control_service]\npath = {:?}\n\n[control_service.source_profiles.{:?}]\nprovider = \"fs\"\n\n[control_service.source_profiles.{:?}.options]\nroot = {:?}\n",
+            "data_dir = {:?}\nmount_point = \"/tmp/section-mount-test\"\n\n[control_service]\npath = {:?}\n\n[control_service.source_profiles.{:?}]\nprovider = \"fs\"\n\n[control_service.source_profiles.{:?}.options]\nroot = {:?}\n\"section.agentfs.create_agents\" = \"*\"\n",
             data_dir.to_string_lossy(),
             control_service_path.to_string_lossy(),
             source_profile_name,

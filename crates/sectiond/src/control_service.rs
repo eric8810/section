@@ -5,6 +5,7 @@ use crate::{
     AgentFsShareRecord, AgentFsSourceProfileRecord,
 };
 use anyhow::{Context, Result};
+use opendal::{Operator, Scheme};
 use ring::digest::{digest, SHA256};
 use rusqlite::{params, Connection, OptionalExtension};
 use section_core::config::{ControlServiceConfig, SourceConfig};
@@ -13,6 +14,7 @@ use section_provider::AgentIdentityRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 const CREDENTIAL_TTL_MS: i64 = 60 * 60 * 1000;
 
@@ -51,7 +53,6 @@ pub struct FilesystemCreateResult {
     pub owner_grant: AgentFsGrantRecord,
     pub event: AgentFsEventRecord,
     pub source_profile: AgentFsSourceProfileRecord,
-    pub source: SourceConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,13 +72,20 @@ pub struct RevokeMutationResult {
 pub struct ResolvedServiceFilesystem {
     pub fs: AgentFsRecord,
     pub source_profile: AgentFsSourceProfileRecord,
-    pub source: SourceConfig,
     pub grants: Vec<AgentFsGrantRecord>,
+}
+
+struct ResolvedServiceFilesystemWithSource {
+    fs: AgentFsRecord,
+    source_profile: AgentFsSourceProfileRecord,
+    source: SourceConfig,
+    grants: Vec<AgentFsGrantRecord>,
 }
 
 pub struct ControlServiceStore {
     conn: Connection,
     path: PathBuf,
+    enforce_source_profile_create_policy: bool,
 }
 
 pub enum ControlService {
@@ -134,10 +142,6 @@ pub enum ControlServiceRequest {
         name: String,
         existing_installation_id: Option<String>,
         auth_token: Option<String>,
-    },
-    SourceProfileByName {
-        name: String,
-        actor: AgentIdentityWire,
     },
     CreateFilesystem {
         name: String,
@@ -201,10 +205,6 @@ pub enum ControlServiceRequest {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ControlServiceResponse {
     AgentIdentity(AgentIdentityWire),
-    SourceProfile {
-        source_profile: AgentFsSourceProfileRecord,
-        source: SourceConfig,
-    },
     FilesystemCreate(FilesystemCreateResult),
     Unit,
     Filesystems(Vec<AgentFsRecord>),
@@ -223,6 +223,7 @@ pub enum ControlServiceResponse {
     IssuedCredential(IssuedAgentFsCredential),
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ControlServiceRpcResult {
@@ -256,17 +257,6 @@ impl ControlService {
         match self {
             Self::Local(store) => store.login_agent(name, existing_installation_id, auth_token),
             Self::Remote(client) => client.login_agent(name, existing_installation_id, auth_token),
-        }
-    }
-
-    pub fn source_profile_by_name(
-        &self,
-        name: &str,
-        actor: &AgentIdentityRecord,
-    ) -> Result<(AgentFsSourceProfileRecord, SourceConfig)> {
-        match self {
-            Self::Local(store) => store.source_profile_by_name(name),
-            Self::Remote(client) => client.source_profile_by_name(name, actor),
         }
     }
 
@@ -478,23 +468,6 @@ impl HttpControlServiceClient {
         }
     }
 
-    pub fn source_profile_by_name(
-        &self,
-        name: &str,
-        actor: &AgentIdentityRecord,
-    ) -> Result<(AgentFsSourceProfileRecord, SourceConfig)> {
-        match self.rpc(ControlServiceRequest::SourceProfileByName {
-            name: name.to_string(),
-            actor: actor.clone().into(),
-        })? {
-            ControlServiceResponse::SourceProfile {
-                source_profile,
-                source,
-            } => Ok((source_profile, source)),
-            other => unexpected_rpc_response(other),
-        }
-    }
-
     pub fn create_filesystem(
         &self,
         name: &str,
@@ -698,16 +671,21 @@ enum SourceProfileSeedMode {
 
 impl ControlServiceStore {
     pub fn open(config: &SectionConfig) -> Result<Self> {
-        Self::open_with_source_profile_seed_mode(config, SourceProfileSeedMode::InsertOnly)
+        Self::open_with_source_profile_seed_mode(config, SourceProfileSeedMode::InsertOnly, false)
     }
 
     pub fn open_authoritative(config: &SectionConfig) -> Result<Self> {
-        Self::open_with_source_profile_seed_mode(config, SourceProfileSeedMode::UpdateExisting)
+        Self::open_with_source_profile_seed_mode(
+            config,
+            SourceProfileSeedMode::UpdateExisting,
+            true,
+        )
     }
 
     fn open_with_source_profile_seed_mode(
         config: &SectionConfig,
         seed_mode: SourceProfileSeedMode,
+        enforce_source_profile_create_policy: bool,
     ) -> Result<Self> {
         let path = control_service_path(config);
         if let Some(parent) = path.parent() {
@@ -717,7 +695,11 @@ impl ControlServiceStore {
         let conn = Connection::open(&path).with_context(|| {
             format!("failed to open control service database {}", path.display())
         })?;
-        let store = Self { conn, path };
+        let store = Self {
+            conn,
+            path,
+            enforce_source_profile_create_policy,
+        };
         store.init_tables()?;
         store.seed_source_profiles(&config.control_service, seed_mode)?;
         Ok(store)
@@ -1014,6 +996,36 @@ impl ControlServiceStore {
         Ok(())
     }
 
+    fn ensure_source_profile_create_allowed(
+        &self,
+        source_profile: &AgentFsSourceProfileRecord,
+        source: &SourceConfig,
+        owner: &AgentIdentityRecord,
+    ) -> Result<()> {
+        if !self.enforce_source_profile_create_policy {
+            return Ok(());
+        }
+
+        let allowed = source
+            .options
+            .get("section.agentfs.create_agents")
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .any(|value| value == "*" || value == owner.agent_id || value == owner.name)
+            })
+            .unwrap_or(false);
+
+        if allowed {
+            return Ok(());
+        }
+
+        anyhow::bail!(AgentFsError::grant_denied(format!(
+            "agent {} is not allowed to create AgentFS filesystems from source profile {}",
+            owner.agent_id, source_profile.name
+        )))
+    }
+
     pub fn create_filesystem(
         &self,
         name: &str,
@@ -1025,6 +1037,10 @@ impl ControlServiceStore {
             anyhow::bail!("filesystem name must not be empty");
         }
         let (source_profile, source) = self.source_profile_by_name(source_profile_name)?;
+        self.ensure_source_profile_create_allowed(&source_profile, &source, owner)?;
+        let operator = build_operator(&source)?;
+        let rt = tokio::runtime::Runtime::new()?;
+        ensure_backing_source_is_empty(&rt, &operator, source_profile_name)?;
 
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<FilesystemCreateResult> {
@@ -1081,15 +1097,19 @@ impl ControlServiceStore {
                     "source_profile_id": fs.source_profile_id,
                 }),
             )?;
-            self.insert_event(&event)?;
+            let event = self.insert_event(&event)?;
 
-            Ok(FilesystemCreateResult {
+            let created = FilesystemCreateResult {
                 fs,
                 owner_grant,
                 event,
                 source_profile: source_profile.clone(),
-                source: source.clone(),
-            })
+            };
+            if let Err(err) = mirror_created_filesystem(&rt, &operator, &created) {
+                let _ = cleanup_created_filesystem_metadata(&rt, &operator);
+                return Err(err);
+            }
+            Ok(created)
         })();
         finish_transaction(&self.conn, result)
     }
@@ -1134,12 +1154,24 @@ impl ControlServiceStore {
     }
 
     pub fn resolve_filesystem(&self, fs_ref: &str) -> Result<ResolvedServiceFilesystem> {
+        let resolved = self.resolve_filesystem_with_source(fs_ref)?;
+        Ok(ResolvedServiceFilesystem {
+            fs: resolved.fs,
+            source_profile: resolved.source_profile,
+            grants: resolved.grants,
+        })
+    }
+
+    fn resolve_filesystem_with_source(
+        &self,
+        fs_ref: &str,
+    ) -> Result<ResolvedServiceFilesystemWithSource> {
         let fs = self
             .find_filesystem(fs_ref)?
             .ok_or_else(|| AgentFsError::unknown_fs(fs_ref))?;
         let (source_profile, source) = self.source_profile_by_id(&fs.source_profile_id)?;
         let grants = self.list_grants(&fs.fs_id)?;
-        Ok(ResolvedServiceFilesystem {
+        Ok(ResolvedServiceFilesystemWithSource {
             fs,
             source_profile,
             source,
@@ -1267,7 +1299,7 @@ impl ControlServiceStore {
                         "reason": "replaced",
                     }),
                 )?;
-                self.insert_event(&event)?;
+                let event = self.insert_event(&event)?;
                 events.push(event);
                 revoked.push(existing);
             }
@@ -1285,7 +1317,7 @@ impl ControlServiceStore {
                     "role": grant.role,
                 }),
             )?;
-            self.insert_event(&event)?;
+            let event = self.insert_event(&event)?;
             events.push(event);
 
             Ok(GrantMutationResult {
@@ -1340,7 +1372,7 @@ impl ControlServiceStore {
                     None,
                     serde_json::json!({ "agent_id": grant.agent_id }),
                 )?;
-                self.insert_event(&event)?;
+                let event = self.insert_event(&event)?;
                 events.push(event);
                 revoked.push(grant);
             }
@@ -1487,7 +1519,7 @@ impl ControlServiceStore {
                 )));
             }
 
-            let resolved = self.resolve_filesystem(&share.fs_id)?;
+            let resolved = self.resolve_filesystem_with_source(&share.fs_id)?;
             self.authorize_capability_for_fs(&resolved.fs, agent_id, AgentFsCapability::Read)?;
             let grant = self
                 .list_grants(&resolved.fs.fs_id)?
@@ -1534,7 +1566,7 @@ impl ControlServiceStore {
     ) -> Result<IssuedAgentFsCredential> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<IssuedAgentFsCredential> {
-            let resolved = self.resolve_filesystem(fs_id)?;
+            let resolved = self.resolve_filesystem_with_source(fs_id)?;
             self.authorize_capability_for_fs(&resolved.fs, agent_id, AgentFsCapability::Read)?;
             self.issue_credential_for_resolved(&resolved, agent_id, installation_id)
         })();
@@ -1543,7 +1575,7 @@ impl ControlServiceStore {
 
     fn issue_credential_for_resolved(
         &self,
-        resolved: &ResolvedServiceFilesystem,
+        resolved: &ResolvedServiceFilesystemWithSource,
         agent_id: &str,
         installation_id: &str,
     ) -> Result<IssuedAgentFsCredential> {
@@ -1829,8 +1861,9 @@ impl ControlServiceStore {
         Ok(())
     }
 
-    fn insert_event(&self, event: &AgentFsEventRecord) -> Result<()> {
-        let seq = if event.seq > 0 {
+    fn insert_event(&self, event: &AgentFsEventRecord) -> Result<AgentFsEventRecord> {
+        let mut event = event.clone();
+        event.seq = if event.seq > 0 {
             event.seq
         } else {
             self.next_event_seq(&event.fs_id)?
@@ -1841,7 +1874,7 @@ impl ControlServiceStore {
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 event.event_id,
-                seq,
+                event.seq,
                 event.fs_id,
                 event.kind,
                 event.actor_agent_id,
@@ -1851,7 +1884,7 @@ impl ControlServiceStore {
                 event.created_at_ms,
             ],
         )?;
-        Ok(())
+        Ok(event)
     }
 
     fn next_event_seq(&self, fs_id: &str) -> Result<i64> {
@@ -1911,6 +1944,83 @@ fn finish_transaction<T>(conn: &Connection, result: Result<T>) -> Result<T> {
             let _ = conn.execute_batch("ROLLBACK");
             Err(err)
         }
+    }
+}
+
+fn build_operator(source: &SourceConfig) -> Result<Operator> {
+    let mut options = source.options.clone();
+    options.retain(|key, _| !key.starts_with("section."));
+    if source.provider == "webdav" {
+        if let Some(endpoint) = options.get_mut("endpoint") {
+            *endpoint = endpoint.trim_end_matches('/').to_string();
+        }
+    }
+
+    Operator::via_iter(
+        Scheme::from_str(&source.provider)
+            .map_err(|err| anyhow::anyhow!("unknown provider '{}': {err}", source.provider))?,
+        options,
+    )
+    .map_err(|err| anyhow::anyhow!("failed to build operator for '{}': {err}", source.provider))
+}
+
+fn ensure_backing_source_is_empty(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    source_profile_name: &str,
+) -> Result<()> {
+    let entries = rt.block_on(async { operator.list_with("").recursive(true).await })?;
+    let first_path = entries
+        .into_iter()
+        .map(|entry| entry.path().trim_matches('/').to_string())
+        .find(|path| !path.is_empty());
+    if let Some(path) = first_path {
+        anyhow::bail!(
+            "fs create requires an empty backing source; source profile {source_profile_name} already contains {path}"
+        );
+    }
+    Ok(())
+}
+
+fn mirror_created_filesystem(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    created: &FilesystemCreateResult,
+) -> Result<()> {
+    agentfs::ensure_event_log_ready(rt, operator, &created.fs.fs_id)?;
+    agentfs::write_json(rt, operator, agentfs::FS_PATH, &created.fs)?;
+    agentfs::write_json(
+        rt,
+        operator,
+        agentfs::HEAD_PATH,
+        &agentfs::head_record(&created.fs.fs_id, None),
+    )?;
+    agentfs::write_grant(rt, operator, &created.owner_grant)?;
+    agentfs::write_event(rt, operator, &created.event)?;
+    Ok(())
+}
+
+fn cleanup_created_filesystem_metadata(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+) -> Result<()> {
+    for path in [agentfs::METADATA_ROOT, ".section"] {
+        let path = normalized_metadata_dir(path);
+        match rt.block_on(operator.remove_all(&path)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == opendal::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+fn normalized_metadata_dir(path: &str) -> String {
+    let path = path.trim_matches('/');
+    if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
     }
 }
 
@@ -2049,11 +2159,14 @@ fn json_to_sql_error(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opendal::services;
     use tempfile::TempDir;
 
     fn config_for_profile(root: &std::path::Path, db_path: &std::path::Path) -> SectionConfig {
-        let mut config = SectionConfig::default();
-        config.data_dir = root.join("data");
+        let mut config = SectionConfig {
+            data_dir: root.join("data"),
+            ..Default::default()
+        };
         config.control_service.path = Some(db_path.to_path_buf());
         config.control_service.source_profiles.insert(
             "default".to_string(),
@@ -2067,6 +2180,19 @@ mod tests {
             },
         );
         config
+    }
+
+    fn allow_profile_create(config: &mut SectionConfig, value: &str) {
+        config
+            .control_service
+            .source_profiles
+            .get_mut("default")
+            .expect("source profile")
+            .options
+            .insert(
+                "section.agentfs.create_agents".to_string(),
+                value.to_string(),
+            );
     }
 
     #[test]
@@ -2115,5 +2241,142 @@ mod tests {
             first_profile.source_profile_id
         );
         assert_eq!(source.options.get("root"), Some(&expected_root));
+    }
+
+    #[test]
+    fn authoritative_create_requires_explicit_source_profile_policy() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("control.sqlite");
+        let root = temp_dir.path().join("server");
+        std::fs::create_dir_all(root.join("remote")).expect("create remote");
+        let config = config_for_profile(&root, &db_path);
+        let store = ControlServiceStore::open_authoritative(&config).expect("open");
+        let owner = store.login_agent("owner", None, None).expect("login");
+
+        let err = store
+            .create_filesystem("project", "default", &owner)
+            .expect_err("create without source profile policy should fail");
+
+        assert!(
+            err.to_string().contains("grant_denied"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !root.join("remote").join(agentfs::FS_PATH).exists(),
+            "denied create must not initialize AgentFS metadata"
+        );
+    }
+
+    #[test]
+    fn authoritative_create_policy_allows_named_agent_and_resolve_hides_source_options() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("control.sqlite");
+        let root = temp_dir.path().join("server");
+        std::fs::create_dir_all(root.join("remote")).expect("create remote");
+        let mut config = config_for_profile(&root, &db_path);
+        allow_profile_create(&mut config, "owner");
+        let store = ControlServiceStore::open_authoritative(&config).expect("open");
+        let owner = store.login_agent("owner", None, None).expect("login");
+
+        let created = store
+            .create_filesystem("project", "default", &owner)
+            .expect("create");
+        let resolved = store
+            .resolve_filesystem(&created.fs.fs_id)
+            .expect("resolve filesystem");
+        let resolved_json =
+            serde_json::to_string(&ControlServiceResponse::ResolvedFilesystem(resolved))
+                .expect("resolved json");
+
+        assert!(
+            root.join("remote").join(agentfs::FS_PATH).exists(),
+            "service create should initialize AgentFS metadata"
+        );
+        assert!(
+            !resolved_json.contains(root.join("remote").to_str().expect("utf8 remote root")),
+            "resolve response must not expose source options: {resolved_json}"
+        );
+    }
+
+    #[test]
+    fn failed_create_metadata_mirror_cleanup_removes_partial_remote_records() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let remote_root = temp_dir.path().join("remote");
+        std::fs::create_dir_all(&remote_root).expect("create remote root");
+        let builder = services::Fs::default().root(remote_root.to_str().expect("utf8 remote root"));
+        let operator = Operator::new(builder).expect("operator").finish();
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let now = agentfs::now_ms();
+        let owner = AgentIdentityRecord {
+            agent_id: agentfs::new_agent_id().expect("agent id"),
+            installation_id: agentfs::new_installation_id().expect("installation id"),
+            name: "owner".to_string(),
+            auth_token: "auth_test".to_string(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        let fs_record = AgentFsRecord {
+            schema_version: agentfs::SCHEMA_VERSION,
+            fs_id: agentfs::new_fs_id().expect("fs id"),
+            name: "project".to_string(),
+            owner_agent_id: owner.agent_id.clone(),
+            source_profile_id: agentfs::new_source_profile_id().expect("source profile id"),
+            source_name: "project-source".to_string(),
+            created_at_ms: now,
+        };
+        let owner_grant = agentfs::owner_grant(&fs_record, &owner).expect("owner grant");
+        let event = agentfs::event_record(
+            &fs_record.fs_id,
+            "fs.created",
+            &owner.agent_id,
+            &fs_record.fs_id,
+            None,
+            serde_json::json!({ "name": fs_record.name }),
+        )
+        .expect("event");
+        let source_profile = crate::AgentFsSourceProfileRecord {
+            schema_version: agentfs::SCHEMA_VERSION,
+            source_profile_id: fs_record.source_profile_id.clone(),
+            name: "test-profile".to_string(),
+            provider: "fs".to_string(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        let created = FilesystemCreateResult {
+            fs: fs_record,
+            owner_grant,
+            event,
+            source_profile,
+        };
+
+        let event_path = remote_root
+            .join(agentfs::METADATA_ROOT)
+            .join("events")
+            .join(format!("{}.json", created.event.event_id));
+        std::fs::create_dir_all(event_path.parent().expect("event parent")).expect("event parent");
+        let mut existing_event = created.event.clone();
+        existing_event.seq = 1;
+        std::fs::write(
+            &event_path,
+            serde_json::to_vec_pretty(&existing_event).expect("event json"),
+        )
+        .expect("write conflicting event");
+
+        let err = mirror_created_filesystem(&rt, &operator, &created)
+            .expect_err("event conflict should fail mirror");
+        assert!(
+            err.to_string().contains("metadata_write_conflict"),
+            "unexpected mirror error: {err}"
+        );
+        assert!(
+            remote_root.join(agentfs::FS_PATH).exists(),
+            "mirror failure should happen after fs.json is written"
+        );
+
+        cleanup_created_filesystem_metadata(&rt, &operator).expect("cleanup metadata");
+        assert!(
+            !remote_root.join(".section").exists(),
+            "partial AgentFS metadata tree should be removed"
+        );
     }
 }

@@ -65,10 +65,12 @@ async fn handle_rpc(
     State(store): State<SharedStore>,
     Json(request): Json<ControlServiceRequest>,
 ) -> Json<ControlServiceRpcResult> {
-    let result = match store.lock() {
+    let result = tokio::task::spawn_blocking(move || match store.lock() {
         Ok(store) => execute_rpc(&store, request),
         Err(err) => Err(anyhow::anyhow!("control service lock poisoned: {err}")),
-    };
+    })
+    .await
+    .unwrap_or_else(|err| Err(anyhow::anyhow!("control service task failed: {err}")));
     Json(match result {
         Ok(response) => ControlServiceRpcResult::Ok { response },
         Err(err) => ControlServiceRpcResult::Err {
@@ -95,14 +97,6 @@ fn execute_rpc(
                 )?
                 .into(),
         )),
-        ControlServiceRequest::SourceProfileByName { name, actor } => {
-            let _actor = authenticate(store, actor)?;
-            let (source_profile, source) = store.source_profile_by_name(&name)?;
-            Ok(ControlServiceResponse::SourceProfile {
-                source_profile,
-                source,
-            })
-        }
         ControlServiceRequest::CreateFilesystem {
             name,
             source_profile_name,

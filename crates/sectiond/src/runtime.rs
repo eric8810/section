@@ -252,8 +252,10 @@ mod tests {
             .add_source("shared", &fs_source("/tmp/from-db", 11, 22))
             .expect("add shared");
 
-        let mut config = SectionConfig::default();
-        config.data_dir = temp_dir.path().to_path_buf();
+        let mut config = SectionConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
         config.sources.insert(
             "config-only".to_string(),
             fs_source("/tmp/config-only", 60, 300),
@@ -309,8 +311,10 @@ mod tests {
             .add_source("db-only", &fs_source("/tmp/db-only", 30, 45))
             .expect("add db-only");
 
-        let mut config = SectionConfig::default();
-        config.data_dir = temp_dir.path().to_path_buf();
+        let mut config = SectionConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
         config.sources.insert(
             "config-only".to_string(),
             fs_source("/tmp/config-only", 60, 300),
@@ -347,8 +351,10 @@ mod tests {
             })
             .expect("mark accepted agentfs source");
 
-        let mut config = SectionConfig::default();
-        config.data_dir = temp_dir.path().to_path_buf();
+        let mut config = SectionConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
         config.sources.insert(
             "public".to_string(),
             fs_source(public_root.path().to_str().expect("utf8 public"), 60, 300),
@@ -403,8 +409,10 @@ mod tests {
         let source_root = TempDir::new().expect("source root");
         let store = ProviderStore::open(temp_dir.path()).expect("store");
 
-        let mut config = SectionConfig::default();
-        config.data_dir = temp_dir.path().to_path_buf();
+        let mut config = SectionConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
         config.sources.insert(
             "config-only".to_string(),
             fs_source(source_root.path().to_str().expect("utf8 path"), 60, 300),

@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub type StoredSourceRecord = (String, String, HashMap<String, String>);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentIdentityRecord {
     pub agent_id: String,
@@ -1095,7 +1097,7 @@ impl ProviderStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn list_sources(&self) -> anyhow::Result<Vec<(String, String, HashMap<String, String>)>> {
+    pub fn list_sources(&self) -> anyhow::Result<Vec<StoredSourceRecord>> {
         let mut stmt = self
             .conn
             .prepare("SELECT name, provider, options_json, encrypted FROM sources ORDER BY name")?;

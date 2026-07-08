@@ -659,6 +659,10 @@ POST /v1/rpc
 - 跨机 sharing 必须走服务端。
 - HTTP Control Service 请求必须携带当前 agent 的 auth token 和 installation id；服务端不能只信客户端传来的 `agent_id`。
 - SourceProfile 由服务端决定。
+- 远程服务端默认不允许自注册 agent 使用任意 SourceProfile 创建 FS；SourceProfile 必须显式允许创建者。
+- `fs create` 的 backing source 空目录检查和 AgentFS metadata 初始化由服务端完成。
+- 普通 FS resolve/list/status 不能返回 backing source options。
+- backing source options 只能通过 `accept share` 或 `issue credential` 这种会记录 credential binding 的路径返回给已授权 agent。
 - source 长期密钥不能出现在 share record、local root marker、CLI JSON 输出里。
 - 本地 CLI 可以缓存 identity、accepted FS、mount state、短期 credential binding。
 - 本地 CLI 不能自己发明 grant、share、source profile、长期 credential。

@@ -1,4 +1,4 @@
-use crate::control_service::{FilesystemCreateResult, GrantMutationResult, RevokeMutationResult};
+use crate::control_service::{GrantMutationResult, RevokeMutationResult};
 use crate::sync::{
     compare_path as sync_compare_path, list_watch_events, resolve_path as sync_resolve_path,
     sync_source as run_source_sync, sync_source_with_options as run_source_sync_with_options,
@@ -213,37 +213,15 @@ impl SectiondControlPlane {
 
     pub fn fs_create(&self, name: &str, source_profile_name: &str) -> Result<AgentFsRecord> {
         let agent = self.require_agent_identity()?;
-        let (_source_profile, source) = self
-            .control_service
-            .source_profile_by_name(source_profile_name, &agent)?;
-        let operator = build_operator(&source.provider, &source.options)?;
-        let rt = tokio::runtime::Runtime::new()?;
-
-        if agentfs::read_optional_json::<AgentFsRecord>(&rt, &operator, agentfs::FS_PATH)?.is_some()
-        {
-            bail!("source profile {source_profile_name} already contains AgentFS metadata");
-        }
-        ensure_backing_source_is_empty(&rt, &operator, source_profile_name)?;
-
         let created = self
             .control_service
             .create_filesystem(name, source_profile_name, &agent)?;
-        let initialized = (|| -> Result<()> {
-            self.ensure_agentfs_source_from_service(&created.fs.source_name, &created.source)?;
-            self.cache_accepted_filesystem(&created.fs, created.event.created_at_ms)?;
-            mirror_created_filesystem(&rt, &operator, &created)
-        })();
-
-        if let Err(err) = initialized {
-            let cleanup_errors = self.rollback_failed_fs_create(&rt, &operator, &created, &agent);
-            if cleanup_errors.is_empty() {
-                return Err(err);
-            }
-            bail!(
-                "failed to initialize AgentFS shared metadata: {err}; rollback also failed: {}",
-                cleanup_errors.join("; ")
-            );
-        }
+        let issued = self
+            .control_service
+            .issue_credential(&created.fs.fs_id, &agent)?;
+        self.ensure_agentfs_source_from_service(&created.fs.source_name, &issued.source)?;
+        self.cache_accepted_filesystem(&created.fs, created.event.created_at_ms)?;
+        self.cache_credential_binding_record(&issued.binding)?;
         Ok(created.fs)
     }
 
@@ -1418,6 +1396,7 @@ impl SectiondControlPlane {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_local_materialized_commit(
         &self,
         source_name: &str,
@@ -1479,34 +1458,6 @@ impl SectiondControlPlane {
         }
         self.store.clear_source_sync_state(source_name)?;
         Ok(())
-    }
-
-    fn rollback_failed_fs_create(
-        &self,
-        rt: &tokio::runtime::Runtime,
-        operator: &Operator,
-        created: &FilesystemCreateResult,
-        owner: &AgentIdentityRecord,
-    ) -> Vec<String> {
-        let mut errors = Vec::new();
-
-        if let Err(err) = cleanup_created_filesystem_metadata(rt, operator) {
-            errors.push(format!("remote metadata cleanup failed: {err}"));
-        }
-        if let Err(err) = self
-            .store
-            .remove_agentfs_filesystem_cache(&created.fs.fs_id, &created.fs.source_name)
-        {
-            errors.push(format!("local cache cleanup failed: {err}"));
-        }
-        if let Err(err) = self
-            .control_service
-            .rollback_created_filesystem(&created.fs.fs_id, owner)
-        {
-            errors.push(format!("control service rollback failed: {err}"));
-        }
-
-        errors
     }
 }
 
@@ -1607,39 +1558,6 @@ fn attached_source_summary(source: &SourceRegistryEntry) -> AgentFsAttachedSourc
     }
 }
 
-fn mirror_created_filesystem(
-    rt: &tokio::runtime::Runtime,
-    operator: &Operator,
-    created: &FilesystemCreateResult,
-) -> Result<()> {
-    agentfs::ensure_event_log_ready(rt, operator, &created.fs.fs_id)?;
-    agentfs::write_json(rt, operator, agentfs::FS_PATH, &created.fs)?;
-    agentfs::write_json(
-        rt,
-        operator,
-        agentfs::HEAD_PATH,
-        &agentfs::head_record(&created.fs.fs_id, None),
-    )?;
-    agentfs::write_grant(rt, operator, &created.owner_grant)?;
-    agentfs::write_event(rt, operator, &created.event)?;
-    Ok(())
-}
-
-fn cleanup_created_filesystem_metadata(
-    rt: &tokio::runtime::Runtime,
-    operator: &Operator,
-) -> Result<()> {
-    for path in [agentfs::METADATA_ROOT, ".section"] {
-        let dir = normalized_dir_for_agentfs(path);
-        match rt.block_on(operator.remove_all(&dir)) {
-            Ok(()) => {}
-            Err(err) if err.kind() == opendal::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-    }
-    Ok(())
-}
-
 fn build_operator(provider: &str, options: &HashMap<String, String>) -> Result<Operator> {
     let mut options = options.clone();
     options.retain(|key, _| !key.starts_with("section."));
@@ -1652,27 +1570,9 @@ fn build_operator(provider: &str, options: &HashMap<String, String>) -> Result<O
     Operator::via_iter(
         Scheme::from_str(provider)
             .map_err(|err| anyhow::anyhow!("unknown provider '{provider}': {err}"))?,
-        options.into_iter(),
+        options,
     )
     .map_err(|err| anyhow::anyhow!("failed to build operator for '{provider}': {err}"))
-}
-
-fn ensure_backing_source_is_empty(
-    rt: &tokio::runtime::Runtime,
-    operator: &Operator,
-    source_name: &str,
-) -> Result<()> {
-    let entries = rt.block_on(async { operator.list_with("").recursive(true).await })?;
-    let first_path = entries
-        .into_iter()
-        .map(|entry| normalize_agent_source_path(entry.path()))
-        .find(|path| !path.is_empty());
-    if let Some(path) = first_path {
-        bail!(
-            "fs create requires an empty backing source; source {source_name} already contains {path}"
-        );
-    }
-    Ok(())
 }
 
 fn ensure_attach_root_does_not_overlap_backing_root(
@@ -2642,6 +2542,7 @@ fn write_root_marker(source_id: &str, local_root: &Path) -> Result<()> {
     write_root_marker_record(local_root, &marker)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_root_marker_for_agentfs(
     source_id: &str,
     local_root: &Path,
@@ -2871,7 +2772,6 @@ fn mount_output_contains_target(output: &str, mount_point: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opendal::services;
     use std::fs;
     use tempfile::TempDir;
 
@@ -3199,96 +3099,5 @@ mod tests {
         assert!(err
             .to_string()
             .contains("defined in the config file and cannot be changed via the control plane"));
-    }
-
-    #[test]
-    fn failed_create_metadata_mirror_cleanup_removes_partial_remote_records() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let remote_root = temp_dir.path().join("remote");
-        fs::create_dir_all(&remote_root).expect("create remote root");
-        let builder = services::Fs::default().root(remote_root.to_str().expect("utf8 remote root"));
-        let operator = Operator::new(builder).expect("operator").finish();
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let now = agentfs::now_ms();
-        let owner = AgentIdentityRecord {
-            agent_id: agentfs::new_agent_id().expect("agent id"),
-            installation_id: agentfs::new_installation_id().expect("installation id"),
-            name: "owner".to_string(),
-            auth_token: "auth_test".to_string(),
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-        let fs_record = AgentFsRecord {
-            schema_version: agentfs::SCHEMA_VERSION,
-            fs_id: agentfs::new_fs_id().expect("fs id"),
-            name: "project".to_string(),
-            owner_agent_id: owner.agent_id.clone(),
-            source_profile_id: agentfs::new_source_profile_id().expect("source profile id"),
-            source_name: "project-source".to_string(),
-            created_at_ms: now,
-        };
-        let owner_grant = agentfs::owner_grant(&fs_record, &owner).expect("owner grant");
-        let event = agentfs::event_record(
-            &fs_record.fs_id,
-            "fs.created",
-            &owner.agent_id,
-            &fs_record.fs_id,
-            None,
-            serde_json::json!({ "name": fs_record.name }),
-        )
-        .expect("event");
-        let source_profile = crate::AgentFsSourceProfileRecord {
-            schema_version: agentfs::SCHEMA_VERSION,
-            source_profile_id: fs_record.source_profile_id.clone(),
-            name: "test-profile".to_string(),
-            provider: "fs".to_string(),
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-        let source = SourceConfig {
-            provider: "fs".to_string(),
-            options: HashMap::from([(
-                "root".to_string(),
-                remote_root.to_string_lossy().to_string(),
-            )]),
-            cache: CacheConfig::default(),
-        };
-        let created = FilesystemCreateResult {
-            fs: fs_record,
-            owner_grant,
-            event,
-            source_profile,
-            source,
-        };
-
-        let event_path = remote_root
-            .join(agentfs::METADATA_ROOT)
-            .join("events")
-            .join(format!("{}.json", created.event.event_id));
-        fs::create_dir_all(event_path.parent().expect("event parent")).expect("event parent");
-        let mut existing_event = created.event.clone();
-        existing_event.seq = 1;
-        fs::write(
-            &event_path,
-            serde_json::to_vec_pretty(&existing_event).expect("event json"),
-        )
-        .expect("write conflicting event");
-
-        let err = mirror_created_filesystem(&rt, &operator, &created)
-            .expect_err("event conflict should fail mirror");
-        assert!(
-            err.to_string().contains("metadata_write_conflict"),
-            "unexpected mirror error: {err}"
-        );
-        assert!(
-            remote_root.join(agentfs::FS_PATH).exists(),
-            "mirror failure should happen after fs.json is written"
-        );
-
-        cleanup_created_filesystem_metadata(&rt, &operator).expect("cleanup metadata");
-        assert!(
-            !remote_root.join(".section").exists(),
-            "partial AgentFS metadata tree should be removed"
-        );
     }
 }
