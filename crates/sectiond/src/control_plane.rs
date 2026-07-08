@@ -113,7 +113,13 @@ pub struct AgentFsStatusSnapshot {
     pub local_root: Option<PathBuf>,
     pub agent_id: Option<String>,
     pub role: Option<AgentFsRole>,
+    pub capabilities: Vec<AgentFsCapability>,
     pub base_commit_id: Option<String>,
+    pub dirty: bool,
+    pub dirty_count: usize,
+    pub stale: bool,
+    pub warnings: Vec<String>,
+    pub next_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -406,7 +412,8 @@ impl SectiondControlPlane {
 
     pub fn fs_status(&self, fs_ref: &str) -> Result<AgentFsStatusSnapshot> {
         let rt = tokio::runtime::Runtime::new()?;
-        let resolved = self.find_agentfs(&rt, fs_ref)?;
+        let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
+        let resolved = self.find_agentfs(&rt, &resolved_ref)?;
         let materialization_state =
             head_materialization_state(&rt, &resolved.operator, &resolved.head)?;
         let agent = self.agent_identify()?;
@@ -416,11 +423,54 @@ impl SectiondControlPlane {
                 .active_role(&resolved.fs, &agent.agent_id)?,
             None => None,
         };
+        let capabilities = role.map(AgentFsRole::capabilities).unwrap_or_default();
         let local_root = self.store.get_source_local_root(&resolved.source.name)?;
-        let base_commit_id = self
-            .store
-            .get_agentfs_mount(&resolved.source.name)?
-            .and_then(|mount| mount.base_commit_id);
+        let mount = self.store.get_agentfs_mount(&resolved.source.name)?;
+        let base_commit_id = mount
+            .as_ref()
+            .and_then(|mount| mount.base_commit_id.clone());
+        let stale = local_root.is_some() && base_commit_id != resolved.head.commit_id;
+        let mut warnings = Vec::new();
+        let mut next_actions = Vec::new();
+        let dirty_count = match local_root.as_ref() {
+            Some(local_root) => collect_dirty_paths(&rt, &resolved.operator, local_root)?.len(),
+            None => 0,
+        };
+        let dirty = dirty_count > 0;
+
+        if agent.is_none() {
+            warnings.push("agent is not logged in".to_string());
+            next_actions.push("login".to_string());
+        }
+        if local_root.is_none() {
+            warnings.push("fs is not attached on this installation".to_string());
+            next_actions.push("attach".to_string());
+        }
+        match materialization_state {
+            Some(AgentFsMaterializationState::Pending)
+            | Some(AgentFsMaterializationState::FailedToMaterialize) => {
+                warnings.push("head commit is not materialized".to_string());
+                next_actions.push("repair".to_string());
+            }
+            _ => {}
+        }
+        if stale {
+            warnings.push("local base is behind current head".to_string());
+            next_actions.push("sync".to_string());
+        }
+        if !capabilities.contains(&AgentFsCapability::Commit) {
+            next_actions.push("request_grant".to_string());
+        } else if dirty
+            && !stale
+            && matches!(
+                materialization_state,
+                None | Some(AgentFsMaterializationState::Materialized)
+            )
+        {
+            next_actions.push("commit".to_string());
+        }
+        dedup_strings(&mut warnings);
+        dedup_strings(&mut next_actions);
 
         Ok(AgentFsStatusSnapshot {
             fs: resolved.fs,
@@ -429,7 +479,13 @@ impl SectiondControlPlane {
             local_root,
             agent_id: agent.map(|agent| agent.agent_id),
             role,
+            capabilities,
             base_commit_id,
+            dirty,
+            dirty_count,
+            stale,
+            warnings,
+            next_actions,
         })
     }
 
@@ -1340,6 +1396,11 @@ fn parse_event_offset(after: Option<&str>, events: &[crate::AgentFsEventRecord])
         .find(|event| event.event_id == after)
         .map(|event| event.seq)
         .ok_or_else(|| anyhow::anyhow!("AgentFS event offset {after} was not found"))
+}
+
+fn dedup_strings(values: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 fn attached_source_summary(source: &SourceRegistryEntry) -> AgentFsAttachedSource {

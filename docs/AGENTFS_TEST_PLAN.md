@@ -865,7 +865,7 @@ and P1 gaps:
 | Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 event `seq` 和事件路径覆盖拒绝；还缺统一 schema validation、坏数据隔离、backend create-if-absent 断言。 |
 | JSON error contract | Agent callers need stable machine-readable failures. | 部分实现。还缺所有公开 AgentFS 命令统一 `error.code`、`retryable`、`details`。 |
 | File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 未实现。设计已固定：metadata 写入前生成 path operation plan。 |
-| FS status decision surface | Agents need one command to know whether they can act. | 部分实现。还缺完整 status JSON：role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
+| FS status decision surface | Agents need one command to know whether they can act. | 已有第一版：`fs status --json` 支持本地 path，输出 role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
 
 ### Future Feature E2E Gates
 
@@ -890,8 +890,8 @@ It covers the product behaviors that are implemented today:
 | Test | E2E Scenarios Covered |
 | --- | --- |
 | `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; staging snapshot、repair、`fs events` replay、`watch --agentfs`、event `seq`、`authorized_by` 都可验证 |
-| `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit |
-| `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head |
+| `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit; `fs status` exposes role、capabilities、dirty、next_actions |
+| `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; `fs status` exposes stale state and `sync` next action |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
 | `e2e_hardening_rejects_symlink_commit_paths` | symlink paths cannot materialize files outside the working root |
 

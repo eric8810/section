@@ -159,6 +159,15 @@ impl AgentFsActor {
         ])
     }
 
+    fn fs_status(&self, fs_ref: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "status".to_string(),
+            fs_ref.to_string(),
+        ])
+    }
+
     fn commit_apply(&self, message: &str) -> Value {
         let output = self.commit_apply_output(message);
         assert_success(&output, "commit apply");
@@ -497,6 +506,20 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
     reader.accept(reader_share_id);
     reader.attach();
     reader.write_local("reader-draft.txt", "reader local draft");
+    let reader_status = reader.fs_status(&reader.local_root.to_string_lossy());
+    assert_eq!(reader_status["status"]["role"], "reader");
+    assert_eq!(reader_status["status"]["dirty"], true);
+    assert_eq!(reader_status["status"]["dirty_count"], 1);
+    assert!(reader_status["status"]["next_actions"]
+        .as_array()
+        .expect("reader next actions")
+        .iter()
+        .any(|action| action == "request_grant"));
+    assert!(!reader_status["status"]["next_actions"]
+        .as_array()
+        .expect("reader next actions")
+        .iter()
+        .any(|action| action == "commit"));
     assert_json_error(&reader.commit_apply_output("reader draft"), "grant_denied");
     assert!(
         !fixture.path("reader-draft.txt").exists(),
@@ -521,14 +544,27 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
         .expect("share id");
     writer.accept(writer_share_id);
     writer.attach();
+    writer.write_local("writer-before-downgrade.txt", "writer committable draft");
+    let writer_status = writer.fs_status(&writer.local_root.to_string_lossy());
+    assert_eq!(writer_status["status"]["role"], "writer");
+    assert_eq!(writer_status["status"]["dirty"], true);
+    assert!(writer_status["status"]["capabilities"]
+        .as_array()
+        .expect("writer capabilities")
+        .iter()
+        .any(|capability| capability == "commit"));
+    assert!(writer_status["status"]["next_actions"]
+        .as_array()
+        .expect("writer next actions")
+        .iter()
+        .any(|action| action == "commit"));
     owner.grant(&writer_id, "reader");
-    writer.write_local("writer-after-downgrade.txt", "writer local draft");
     assert_json_error(
         &writer.commit_apply_output("writer after downgrade"),
         "grant_denied",
     );
     assert!(
-        !fixture.path("writer-after-downgrade.txt").exists(),
+        !fixture.path("writer-before-downgrade.txt").exists(),
         "downgraded writer draft must not become shared truth"
     );
 
@@ -544,6 +580,23 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
     assert_eq!(manager_grant["grant"]["role"], "reader");
     manager.attach();
     manager.write_local("manager-draft.txt", "manager local draft");
+    let manager_status = manager.fs_status(&manager.local_root.to_string_lossy());
+    assert_eq!(manager_status["status"]["role"], "manager");
+    assert!(manager_status["status"]["capabilities"]
+        .as_array()
+        .expect("manager capabilities")
+        .iter()
+        .any(|capability| capability == "manage"));
+    assert!(!manager_status["status"]["capabilities"]
+        .as_array()
+        .expect("manager capabilities")
+        .iter()
+        .any(|capability| capability == "commit"));
+    assert!(manager_status["status"]["next_actions"]
+        .as_array()
+        .expect("manager next actions")
+        .iter()
+        .any(|action| action == "request_grant"));
     assert_json_error(
         &manager.commit_apply_output("manager draft"),
         "grant_denied",
@@ -594,6 +647,18 @@ fn e2e_stale_writer_cannot_overwrite_new_truth() {
     );
 
     writer_b.write_local("docs/from-b.txt", "from writer b");
+    let stale_status = writer_b.fs_status(&writer_b.local_root.to_string_lossy());
+    assert_eq!(stale_status["status"]["stale"], true);
+    assert!(stale_status["status"]["next_actions"]
+        .as_array()
+        .expect("stale next actions")
+        .iter()
+        .any(|action| action == "sync"));
+    assert!(!stale_status["status"]["next_actions"]
+        .as_array()
+        .expect("stale next actions")
+        .iter()
+        .any(|action| action == "commit"));
     assert_json_error(
         &writer_b.commit_apply_output("writer b update"),
         "stale_base",

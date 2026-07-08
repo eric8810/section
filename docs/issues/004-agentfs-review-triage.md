@@ -134,8 +134,8 @@ internal and clearly marked incomplete.
 | 17 | Materialization failure does not emit `fs.error`. | confirmed | open |
 | 21 | Failed attach can leave a half-bound working copy. | partial | fixed-local |
 | 22 | `fs list/status` can expose FS metadata without checking read grant. | decision | decision-needed |
-| 27 | `section fs status <attached local path>` does not resolve from a local path. | confirmed | open |
-| 28 | `fs status` lacks dirty state and full materialization detail. | partial | partial |
+| 27 | `section fs status <attached local path>` does not resolve from a local path. | confirmed | fixed-local |
+| 28 | `fs status` lacks dirty state and full materialization detail. | partial | fixed-local |
 | 30 | Non-empty directory deletion can race parent/child deletes in sync transport. | confirmed | open |
 | 32 | `commit.materialized` event lacks path/state details. | confirmed | open |
 | 35 | `.section/**` filtering is broader than the written contract's `.section/agentfs/**` reservation. | decision | decision-needed |
@@ -210,8 +210,8 @@ This table preserves every reviewer finding for traceability.
 | 24 | Grant/revoke target agent id is not validated. | P2 | confirmed | fixed-local | Keep validation tests. |
 | 25 | Grant downgrade leaves old capability active. | P0 | confirmed | fixed-local | Keep replacement semantics and tests. |
 | 26 | Accepted commit does not record authorizing grant. | P1 | confirmed | fixed-local | Commit records and `commit.accepted` events include `authorized_by`; E2E verifies it through `fs events`. |
-| 27 | `fs status <local path>` is documented but unsupported. | P2 | confirmed | open | Resolve local path via root marker before FS lookup. |
-| 28 | `fs status` lacks dirty/materialization state. | P2 | partial | partial | Materialization state added; dirty state still missing. |
+| 27 | `fs status <local path>` is documented but unsupported. | P2 | confirmed | fixed-local | `fs status` now resolves local root markers before FS lookup. |
+| 28 | `fs status` lacks dirty/materialization state. | P2 | partial | fixed-local | Status now reports materialization, dirty count, stale state, warnings, and next actions. |
 | 29 | Successful commit can be reported as failed after marker write failure. | P1 | confirmed | open | Treat marker update as post-commit local warning or write marker before final success boundary. |
 | 30 | Directory delete can race child deletes. | P2 | confirmed | open | Order delete plans deepest-first or coalesce subtree deletes. |
 | 31 | `fs.attached` leaks local absolute path. | P2 | confirmed | fixed-local | Keep event payload free of local paths. |
