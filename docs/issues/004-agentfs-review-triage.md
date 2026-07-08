@@ -93,7 +93,7 @@ These must be handled before making stronger claims about AgentFS correctness.
 | 15 | FS metadata initialization is not failure-safe. | confirmed | fixed-local |
 | 18 | `fs create` can create `head=null` over a non-empty backing source. | confirmed | fixed-local |
 | 19 | Stale-base checks trust editable `.section/root.json`. | confirmed | fixed-local |
-| 20 | Governance state can advance before event writes succeed. | confirmed | partial |
+| 20 | Governance state can advance before event writes succeed. | confirmed | fixed-local |
 | 23 | `fs attach --json` can expose backing source options and credentials. | confirmed | fixed-local |
 | 34 | Local symlinks are followed and can expose files outside the working root. | confirmed | fixed-local |
 | 42 | The `fs` provider can attach the backing root as the working root, collapsing the truth boundary. | confirmed | fixed-local |
@@ -156,6 +156,7 @@ of the recorded baseline.
 | 11 | Status role could be wrong with replaced grants. | Grant replacement now revokes previous active grants for that agent. |
 | 15 | Shared FS metadata initialization was not failure-safe. | Metadata mirror failures now trigger service/local/remote rollback; a unit test covers partial remote metadata written before event failure. |
 | 18 | Non-empty backing source can become head-null FS truth. | `fs_create` now requires an empty backing source before source registration. |
+| 20 | Governance mutation could become invisible if backing event mirror writes failed. | Control Service events now have per-FS `seq`; `fs events` and `watch --agentfs` merge service events with backing events; grant/revoke mirror failure no longer hides the service-side governance event. |
 | 21 | Attach failure could leave binding/marker behind. | Attach now rolls back binding and marker on sync failure/conflict. |
 | 23 | `fs attach --json` could leak source credentials. | Attach returns a sanitized source summary without provider options. |
 | 24 | Grant/revoke did not validate target `agent_id`. | Grant/revoke now validate `agt_[0-9a-f]{32}`. |
@@ -205,7 +206,7 @@ This table preserves every reviewer finding for traceability.
 | 17 | Materialization failure does not emit `fs.error`. | P2 | confirmed | fixed-local | Materialization failure now emits both `commit.materialization_failed` and `fs.error`; E2E verifies a real backing-source failure. |
 | 18 | Non-empty backing source can become head-null FS truth. | P0 | confirmed | fixed-local | Reject non-empty backing source or import it as initial commit. |
 | 19 | Stale-base check trusts editable root marker. | P0 | confirmed | fixed-local | Commit/status use the trusted local mount store for base; E2E verifies marker base tampering cannot bypass stale-base. |
-| 20 | Governance mutation can succeed while event write fails. | P0 | confirmed | partial | Commit accepted/materialized state now writes the required event before advancing head or commit state; still need a service-side event authority or recoverable outbox for all mirrored governance mutations. |
+| 20 | Governance mutation can succeed while event write fails. | P0 | confirmed | fixed-local | Control Service is now event authority for grant/revoke; AgentFS event replay merges service events and backing events; commit accepted/materialized state still writes required backing events before head/state advancement. |
 | 21 | Failed attach can leave half-bound working copy. | P2 | partial | fixed-local | Keep rollback tests; still check failures after event write. |
 | 22 | `fs list/status` expose metadata without read grant. | P2 | decision | fixed-local | Product decision: discovery/status/events require read capability. `fs list` filters by readable FS, and `fs status`, `fs events`, and `watch --agentfs` reject ungranted agents with `grant_denied`. |
 | 23 | `fs attach --json` can leak source credentials. | P0 | confirmed | fixed-local | Use sanitized source result or remove source options from attach JSON. |
@@ -268,9 +269,8 @@ Resolved decisions:
 
 After the decisions above, prioritize:
 
-1. service-side event authority / outbox for governance mutations (#20),
-2. backend-level CAS / create-if-absent semantics for head and event metadata (#2, #51),
-3. remaining AgentFS test-plan coverage audit (#46).
+1. backend-level CAS / create-if-absent semantics for head and event metadata (#2, #51),
+2. remaining AgentFS test-plan coverage audit (#46).
 
 ## Verification Record
 

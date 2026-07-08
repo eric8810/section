@@ -70,7 +70,7 @@ If commit metadata succeeds but file materialization fails:
 - FS state is `error`,
 - further commits are blocked until materialization is repaired.
 
-Watchers can rely on accepted commit records and AgentFS events as governance authority. File reads rely on the materialized backing source and may lag while FS state is `syncing` or `error`.
+Watchers can rely on accepted commit records and AgentFS events as governance authority. Service-side events are authoritative for grant/revoke governance. Backing-source events are a mirror and commit/materialization audit surface. File reads rely on the materialized backing source and may lag while FS state is `syncing` or `error`.
 
 External edits to the backing source are not governed commits. They are detected by source/path comparison and should surface as drift or conflict, using the existing stale-overwrite protection.
 
@@ -85,6 +85,7 @@ source_profiles
 grants
 shares
 credential_bindings
+events
 ```
 
 AgentFS metadata may be mirrored under the backing source:
@@ -116,7 +117,10 @@ Metadata files are rewritten as whole JSON documents. The MVP does not use JSONL
 Authority rules:
 
 - Section Control Service is authoritative for identity, grant, share, source profile, and credential decisions.
+- Section Control Service is authoritative for grant/revoke events.
 - The backing-source metadata namespace is a mirror for materialization, audit, repair, and diagnosis.
+- `fs events` and `watch --agentfs` return a merged event view from Section Control Service and backing-source metadata.
+- If grant/revoke mirror writes fail, the service-side governance mutation and service-side event still stand.
 - Normal commits cannot modify mirrored metadata paths.
 - `fs list`, `fs status`, `fs events`, and `watch --agentfs` only expose FS metadata to agents with `read` capability.
 

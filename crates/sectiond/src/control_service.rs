@@ -170,6 +170,7 @@ impl ControlServiceStore {
             );
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
+                seq INTEGER NOT NULL DEFAULT 0,
                 fs_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 actor_agent_id TEXT NOT NULL,
@@ -185,6 +186,8 @@ impl ControlServiceStore {
             "auth_token_hash",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        add_column_if_missing(&self.conn, "events", "seq", "INTEGER NOT NULL DEFAULT 0")?;
+        self.ensure_existing_event_seqs()?;
         Ok(())
     }
 
@@ -463,6 +466,19 @@ impl ControlServiceStore {
              ORDER BY created_at_ms, grant_id",
         )?;
         let rows = stmt.query_map([fs_id], read_grant_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn list_events(&self, fs_id: &str) -> Result<Vec<AgentFsEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, seq, fs_id, kind, actor_agent_id, subject_id,
+                    path, data_json, created_at_ms
+             FROM events
+             WHERE fs_id = ?1
+             ORDER BY seq, created_at_ms, event_id",
+        )?;
+        let rows = stmt.query_map([fs_id], read_event_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -1124,12 +1140,18 @@ impl ControlServiceStore {
     }
 
     fn insert_event(&self, event: &AgentFsEventRecord) -> Result<()> {
+        let seq = if event.seq > 0 {
+            event.seq
+        } else {
+            self.next_event_seq(&event.fs_id)?
+        };
         self.conn.execute(
             "INSERT INTO events (
-                event_id, fs_id, kind, actor_agent_id, subject_id, path, data_json, created_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                event_id, seq, fs_id, kind, actor_agent_id, subject_id, path, data_json, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 event.event_id,
+                seq,
                 event.fs_id,
                 event.kind,
                 event.actor_agent_id,
@@ -1139,6 +1161,44 @@ impl ControlServiceStore {
                 event.created_at_ms,
             ],
         )?;
+        Ok(())
+    }
+
+    fn next_event_seq(&self, fs_id: &str) -> Result<i64> {
+        let seq: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE fs_id = ?1",
+            [fs_id],
+            |row| row.get(0),
+        )?;
+        Ok(seq)
+    }
+
+    fn ensure_existing_event_seqs(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT fs_id, event_id
+             FROM events
+             WHERE seq <= 0
+             ORDER BY fs_id, created_at_ms, event_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut next_by_fs = HashMap::<String, i64>::new();
+        for (fs_id, event_id) in rows {
+            let next = match next_by_fs.get(&fs_id) {
+                Some(next) => *next,
+                None => self.next_event_seq(&fs_id)?,
+            };
+            self.conn.execute(
+                "UPDATE events SET seq = ?1 WHERE event_id = ?2",
+                params![next, event_id],
+            )?;
+            next_by_fs.insert(fs_id, next + 1);
+        }
         Ok(())
     }
 }
@@ -1247,6 +1307,23 @@ fn read_share_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFsShareRecor
         expires_at_ms: row.get(8)?,
         accepted_at_ms: row.get(9)?,
         revoked_at_ms: row.get(10)?,
+    })
+}
+
+fn read_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFsEventRecord> {
+    let data_json: String = row.get(7)?;
+    let data = serde_json::from_str(&data_json).map_err(json_to_sql_error)?;
+    Ok(AgentFsEventRecord {
+        schema_version: agentfs::SCHEMA_VERSION,
+        event_id: row.get(0)?,
+        seq: row.get(1)?,
+        fs_id: row.get(2)?,
+        kind: row.get(3)?,
+        actor_agent_id: row.get(4)?,
+        subject_id: row.get(5)?,
+        path: row.get(6)?,
+        data,
+        created_at_ms: row.get(8)?,
     })
 }
 

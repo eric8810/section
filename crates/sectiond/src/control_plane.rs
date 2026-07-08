@@ -1,4 +1,4 @@
-use crate::control_service::FilesystemCreateResult;
+use crate::control_service::{FilesystemCreateResult, GrantMutationResult, RevokeMutationResult};
 use crate::sync::{
     compare_path as sync_compare_path, list_watch_events, resolve_path as sync_resolve_path,
     sync_source as run_source_sync, sync_source_with_options as run_source_sync_with_options,
@@ -265,14 +265,7 @@ impl SectiondControlPlane {
         let mutation =
             self.control_service
                 .fs_grant(&resolved.fs.fs_id, &actor.agent_id, agent_id, role)?;
-        agentfs::ensure_event_log_ready(&rt, &resolved.operator, &resolved.fs.fs_id)?;
-        for revoked in &mutation.revoked {
-            agentfs::write_grant(&rt, &resolved.operator, revoked)?;
-        }
-        agentfs::write_grant(&rt, &resolved.operator, &mutation.grant)?;
-        for event in &mutation.events {
-            agentfs::write_event(&rt, &resolved.operator, event)?;
-        }
+        let _ = mirror_grant_mutation(&rt, &resolved.operator, &resolved.fs.fs_id, &mutation);
         Ok(mutation.grant)
     }
 
@@ -283,13 +276,7 @@ impl SectiondControlPlane {
         let mutation =
             self.control_service
                 .fs_revoke(&resolved.fs.fs_id, &actor.agent_id, agent_id)?;
-        agentfs::ensure_event_log_ready(&rt, &resolved.operator, &resolved.fs.fs_id)?;
-        for revoked in &mutation.revoked {
-            agentfs::write_grant(&rt, &resolved.operator, revoked)?;
-        }
-        for event in &mutation.events {
-            agentfs::write_event(&rt, &resolved.operator, event)?;
-        }
+        let _ = mirror_revoke_mutation(&rt, &resolved.operator, &resolved.fs.fs_id, &mutation);
         Ok(mutation.revoked)
     }
 
@@ -544,8 +531,12 @@ impl SectiondControlPlane {
             &agent.agent_id,
             AgentFsCapability::Read,
         )?;
-        let events = agentfs::list_events(&rt, &resolved.operator)?;
+        let mut events = agentfs::list_events(&rt, &resolved.operator)?;
+        let mut service_events = self.control_service.list_events(&resolved.fs.fs_id)?;
         ensure_events_match_fs(&events, &resolved.fs.fs_id)?;
+        ensure_events_match_fs(&service_events, &resolved.fs.fs_id)?;
+        events.append(&mut service_events);
+        let events = merged_agentfs_events(events);
         let after_seq = parse_event_offset(after, &events)?;
         Ok(events
             .into_iter()
@@ -1526,6 +1517,73 @@ fn parse_event_offset(after: Option<&str>, events: &[crate::AgentFsEventRecord])
         .find(|event| event.event_id == after)
         .map(|event| event.seq)
         .ok_or_else(|| anyhow::anyhow!("AgentFS event offset {after} was not found"))
+}
+
+fn merged_agentfs_events(events: Vec<crate::AgentFsEventRecord>) -> Vec<crate::AgentFsEventRecord> {
+    let mut by_id = BTreeMap::<String, crate::AgentFsEventRecord>::new();
+    for event in events {
+        by_id
+            .entry(event.event_id.clone())
+            .and_modify(|existing| {
+                if event.seq > 0 && (existing.seq <= 0 || event.seq <= existing.seq) {
+                    *existing = event.clone();
+                }
+            })
+            .or_insert(event);
+    }
+
+    let mut events = by_id.into_values().collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        event_sort_seq(left)
+            .cmp(&event_sort_seq(right))
+            .then_with(|| left.created_at_ms.cmp(&right.created_at_ms))
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+    for (index, event) in events.iter_mut().enumerate() {
+        event.seq = index as i64 + 1;
+    }
+    events
+}
+
+fn event_sort_seq(event: &crate::AgentFsEventRecord) -> i64 {
+    if event.seq > 0 {
+        event.seq
+    } else {
+        i64::MAX
+    }
+}
+
+fn mirror_grant_mutation(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    fs_id: &str,
+    mutation: &GrantMutationResult,
+) -> Result<()> {
+    agentfs::ensure_event_log_ready(rt, operator, fs_id)?;
+    for revoked in &mutation.revoked {
+        agentfs::write_grant(rt, operator, revoked)?;
+    }
+    agentfs::write_grant(rt, operator, &mutation.grant)?;
+    for event in &mutation.events {
+        agentfs::write_event(rt, operator, event)?;
+    }
+    Ok(())
+}
+
+fn mirror_revoke_mutation(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    fs_id: &str,
+    mutation: &RevokeMutationResult,
+) -> Result<()> {
+    agentfs::ensure_event_log_ready(rt, operator, fs_id)?;
+    for revoked in &mutation.revoked {
+        agentfs::write_grant(rt, operator, revoked)?;
+    }
+    for event in &mutation.events {
+        agentfs::write_event(rt, operator, event)?;
+    }
+    Ok(())
 }
 
 fn dedup_strings(values: &mut Vec<String>) {

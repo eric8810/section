@@ -849,6 +849,77 @@ fn e2e_grants_control_attach_manage_and_commit_authority() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn e2e_grant_survives_backing_event_mirror_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    let writer = fixture.agent("writer");
+
+    owner.login("owner");
+    owner.create_fs();
+    let writer_id = writer.login("writer");
+
+    let events_dir = fixture.remote_root.join(".section/agentfs/events");
+    let original_mode = fs::metadata(&events_dir)
+        .expect("events dir metadata")
+        .permissions()
+        .mode();
+    let mut readonly = fs::metadata(&events_dir)
+        .expect("events dir metadata")
+        .permissions();
+    readonly.set_mode(0o500);
+    fs::set_permissions(&events_dir, readonly).expect("make events dir read-only");
+
+    owner.grant(&writer_id, "writer");
+
+    let mut restored = fs::metadata(&events_dir)
+        .expect("events dir metadata")
+        .permissions();
+    restored.set_mode(original_mode);
+    fs::set_permissions(&events_dir, restored).expect("restore events dir permissions");
+
+    assert!(
+        !agentfs_event_kinds(&fixture.remote_root)
+            .iter()
+            .any(|kind| kind == "grant.created"),
+        "backing event mirror should be missing grant.created"
+    );
+
+    let replay = owner.fs_events(FS_NAME, None);
+    let replay_events = replay["events"].as_array().expect("events");
+    assert!(
+        replay_events.iter().any(|event| {
+            event["kind"] == "grant.created"
+                && event["data"]["agent_id"] == writer_id
+                && event["data"]["role"] == "writer"
+        }),
+        "service event authority should expose grant.created: {replay_events:?}"
+    );
+    let mut last_seq = 0;
+    for event in replay_events {
+        let seq = event["seq"].as_i64().expect("event seq");
+        assert!(seq > last_seq, "event seq should be strictly increasing");
+        last_seq = seq;
+    }
+
+    let writer_share = owner.share(&writer_id);
+    let writer_share_id = writer_share["share"]["share_id"]
+        .as_str()
+        .expect("share id");
+    writer.accept(writer_share_id);
+    writer.attach();
+    writer.write_local("docs/service-grant.txt", "service grant works");
+    writer.commit_apply("commit after mirrored event failure");
+
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/service-grant.txt")).expect("read committed file"),
+        "service grant works"
+    );
+}
+
 #[test]
 fn e2e_stale_writer_cannot_overwrite_new_truth() {
     let fixture = AgentFsFixture::new();
