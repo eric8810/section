@@ -179,6 +179,17 @@ impl AgentFsActor {
         ])
     }
 
+    fn commit_repair(&self, fs_ref: &str, commit_id: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "commit".to_string(),
+            "repair".to_string(),
+            fs_ref.to_string(),
+            "--commit".to_string(),
+            commit_id.to_string(),
+        ])
+    }
+
     fn fs_events(&self, fs_ref: &str, after: Option<&str>) -> Value {
         let mut args = vec![
             "--json".to_string(),
@@ -247,6 +258,14 @@ fn assert_json_error(output: &Output, code: &str) {
 
 fn read_json(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).expect("read json")).expect("parse json")
+}
+
+fn write_json(path: impl AsRef<Path>, value: &Value) {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(value).expect("serialize json"),
+    )
+    .expect("write json");
 }
 
 fn agentfs_event_kinds(remote_root: &Path) -> Vec<String> {
@@ -353,6 +372,14 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
             .join(format!("{commit_id}.json")),
     );
     assert_eq!(commit_record["agent_id"], writer_id);
+    assert_eq!(commit_record["base_commit_id"], Value::Null);
+    let staging_manifest_path = commit_record["staging_snapshot"]["manifest_path"]
+        .as_str()
+        .expect("staging manifest path");
+    assert!(
+        Path::new(staging_manifest_path).exists(),
+        "staging manifest must exist at {staging_manifest_path}"
+    );
     assert!(commit_record["paths"]
         .as_array()
         .expect("commit paths")
@@ -404,6 +431,40 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
             line["stream"] == "agentfs" && line["event"]["kind"] == "commit.accepted"
         }),
         "watch --agentfs should expose commit.accepted, got {watched:?}"
+    );
+
+    writer.write_local("docs/note.txt", "writer next draft");
+    let local_after_commit_status = writer.commit_status();
+    assert!(
+        local_after_commit_status["status"]["dirty_paths"]
+            .as_array()
+            .expect("dirty paths after local draft")
+            .iter()
+            .any(|path| path["path"] == "docs/note.txt"),
+        "live local edits after commit should remain dirty work"
+    );
+
+    fs::write(fixture.path("docs/note.txt"), "broken remote").expect("corrupt remote");
+    let commit_path = fixture
+        .remote_root
+        .join(".section/agentfs/commits")
+        .join(format!("{commit_id}.json"));
+    let mut failed_commit = read_json(&commit_path);
+    failed_commit["materialization_state"] = Value::String("failed_to_materialize".to_string());
+    failed_commit["error"] = Value::String("forced failure for repair test".to_string());
+    write_json(&commit_path, &failed_commit);
+
+    writer.write_local("docs/blocked.txt", "blocked while head failed");
+    let blocked = writer.commit_apply_output("blocked by failed head");
+    assert_json_error(&blocked, "materialization_failed");
+
+    let repaired = writer.commit_repair(&writer.local_root.to_string_lossy(), &commit_id);
+    assert_eq!(repaired["commit"]["commit_id"], commit_id);
+    assert_eq!(repaired["commit"]["materialization_state"], "materialized");
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/note.txt")).expect("read repaired remote note"),
+        "hello from writer",
+        "repair must materialize the original staging snapshot"
     );
 
     let owner_fresh_root = fixture.root.join("owner-fresh-root");

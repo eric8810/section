@@ -46,6 +46,17 @@ fn run_inner(config_path: Option<&Path>, action: CommitAction, json_mode: bool) 
                 );
             }
         }
+        CommitAction::Repair { fs, commit } => {
+            let result = control_plane.commit_repair(&fs, commit.as_deref())?;
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({ "ok": true, "commit": result.commit, "sync": result.sync })
+                );
+            } else {
+                println!("Commit {} materialized.", result.commit.commit_id);
+            }
+        }
     }
 
     Ok(())

@@ -291,6 +291,14 @@ pub enum CommitAction {
         #[arg(long)]
         message: String,
     },
+    /// Retry materialization for an accepted pending or failed commit
+    Repair {
+        /// FS name, fs_id, source name, or attached local path
+        fs: String,
+        /// Commit id to repair. Defaults to current head.
+        #[arg(long)]
+        commit: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

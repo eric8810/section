@@ -876,8 +876,8 @@ accepted commit 可以 failed_to_materialize，但缺少明确 repair 命令。
 - 增加 `section commit repair <fs-or-root> [--commit <commit_id>]`。
 - repair 只处理 `pending` 或 `failed_to_materialize` 的 commit。
 - repair 使用原 commit 的 staging snapshot。
-- 如果 staging snapshot 不存在，但当前 local root 的文件 hash 完全匹配 commit record，可以允许 repair。
-- 如果两者都不满足，返回 `missing_commit_snapshot`。
+- 如果 staging snapshot 不存在，返回 `missing_commit_snapshot`。
+- MVP 不提供 live root 兜底 repair。
 
 规则：
 

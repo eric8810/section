@@ -147,6 +147,12 @@ pub struct AgentFsCommitPathRecord {
     pub previous_version: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentFsCommitStagingRecord {
+    pub manifest_path: String,
+    pub manifest_hash: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentFsMaterializationState {
@@ -174,11 +180,17 @@ pub struct AgentFsCommitRecord {
     pub commit_id: String,
     pub fs_id: String,
     pub parent_commit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_manifest_hash: Option<String>,
     pub agent_id: String,
     pub summary: String,
     pub paths: Vec<AgentFsCommitPathRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorized_by: Option<AgentFsAuthorization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_snapshot: Option<AgentFsCommitStagingRecord>,
     pub created_at_ms: i64,
     pub materialization_state: AgentFsMaterializationState,
     pub materialized_at_ms: Option<i64>,
@@ -272,6 +284,14 @@ impl AgentFsError {
             "metadata_write_conflict",
             format!("metadata head lock is held for fs {fs_id}"),
             true,
+        )
+    }
+
+    pub fn missing_commit_snapshot(commit_id: &str) -> Self {
+        Self::new(
+            "missing_commit_snapshot",
+            format!("staging snapshot for commit {commit_id} is missing"),
+            false,
         )
     }
 

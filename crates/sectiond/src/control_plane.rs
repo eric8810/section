@@ -2,14 +2,14 @@ use crate::control_service::FilesystemCreateResult;
 use crate::sync::{
     compare_path as sync_compare_path, list_watch_events, resolve_path as sync_resolve_path,
     sync_source as run_source_sync, sync_source_with_options as run_source_sync_with_options,
-    PathCompareSnapshot, PathResolveResult, PathResolveStrategy, SourceSyncOptions,
-    SourceSyncResult, SyncLifecycleObserver,
+    LocalScanStats, PathCompareSnapshot, PathResolveResult, PathResolveStrategy, RemoteScanStats,
+    SourceSyncOptions, SourceSyncResult, SyncLifecycleObserver,
 };
 use crate::{
     agentfs, AgentFsAcceptResult, AgentFsAvailableShare, AgentFsCapability,
-    AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsError, AgentFsGrantRecord,
-    AgentFsHeadRecord, AgentFsMaterializationState, AgentFsRecord, AgentFsRole, AgentFsShareResult,
-    ControlServiceStore,
+    AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsCommitStagingRecord, AgentFsError,
+    AgentFsGrantRecord, AgentFsHeadRecord, AgentFsMaterializationState, AgentFsRecord, AgentFsRole,
+    AgentFsShareResult, ControlServiceStore,
 };
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
@@ -131,6 +131,35 @@ pub struct AgentFsCommitStatus {
 pub struct AgentFsCommitApplyResult {
     pub commit: AgentFsCommitRecord,
     pub sync: SourceSyncResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct AgentFsStagingManifest {
+    schema_version: u32,
+    fs_id: String,
+    commit_id: String,
+    base_commit_id: Option<String>,
+    created_at_ms: i64,
+    paths: Vec<AgentFsStagedPathRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct AgentFsStagedPathRecord {
+    path: String,
+    op: String,
+    kind: String,
+    hash: Option<String>,
+    size: Option<u64>,
+    staged_path: Option<String>,
+    previous_version: Option<String>,
+}
+
+struct PreparedAgentFsCommit {
+    commit_id: String,
+    manifest: AgentFsStagingManifest,
+    manifest_path: PathBuf,
+    manifest_hash: String,
+    paths: Vec<AgentFsCommitPathRecord>,
 }
 
 pub struct SectiondControlPlane {
@@ -496,6 +525,15 @@ impl SectiondControlPlane {
                 local_root.display()
             );
         }
+        let commit_id = agentfs::new_commit_id()?;
+        let prepared = prepare_staging_snapshot(
+            &self.config.data_dir,
+            &resolved.fs.fs_id,
+            &commit_id,
+            &mount.base_commit_id,
+            &local_root,
+            &dirty_paths,
+        )?;
 
         let lock = agentfs::acquire_head_lock(
             &rt,
@@ -530,13 +568,19 @@ impl SectiondControlPlane {
 
             let commit = AgentFsCommitRecord {
                 schema_version: agentfs::SCHEMA_VERSION,
-                commit_id: agentfs::new_commit_id()?,
+                commit_id: prepared.commit_id.clone(),
                 fs_id: resolved.fs.fs_id.clone(),
                 parent_commit_id: current_head.commit_id.clone(),
+                base_commit_id: mount.base_commit_id.clone(),
+                base_manifest_hash: None,
                 agent_id: actor.agent_id.clone(),
                 summary: summary.to_string(),
-                paths: dirty_paths,
+                paths: prepared.paths.clone(),
                 authorized_by: Some(authorized_by.clone()),
+                staging_snapshot: Some(AgentFsCommitStagingRecord {
+                    manifest_path: prepared.manifest_path.display().to_string(),
+                    manifest_hash: prepared.manifest_hash.clone(),
+                }),
                 created_at_ms: agentfs::now_ms(),
                 materialization_state: AgentFsMaterializationState::Pending,
                 materialized_at_ms: None,
@@ -568,7 +612,18 @@ impl SectiondControlPlane {
         agentfs::release_head_lock(&rt, &resolved.operator, &lock)?;
         let mut commit = accepted?;
 
-        match self.source_sync_internal(&resolved.source.name) {
+        match materialize_staged_commit(
+            &rt,
+            &resolved.operator,
+            &self.store,
+            &resolved.source.name,
+            &local_root,
+            prepared
+                .manifest_path
+                .parent()
+                .ok_or_else(|| AgentFsError::missing_commit_snapshot(&commit.commit_id))?,
+            &prepared.manifest,
+        ) {
             Ok(sync) if sync.conflicts == 0 => {
                 commit.materialization_state = AgentFsMaterializationState::Materialized;
                 commit.materialized_at_ms = Some(agentfs::now_ms());
@@ -637,6 +692,166 @@ impl SectiondControlPlane {
                 Err(AgentFsError::materialization_failed(
                     &resolved.fs.fs_id,
                     commit.error.as_deref().unwrap_or("source sync failed"),
+                )
+                .into())
+            }
+        }
+    }
+
+    pub fn commit_repair(
+        &self,
+        fs_ref: &str,
+        commit_id: Option<&str>,
+    ) -> Result<AgentFsCommitApplyResult> {
+        let actor = self.require_agent_identity()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
+        let resolved = self.find_agentfs(&rt, &resolved_ref)?;
+        self.control_service.authorize_capability(
+            &resolved.fs.fs_id,
+            &actor.agent_id,
+            AgentFsCapability::Commit,
+        )?;
+
+        let target_commit_id = match commit_id {
+            Some(commit_id) => commit_id.to_string(),
+            None => resolved
+                .head
+                .commit_id
+                .clone()
+                .ok_or_else(|| AgentFsError::unknown_fs(&resolved.fs.fs_id))?,
+        };
+        let mut commit: AgentFsCommitRecord = agentfs::read_json(
+            &rt,
+            &resolved.operator,
+            &format!(
+                "{}/commits/{}.json",
+                agentfs::METADATA_ROOT,
+                target_commit_id
+            ),
+        )?;
+        if commit.fs_id != resolved.fs.fs_id {
+            anyhow::bail!(AgentFsError::malformed_metadata(format!(
+                "commit {} belongs to fs {}, not {}",
+                commit.commit_id, commit.fs_id, resolved.fs.fs_id
+            )));
+        }
+        if resolved.head.commit_id.as_deref() != Some(commit.commit_id.as_str()) {
+            anyhow::bail!(AgentFsError::stale_base(
+                &resolved.fs.fs_id,
+                Some(&commit.commit_id),
+                resolved.head.commit_id.as_deref(),
+            ));
+        }
+        if !matches!(
+            commit.materialization_state,
+            AgentFsMaterializationState::Pending | AgentFsMaterializationState::FailedToMaterialize
+        ) {
+            anyhow::bail!(AgentFsError::new(
+                "invalid_commit_state",
+                format!(
+                    "commit {} is {:?}, so it does not need repair",
+                    commit.commit_id, commit.materialization_state
+                ),
+                false,
+            ));
+        }
+
+        let staging = commit
+            .staging_snapshot
+            .clone()
+            .ok_or_else(|| AgentFsError::missing_commit_snapshot(&commit.commit_id))?;
+        let manifest_path = PathBuf::from(&staging.manifest_path);
+        let manifest = read_staging_manifest(&manifest_path, &staging.manifest_hash)?;
+        let staging_root = manifest_path
+            .parent()
+            .ok_or_else(|| AgentFsError::missing_commit_snapshot(&commit.commit_id))?;
+        let local_root = resolved
+            .source
+            .local_root
+            .clone()
+            .unwrap_or_else(PathBuf::new);
+
+        match materialize_staged_commit(
+            &rt,
+            &resolved.operator,
+            &self.store,
+            &resolved.source.name,
+            &local_root,
+            staging_root,
+            &manifest,
+        ) {
+            Ok(sync) if sync.conflicts == 0 => {
+                commit.materialization_state = AgentFsMaterializationState::Materialized;
+                commit.materialized_at_ms = Some(agentfs::now_ms());
+                commit.error = None;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+                let materialized_event = agentfs::event_record(
+                    &resolved.fs.fs_id,
+                    "commit.materialized",
+                    &actor.agent_id,
+                    &commit.commit_id,
+                    None,
+                    serde_json::json!({ "pushed": sync.pushed, "pulled": sync.pulled, "repair": true }),
+                )?;
+                agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
+                if !local_root.as_os_str().is_empty() {
+                    write_root_marker_for_agentfs(
+                        &resolved.source.name,
+                        &local_root,
+                        &resolved.fs.fs_id,
+                        &resolved.fs.source_profile_id,
+                        &actor.agent_id,
+                        &actor.installation_id,
+                        &self.control_service.endpoint(),
+                        Some(commit.commit_id.clone()),
+                    )?;
+                    self.store.upsert_agentfs_mount(&AgentFsMountRecord {
+                        source_name: resolved.source.name.clone(),
+                        fs_id: resolved.fs.fs_id.clone(),
+                        source_profile_id: resolved.fs.source_profile_id.clone(),
+                        agent_id: actor.agent_id.clone(),
+                        installation_id: actor.installation_id.clone(),
+                        local_root: local_root.clone(),
+                        base_commit_id: Some(commit.commit_id.clone()),
+                        updated_at_ms: agentfs::now_ms(),
+                    })?;
+                }
+                Ok(AgentFsCommitApplyResult { commit, sync })
+            }
+            Ok(sync) => {
+                commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
+                commit.error = Some(format!(
+                    "repair source materialization reported {} conflict(s)",
+                    sync.conflicts
+                ));
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+                write_materialization_failed_event(
+                    &rt,
+                    &resolved.operator,
+                    &resolved.fs.fs_id,
+                    &actor.agent_id,
+                    &commit,
+                )?;
+                anyhow::bail!(AgentFsError::materialization_failed(
+                    &resolved.fs.fs_id,
+                    commit.error.as_deref().unwrap_or("repair failed"),
+                ));
+            }
+            Err(err) => {
+                commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
+                commit.error = Some(err.to_string());
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+                write_materialization_failed_event(
+                    &rt,
+                    &resolved.operator,
+                    &resolved.fs.fs_id,
+                    &actor.agent_id,
+                    &commit,
+                )?;
+                Err(AgentFsError::materialization_failed(
+                    &resolved.fs.fs_id,
+                    commit.error.as_deref().unwrap_or("repair failed"),
                 )
                 .into())
             }
@@ -1375,6 +1590,308 @@ fn write_materialization_failed_event(
         serde_json::json!({ "error": commit.error }),
     )?;
     agentfs::write_event(rt, operator, &event)
+}
+
+fn prepare_staging_snapshot(
+    data_dir: &Path,
+    fs_id: &str,
+    commit_id: &str,
+    base_commit_id: &Option<String>,
+    local_root: &Path,
+    dirty_paths: &[AgentFsCommitPathRecord],
+) -> Result<PreparedAgentFsCommit> {
+    let staging_root = data_dir
+        .join("agentfs")
+        .join("staging")
+        .join(fs_id)
+        .join(commit_id);
+    let files_root = staging_root.join("files");
+    fs::create_dir_all(&files_root)?;
+
+    let mut manifest_paths = Vec::with_capacity(dirty_paths.len());
+    let mut commit_paths = Vec::with_capacity(dirty_paths.len());
+
+    for (index, dirty) in dirty_paths.iter().enumerate() {
+        let local_path = local_root.join(&dirty.path);
+        let mut staged_path = None;
+        let mut hash = None;
+        let mut size = None;
+
+        if dirty.op != "delete" {
+            match dirty.kind.as_str() {
+                "file" => {
+                    let bytes = fs::read(&local_path).map_err(|err| {
+                        anyhow::anyhow!(
+                            "failed to stage file {} for commit {commit_id}: {err}",
+                            local_path.display()
+                        )
+                    })?;
+                    let relative_staged_path = format!("files/{index}");
+                    fs::write(staging_root.join(&relative_staged_path), &bytes)?;
+                    size = Some(bytes.len() as u64);
+                    hash = Some(hash_bytes(&bytes));
+                    staged_path = Some(relative_staged_path);
+                }
+                "dir" => {
+                    if !local_path.is_dir() {
+                        bail!(
+                            "failed to stage directory {} for commit {commit_id}: path is not a directory",
+                            local_path.display()
+                        );
+                    }
+                }
+                other => bail!("unsupported AgentFS staged path kind {other}"),
+            }
+        }
+
+        manifest_paths.push(AgentFsStagedPathRecord {
+            path: dirty.path.clone(),
+            op: dirty.op.clone(),
+            kind: dirty.kind.clone(),
+            hash: hash.clone(),
+            size,
+            staged_path,
+            previous_version: dirty.previous_version.clone(),
+        });
+        commit_paths.push(AgentFsCommitPathRecord {
+            path: dirty.path.clone(),
+            kind: dirty.kind.clone(),
+            op: dirty.op.clone(),
+            local_version: hash,
+            previous_version: dirty.previous_version.clone(),
+        });
+    }
+
+    let manifest = AgentFsStagingManifest {
+        schema_version: agentfs::SCHEMA_VERSION,
+        fs_id: fs_id.to_string(),
+        commit_id: commit_id.to_string(),
+        base_commit_id: base_commit_id.clone(),
+        created_at_ms: agentfs::now_ms(),
+        paths: manifest_paths,
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+    let manifest_hash = hash_bytes(&manifest_bytes);
+    let manifest_path = staging_root.join("manifest.json");
+    fs::write(&manifest_path, manifest_bytes)?;
+
+    Ok(PreparedAgentFsCommit {
+        commit_id: commit_id.to_string(),
+        manifest,
+        manifest_path,
+        manifest_hash,
+        paths: commit_paths,
+    })
+}
+
+fn read_staging_manifest(
+    manifest_path: &Path,
+    expected_manifest_hash: &str,
+) -> Result<AgentFsStagingManifest> {
+    let bytes = fs::read(manifest_path).map_err(|_| {
+        AgentFsError::missing_commit_snapshot(
+            manifest_path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .unwrap_or("<unknown>"),
+        )
+    })?;
+    let actual_hash = hash_bytes(&bytes);
+    if actual_hash != expected_manifest_hash {
+        anyhow::bail!(AgentFsError::malformed_metadata(format!(
+            "staging manifest {} hash mismatch",
+            manifest_path.display()
+        )));
+    }
+    serde_json::from_slice(&bytes).map_err(|err| {
+        AgentFsError::malformed_metadata(format!(
+            "failed to parse staging manifest {}: {err}",
+            manifest_path.display()
+        ))
+        .into()
+    })
+}
+
+fn materialize_staged_commit(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    store: &ProviderStore,
+    source_name: &str,
+    local_root: &Path,
+    staging_root: &Path,
+    manifest: &AgentFsStagingManifest,
+) -> Result<SourceSyncResult> {
+    let mut pushed = 0;
+    let mut events_emitted = 0;
+
+    let mut deletes = manifest
+        .paths
+        .iter()
+        .filter(|path| path.op == "delete")
+        .collect::<Vec<_>>();
+    deletes.sort_by(|left, right| {
+        right
+            .path
+            .matches('/')
+            .count()
+            .cmp(&left.path.matches('/').count())
+            .then_with(|| right.path.cmp(&left.path))
+    });
+    for path in deletes {
+        delete_remote_staged_path(rt, operator, path)?;
+        store.remove_path_sync_state(source_name, &path.path)?;
+        store.append_sync_event(
+            source_name,
+            &path.path,
+            "synced_to_remote",
+            "ready",
+            agentfs::now_ms(),
+        )?;
+        pushed += 1;
+        events_emitted += 1;
+    }
+
+    let mut creates = manifest
+        .paths
+        .iter()
+        .filter(|path| path.op != "delete")
+        .collect::<Vec<_>>();
+    creates.sort_by(|left, right| {
+        staged_kind_rank(&left.kind)
+            .cmp(&staged_kind_rank(&right.kind))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    for path in creates {
+        materialize_staged_path(rt, operator, staging_root, path)?;
+        store.upsert_path_sync_state(&PathSyncStateRecord {
+            source_name: source_name.to_string(),
+            path: path.path.clone(),
+            entry_kind: path.kind.clone(),
+            public_state: "ready".to_string(),
+            local_present: true,
+            dirty_local: false,
+            dirty_remote: false,
+            pinned: false,
+            stale: false,
+            last_local_version: path.hash.clone(),
+            base_remote_version: path.hash.clone(),
+            current_remote_version: path.hash.clone(),
+        })?;
+        store.append_sync_event(
+            source_name,
+            &path.path,
+            "synced_to_remote",
+            "ready",
+            agentfs::now_ms(),
+        )?;
+        pushed += 1;
+        events_emitted += 1;
+    }
+
+    Ok(SourceSyncResult {
+        source_id: source_name.to_string(),
+        local_root: local_root.to_path_buf(),
+        pulled: 0,
+        pushed,
+        conflicts: 0,
+        events_emitted,
+        local_scan: LocalScanStats::default(),
+        remote_scan: RemoteScanStats::default(),
+    })
+}
+
+fn staged_kind_rank(kind: &str) -> u8 {
+    match kind {
+        "dir" => 0,
+        _ => 1,
+    }
+}
+
+fn materialize_staged_path(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    staging_root: &Path,
+    path: &AgentFsStagedPathRecord,
+) -> Result<()> {
+    match path.kind.as_str() {
+        "dir" => ensure_remote_dir_for_agentfs(rt, operator, &path.path),
+        "file" => {
+            let staged_path = path
+                .staged_path
+                .as_deref()
+                .ok_or_else(|| AgentFsError::missing_commit_snapshot(&path.path))?;
+            let bytes = fs::read(staging_root.join(staged_path))
+                .map_err(|_| AgentFsError::missing_commit_snapshot(&path.path))?;
+            if path.hash.as_deref() != Some(hash_bytes(&bytes).as_str()) {
+                anyhow::bail!(AgentFsError::malformed_metadata(format!(
+                    "staged file {} hash mismatch",
+                    path.path
+                )));
+            }
+            ensure_remote_parent_dirs_for_agentfs(rt, operator, &path.path)?;
+            rt.block_on(operator.write(&path.path, bytes))?;
+            Ok(())
+        }
+        other => bail!("unsupported AgentFS staged path kind {other}"),
+    }
+}
+
+fn delete_remote_staged_path(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    path: &AgentFsStagedPathRecord,
+) -> Result<()> {
+    let result = match path.kind.as_str() {
+        "dir" => rt.block_on(operator.remove_all(&normalized_dir_for_agentfs(&path.path))),
+        "file" => rt.block_on(operator.delete(&path.path)),
+        other => bail!("unsupported AgentFS staged path kind {other}"),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == opendal::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn ensure_remote_dir_for_agentfs(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    source_path: &str,
+) -> Result<()> {
+    ensure_remote_parent_dirs_for_agentfs(rt, operator, source_path)?;
+    rt.block_on(operator.create_dir(&normalized_dir_for_agentfs(source_path)))?;
+    Ok(())
+}
+
+fn ensure_remote_parent_dirs_for_agentfs(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    source_path: &str,
+) -> Result<()> {
+    if let Some((parent, _)) = source_path.rsplit_once('/') {
+        let mut current = String::new();
+        for segment in parent.split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            if !current.is_empty() {
+                current.push('/');
+            }
+            current.push_str(segment);
+            rt.block_on(operator.create_dir(&normalized_dir_for_agentfs(&current)))?;
+        }
+    }
+    Ok(())
+}
+
+fn normalized_dir_for_agentfs(path: &str) -> String {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}/")
+    }
 }
 
 fn collect_dirty_paths(

@@ -87,7 +87,7 @@ These must be handled before making stronger claims about AgentFS correctness.
 | 3 / 49 | `watch` and replay cannot observe AgentFS events. | confirmed | fixed-local |
 | 5 | Commit dirty detection compares local tree to current remote, not the mounted base/path sync state. | confirmed | open |
 | 7 | A second granted agent cannot attach by grant alone; it still needs manual source setup. | confirmed | fixed-local |
-| 12 | Commit record and actual materialization have a TOCTOU gap. | confirmed | open |
+| 12 | Commit record and actual materialization have a TOCTOU gap. | confirmed | fixed-local |
 | 18 | `fs create` can create `head=null` over a non-empty backing source. | confirmed | fixed-local |
 | 19 | Stale-base checks trust editable `.section/root.json`. | confirmed | open |
 | 20 | Governance state can advance before event writes succeed. | confirmed | open |
@@ -107,7 +107,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 8 | Multiple local roots per FS are not implemented; current store is still source-level single-root. | decision | decision-needed |
 | 9 | AgentFS JSON error contract is incomplete and inconsistent. | confirmed | open |
 | 10 | Shared metadata lacks schema/version/cross-record consistency validation. | confirmed | open |
-| 13 | Materialization retry/repair does not exist. | confirmed | open |
+| 13 | Materialization retry/repair does not exist. | confirmed | fixed-local |
 | 14 | Event ordering can reverse within the same millisecond due to random suffix sorting. | confirmed | fixed-local |
 | 15 | FS metadata initialization is not failure-safe. | confirmed | open |
 | 16 | Non-UTF-8 local paths are lossy-converted instead of rejected. | confirmed | open |
@@ -195,8 +195,8 @@ This table preserves every reviewer finding for traceability.
 | 9 | JSON error contract is incomplete. | P1 | confirmed | open | Route all AgentFS CLI errors through typed error payloads. |
 | 10 | Shared metadata lacks schema/version/consistency validation. | P1 | confirmed | open | Add validation traits for every metadata record. |
 | 11 | `fs status` role can be wrong with multiple grants. | P2 | partial | fixed-local | Keep grant replacement tests; handle legacy duplicate active grants if needed. |
-| 12 | Commit record can differ from actual materialized bytes. | P0 | confirmed | open | Freeze or stage local snapshot before accepted commit. |
-| 13 | Materialization retry/repair is missing. | P1 | confirmed | open | Add retry command using existing commit id. |
+| 12 | Commit record can differ from actual materialized bytes. | P0 | confirmed | fixed-local | Commit now stages dirty paths first and materializes from the staging snapshot. |
+| 13 | Materialization retry/repair is missing. | P1 | confirmed | fixed-local | `commit repair` reuses the original commit id and staging snapshot. |
 | 14 | Event ordering can reverse within the same millisecond. | P1 | confirmed | fixed-local | Events now carry monotonic per-FS `seq` and replay sorts by `seq`. |
 | 15 | FS metadata initialization is not failure-safe. | P1 | confirmed | open | Stage metadata or add initialization state and recovery. |
 | 16 | Non-UTF-8 paths are lossy converted. | P1 | confirmed | open | Reject non-UTF-8 paths with typed error. |
@@ -266,11 +266,11 @@ Before more code, settle these contract decisions:
 
 After the decisions above, prioritize:
 
-1. trusted mount base and commit dirty detection (#5, #12, #19, #44),
-2. materialization repair (#13),
-3. safe FS initialization and recovery (#6, #15, #20),
-4. schema validation and backend-level event immutability (#10, #51),
-5. local root canonicalization and overlap (#39, #47).
+1. trusted mount base and commit dirty detection (#5, #19, #44),
+2. safe FS initialization and recovery (#6, #15, #20),
+3. schema validation and backend-level event immutability (#10, #51),
+4. local root canonicalization and overlap (#39, #47),
+5. complete JSON error contract (#9).
 
 ## Verification Record
 
