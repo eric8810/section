@@ -948,6 +948,49 @@ fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
     );
 }
 
+#[test]
+fn e2e_event_write_failure_does_not_advance_commit_head() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    let events_path = fixture.remote_root.join(".section/agentfs/events");
+    fs::remove_dir_all(&events_path).expect("remove events directory");
+    fs::write(&events_path, "not a directory").expect("block event writes");
+
+    owner.write_local("blocked.txt", "must stay local");
+    let rejected = owner.commit_apply_output("must not advance without event");
+    assert_json_error(&rejected, "operation_failed");
+
+    let head = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    assert!(
+        head["commit_id"].is_null(),
+        "head must not advance when commit.accepted event cannot be written"
+    );
+    let commits_path = fixture.remote_root.join(".section/agentfs/commits");
+    let commit_count = if commits_path.exists() {
+        fs::read_dir(&commits_path)
+            .expect("read commits directory")
+            .count()
+    } else {
+        0
+    };
+    assert_eq!(
+        commit_count, 0,
+        "event log preflight failure must not write a commit record"
+    );
+    assert!(
+        !fixture.path("blocked.txt").exists(),
+        "event write failure must not materialize user content"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn e2e_commit_success_survives_local_marker_update_failure() {

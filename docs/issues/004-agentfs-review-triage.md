@@ -90,7 +90,7 @@ These must be handled before making stronger claims about AgentFS correctness.
 | 12 | Commit record and actual materialization have a TOCTOU gap. | confirmed | fixed-local |
 | 18 | `fs create` can create `head=null` over a non-empty backing source. | confirmed | fixed-local |
 | 19 | Stale-base checks trust editable `.section/root.json`. | confirmed | fixed-local |
-| 20 | Governance state can advance before event writes succeed. | confirmed | open |
+| 20 | Governance state can advance before event writes succeed. | confirmed | partial |
 | 23 | `fs attach --json` can expose backing source options and credentials. | confirmed | fixed-local |
 | 34 | Local symlinks are followed and can expose files outside the working root. | confirmed | fixed-local |
 | 42 | The `fs` provider can attach the backing root as the working root, collapsing the truth boundary. | confirmed | fixed-local |
@@ -203,7 +203,7 @@ This table preserves every reviewer finding for traceability.
 | 17 | Materialization failure does not emit `fs.error`. | P2 | confirmed | open | Emit both commit failure and FS state event. |
 | 18 | Non-empty backing source can become head-null FS truth. | P0 | confirmed | fixed-local | Reject non-empty backing source or import it as initial commit. |
 | 19 | Stale-base check trusts editable root marker. | P0 | confirmed | fixed-local | Commit/status use the trusted local mount store for base; E2E verifies marker base tampering cannot bypass stale-base. |
-| 20 | Governance mutation can succeed while event write fails. | P0 | confirmed | open | Make event write part of atomic mutation or add recoverable outbox. |
+| 20 | Governance mutation can succeed while event write fails. | P0 | confirmed | partial | Commit accepted/materialized state now writes the required event before advancing head or commit state; still need a service-side event authority or recoverable outbox for all mirrored governance mutations. |
 | 21 | Failed attach can leave half-bound working copy. | P2 | partial | fixed-local | Keep rollback tests; still check failures after event write. |
 | 22 | `fs list/status` expose metadata without read grant. | P2 | decision | decision-needed | Decide whether discoverability is allowed; otherwise filter by grant. |
 | 23 | `fs attach --json` can leak source credentials. | P0 | confirmed | fixed-local | Use sanitized source result or remove source options from attach JSON. |

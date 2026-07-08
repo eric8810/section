@@ -256,6 +256,7 @@ impl SectiondControlPlane {
         let mutation =
             self.control_service
                 .fs_grant(&resolved.fs.fs_id, &actor.agent_id, agent_id, role)?;
+        agentfs::ensure_event_log_ready(&rt, &resolved.operator, &resolved.fs.fs_id)?;
         for revoked in &mutation.revoked {
             agentfs::write_grant(&rt, &resolved.operator, revoked)?;
         }
@@ -273,6 +274,7 @@ impl SectiondControlPlane {
         let mutation =
             self.control_service
                 .fs_revoke(&resolved.fs.fs_id, &actor.agent_id, agent_id)?;
+        agentfs::ensure_event_log_ready(&rt, &resolved.operator, &resolved.fs.fs_id)?;
         for revoked in &mutation.revoked {
             agentfs::write_grant(&rt, &resolved.operator, revoked)?;
         }
@@ -690,13 +692,6 @@ impl SectiondControlPlane {
                 error: None,
             };
 
-            agentfs::write_commit(&rt, &resolved.operator, &commit)?;
-            agentfs::write_json(
-                &rt,
-                &resolved.operator,
-                agentfs::HEAD_PATH,
-                &agentfs::head_record(&resolved.fs.fs_id, Some(commit.commit_id.clone())),
-            )?;
             let accepted_event = agentfs::event_record(
                 &resolved.fs.fs_id,
                 "commit.accepted",
@@ -709,7 +704,15 @@ impl SectiondControlPlane {
                     "authorized_by": authorized_by,
                 }),
             )?;
+            agentfs::ensure_event_log_ready(&rt, &resolved.operator, &resolved.fs.fs_id)?;
+            agentfs::write_commit(&rt, &resolved.operator, &commit)?;
             agentfs::write_event(&rt, &resolved.operator, &accepted_event)?;
+            agentfs::write_json(
+                &rt,
+                &resolved.operator,
+                agentfs::HEAD_PATH,
+                &agentfs::head_record(&resolved.fs.fs_id, Some(commit.commit_id.clone())),
+            )?;
             Ok(commit)
         })();
         agentfs::release_head_lock(&rt, &resolved.operator, &lock)?;
@@ -730,7 +733,6 @@ impl SectiondControlPlane {
             Ok(sync) if sync.conflicts == 0 => {
                 commit.materialization_state = AgentFsMaterializationState::Materialized;
                 commit.materialized_at_ms = Some(agentfs::now_ms());
-                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 let materialized_event = agentfs::event_record(
                     &resolved.fs.fs_id,
                     "commit.materialized",
@@ -740,6 +742,7 @@ impl SectiondControlPlane {
                     serde_json::json!({ "pushed": sync.pushed, "pulled": sync.pulled }),
                 )?;
                 agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 let warnings = self.record_local_materialized_commit(
                     &resolved.source.name,
                     &local_root,
@@ -761,7 +764,6 @@ impl SectiondControlPlane {
                     "source sync reported {} conflict(s)",
                     sync.conflicts
                 ));
-                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 write_materialization_failed_event(
                     &rt,
                     &resolved.operator,
@@ -769,6 +771,7 @@ impl SectiondControlPlane {
                     &actor.agent_id,
                     &commit,
                 )?;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 anyhow::bail!(AgentFsError::materialization_failed(
                     &resolved.fs.fs_id,
                     commit.error.as_deref().unwrap_or("source sync failed"),
@@ -777,7 +780,6 @@ impl SectiondControlPlane {
             Err(err) => {
                 commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
                 commit.error = Some(err.to_string());
-                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 write_materialization_failed_event(
                     &rt,
                     &resolved.operator,
@@ -785,6 +787,7 @@ impl SectiondControlPlane {
                     &actor.agent_id,
                     &commit,
                 )?;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 Err(AgentFsError::materialization_failed(
                     &resolved.fs.fs_id,
                     commit.error.as_deref().unwrap_or("source sync failed"),
@@ -881,7 +884,6 @@ impl SectiondControlPlane {
                 commit.materialization_state = AgentFsMaterializationState::Materialized;
                 commit.materialized_at_ms = Some(agentfs::now_ms());
                 commit.error = None;
-                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 let materialized_event = agentfs::event_record(
                     &resolved.fs.fs_id,
                     "commit.materialized",
@@ -891,6 +893,7 @@ impl SectiondControlPlane {
                     serde_json::json!({ "pushed": sync.pushed, "pulled": sync.pulled, "repair": true }),
                 )?;
                 agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 let mut warnings = Vec::new();
                 if !local_root.as_os_str().is_empty() {
                     warnings.extend(self.record_local_materialized_commit(
@@ -915,7 +918,6 @@ impl SectiondControlPlane {
                     "repair source materialization reported {} conflict(s)",
                     sync.conflicts
                 ));
-                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 write_materialization_failed_event(
                     &rt,
                     &resolved.operator,
@@ -923,6 +925,7 @@ impl SectiondControlPlane {
                     &actor.agent_id,
                     &commit,
                 )?;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 anyhow::bail!(AgentFsError::materialization_failed(
                     &resolved.fs.fs_id,
                     commit.error.as_deref().unwrap_or("repair failed"),
@@ -931,7 +934,6 @@ impl SectiondControlPlane {
             Err(err) => {
                 commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
                 commit.error = Some(err.to_string());
-                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 write_materialization_failed_event(
                     &rt,
                     &resolved.operator,
@@ -939,6 +941,7 @@ impl SectiondControlPlane {
                     &actor.agent_id,
                     &commit,
                 )?;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 Err(AgentFsError::materialization_failed(
                     &resolved.fs.fs_id,
                     commit.error.as_deref().unwrap_or("repair failed"),
@@ -1494,6 +1497,7 @@ fn mirror_created_filesystem(
     operator: &Operator,
     created: &FilesystemCreateResult,
 ) -> Result<()> {
+    agentfs::ensure_event_log_ready(rt, operator, &created.fs.fs_id)?;
     agentfs::write_json(rt, operator, agentfs::FS_PATH, &created.fs)?;
     agentfs::write_json(
         rt,

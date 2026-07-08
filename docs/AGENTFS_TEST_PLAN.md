@@ -537,7 +537,20 @@ truth. If the implementation cannot create this race deterministically, the E2E
 can use a test hook or slow provider later; until then this remains a required
 product-complete scenario.
 
-#### 13. Materialization Failure Blocks New Commits
+#### 13. Event Write Failure Does Not Advance Commit Head
+
+| Step | Actor | Command or action | Expected |
+| --- | --- | --- | --- |
+| 1 | owner | create and attach FS | head has no commit |
+| 2 | test harness | make AgentFS event writes fail | event stream cannot accept new event |
+| 3 | owner | `commit apply` dirty local file | command fails |
+| 4 | test | inspect head and backing source | head is unchanged; user file is not materialized |
+
+This proves a `commit.accepted` event is required before head advances. It does
+not yet prove every Control Service mutation and every backing-source mirror
+write are one distributed transaction.
+
+#### 14. Materialization Failure Blocks New Commits
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -550,7 +563,7 @@ This proves governance truth can advance independently from file
 materialization, and that the system does not accept follow-up mutations while
 the head is not materialized.
 
-#### 14. Granted Agent Bootstrap Is Product-Visible
+#### 15. Granted Agent Bootstrap Is Product-Visible
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -564,7 +577,7 @@ the head is not materialized.
 This proves grants lead to usable access from the grantee's perspective. The
 required product-complete E2E is server-side share discovery and accept.
 
-#### 15. Local Root Identity Is Stable
+#### 16. Local Root Identity Is Stable
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -616,7 +629,7 @@ temp/
 - Section Control Service harness，用来测试 share、discovery、grant、credential。
 - 临时 hook script，用来记录输入 JSON、返回成功或失败。
 
-#### 16. Trusted Dirty Base And Status
+#### 17. Trusted Dirty Base And Status
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -630,7 +643,7 @@ temp/
 This proves Section compares local work against the mounted base, not only the
 current remote files.
 
-#### 17. Commit Snapshot Isolation
+#### 18. Commit Snapshot Isolation
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -643,7 +656,7 @@ current remote files.
 This proves accepted commit metadata describes the bytes that became shared
 truth.
 
-#### 18. Materialization Repair
+#### 19. Materialization Repair
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -655,7 +668,7 @@ truth.
 
 This proves repair fixes the accepted head instead of creating a second truth.
 
-#### 19. Metadata Validation And Bad Data Isolation
+#### 20. Metadata Validation And Bad Data Isolation
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -668,7 +681,7 @@ This proves repair fixes the accepted head instead of creating a second truth.
 
 This proves bad metadata is isolated to the affected FS or lookup candidate.
 
-#### 20. Event Immutability And Sequence Replay
+#### 21. Event Immutability And Sequence Replay
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -680,7 +693,7 @@ This proves bad metadata is isolated to the affected FS or lookup candidate.
 
 This proves events are append-only and replayable.
 
-#### 21. Source And Path Guardrails
+#### 22. Source And Path Guardrails
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -692,7 +705,7 @@ This proves events are append-only and replayable.
 
 This proves low-level source/path commands do not silently bypass AgentFS.
 
-#### 22. JSON Error Contract
+#### 23. JSON Error Contract
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -704,7 +717,7 @@ This proves low-level source/path commands do not silently bypass AgentFS.
 
 This proves Agent callers can make decisions from stable error codes.
 
-#### 23. File/Dir Replacement Preflight
+#### 24. File/Dir Replacement Preflight
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -717,7 +730,7 @@ This proves Agent callers can make decisions from stable error codes.
 This proves commit acceptance knows whether materialization can execute the path
 plan safely.
 
-#### 24. Local Root Identity And Overlap
+#### 25. Local Root Identity And Overlap
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -729,7 +742,7 @@ plan safely.
 
 This proves root identity is stable and nested roots cannot leak control files.
 
-#### 25. Server Share And Accept
+#### 26. Server Share And Accept
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -744,7 +757,7 @@ This proves root identity is stable and nested roots cannot leak control files.
 
 This proves a grant can become usable access through the service control plane.
 
-#### 26. AgentFS Events Replay And Watch
+#### 27. AgentFS Events Replay And Watch
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -755,7 +768,7 @@ This proves a grant can become usable access through the service control plane.
 
 This proves a passive Agent can observe changes without reading metadata files.
 
-#### 27. Authorizing Grant Audit
+#### 28. Authorizing Grant Audit
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -768,7 +781,7 @@ This proves a passive Agent can observe changes without reading metadata files.
 
 This proves every accepted mutation explains which authority allowed it.
 
-#### 28. FS Status As Agent Decision Surface
+#### 29. FS Status As Agent Decision Surface
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -780,7 +793,7 @@ This proves every accepted mutation explains which authority allowed it.
 
 This proves `fs status` is enough for an Agent to decide whether it can act.
 
-#### 29. Post-Event Hook Automation
+#### 30. Post-Event Hook Automation
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -793,7 +806,7 @@ This proves `fs status` is enough for an Agent to decide whether it can act.
 This proves hooks can automate work from AgentFS events and require manage
 authority.
 
-#### 30. Blocking Preflight Hook
+#### 31. Blocking Preflight Hook
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -805,7 +818,7 @@ authority.
 
 This proves blocking hooks can allow or block commit acceptance.
 
-#### 31. `AGENTS.md` Rule Enforcement
+#### 32. `AGENTS.md` Rule Enforcement
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -819,7 +832,7 @@ This proves blocking hooks can allow or block commit acceptance.
 This proves FS-local rules affect commit decisions only through defined
 machine-readable rules.
 
-#### 32. Proposal And Approval Commit
+#### 33. Proposal And Approval Commit
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -832,7 +845,7 @@ machine-readable rules.
 
 This proves proposal/approval is a separate path from direct commit.
 
-#### 33. Path-Scoped Grants
+#### 34. Path-Scoped Grants
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -861,7 +874,7 @@ and P1 gaps:
 | Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 已有第一版：failed head 阻塞后续 commit，`commit repair` 用原 staging snapshot 修复同一个 commit。 |
 | Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 部分实现：已有 backing root、父子 root、runtime guardrails。还缺持久 `mount_id`/canonical root 完整断言。 |
 | Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
-| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 event `seq` 和事件路径覆盖拒绝；还缺统一 schema validation、坏数据隔离、backend create-if-absent 断言。 |
+| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 event `seq`、事件路径覆盖拒绝、commit accepted 事件失败不推进 head；还缺统一 schema validation、坏数据隔离、backend create-if-absent 断言，以及服务端事件源或 outbox。 |
 | JSON error contract | Agent callers need stable machine-readable failures. | 已有第一版：`agent`、`fs`、`commit`、`watch --agentfs` 在 `--json` 失败时输出稳定 `error.code`、`retryable`、`details`。参数错误是 `invalid_arguments`，普通运行错误统一落到 `operation_failed`。 |
 | File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 已有第一版：同一路径文件/目录类型替换会在 accepted commit 写入前失败，返回 `path_type_conflict`。 |
 | FS status decision surface | Agents need one command to know whether they can act. | 已有第一版：`fs status --json` 支持本地 path，输出 role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
@@ -895,6 +908,7 @@ It covers the product behaviors that are implemented today:
 | `e2e_backing_source_drift_cannot_be_committed_over` | backing source 被外部直接修改后，commit 返回 `remote_drift`；head、backing file、accepted event 数量都不变 |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
 | `e2e_rejects_file_dir_type_replacement_before_acceptance` | file/dir type replacement is rejected before a new accepted commit; head and backing source remain unchanged |
+| `e2e_event_write_failure_does_not_advance_commit_head` | `commit.accepted` event 写失败时，commit 命令失败；head 不前进，用户文件不物化 |
 | `e2e_commit_success_survives_local_marker_update_failure` | accepted/materialized commit still succeeds when final local marker update fails; warning is returned and trusted mount base is updated |
 | `e2e_hardening_rejects_symlink_commit_paths` | symlink paths cannot materialize files outside the working root |
 

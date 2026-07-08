@@ -641,6 +641,20 @@ pub fn write_event(
     write_json(rt, op, &path, &event)
 }
 
+pub fn ensure_event_log_ready(
+    rt: &tokio::runtime::Runtime,
+    op: &Operator,
+    fs_id: &str,
+) -> Result<()> {
+    let probe_path = format!("{METADATA_ROOT}/events/.ready");
+    ensure_remote_parent_dirs(rt, op, &probe_path)
+        .with_context(|| format!("failed to prepare AgentFS event log for fs {fs_id}"))?;
+    rt.block_on(op.write(&probe_path, b"ready".to_vec()))
+        .with_context(|| format!("failed to write AgentFS event log probe for fs {fs_id}"))?;
+    let _ = rt.block_on(op.delete(&probe_path));
+    Ok(())
+}
+
 pub fn write_commit(
     rt: &tokio::runtime::Runtime,
     op: &Operator,
