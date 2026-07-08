@@ -189,6 +189,8 @@ pub struct AgentFsCommitRecord {
 pub struct AgentFsEventRecord {
     pub schema_version: u32,
     pub event_id: String,
+    #[serde(default)]
+    pub seq: i64,
     pub fs_id: String,
     pub kind: String,
     pub actor_agent_id: String,
@@ -431,6 +433,7 @@ pub fn event_record(
     Ok(AgentFsEventRecord {
         schema_version: SCHEMA_VERSION,
         event_id: new_event_id(created_at_ms)?,
+        seq: 0,
         fs_id: fs_id.to_string(),
         kind: kind.to_string(),
         actor_agent_id: actor_agent_id.to_string(),
@@ -535,13 +538,17 @@ pub fn write_event(
     op: &Operator,
     event: &AgentFsEventRecord,
 ) -> Result<()> {
+    let mut event = event.clone();
+    if event.seq <= 0 {
+        event.seq = next_event_seq(rt, op)?;
+    }
     let path = format!("{METADATA_ROOT}/events/{}.json", event.event_id);
     match rt.block_on(op.stat(&path)) {
         Ok(_) => anyhow::bail!(AgentFsError::metadata_write_conflict(&event.fs_id)),
         Err(err) if err.kind() == opendal::ErrorKind::NotFound => {}
         Err(err) => return Err(err.into()),
     }
-    write_json(rt, op, &path, event)
+    write_json(rt, op, &path, &event)
 }
 
 pub fn write_commit(
@@ -608,8 +615,21 @@ pub fn list_grants(rt: &tokio::runtime::Runtime, op: &Operator) -> Result<Vec<Ag
 pub fn list_events(rt: &tokio::runtime::Runtime, op: &Operator) -> Result<Vec<AgentFsEventRecord>> {
     let mut events: Vec<AgentFsEventRecord> =
         list_json_records(rt, op, &format!("{METADATA_ROOT}/events/"))?;
-    events.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+    events.sort_by(|left, right| {
+        left.seq
+            .cmp(&right.seq)
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
     Ok(events)
+}
+
+fn next_event_seq(rt: &tokio::runtime::Runtime, op: &Operator) -> Result<i64> {
+    let max_seq = list_events(rt, op)?
+        .into_iter()
+        .map(|event| event.seq)
+        .max()
+        .unwrap_or(0);
+    Ok(max_seq + 1)
 }
 
 pub fn initialize_fs_metadata(

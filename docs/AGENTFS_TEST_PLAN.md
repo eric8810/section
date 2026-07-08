@@ -855,14 +855,14 @@ and P1 gaps:
 | Gap | Why It Matters | Current Status |
 | --- | --- | --- |
 | Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness。还缺生产服务端、真实 credential TTL 和刷新。 |
-| AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 未实现。设计已固定：`fs events`、`watch --agentfs`、事件 `seq`。 |
-| Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | 已有第一版审计。还缺完整 replay/watch 输出断言。 |
+| AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 已有第一版：`fs events` 支持 replay/after，`watch --agentfs` 输出 AgentFS 事件，事件有递增 `seq`。还缺更强的服务端事件 API 和并发顺序保障。 |
+| Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | 已有第一版：commit record 和 `commit.accepted` event 记录 `authorized_by`，E2E 已通过 `fs events` 验证。 |
 | Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 部分实现：本地 store 记录 mount/base。还缺 `base_manifest_hash` 和严格 tree diff。 |
 | Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | 未实现。设计已固定：先 staging snapshot，再写 metadata，再从 snapshot 物化。 |
 | Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 部分实现：失败会阻塞后续 commit。还缺 `commit repair` 和 staging-based retry。 |
 | Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 部分实现：已有 backing root、父子 root、runtime guardrails。还缺持久 `mount_id`/canonical root 完整断言。 |
 | Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
-| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。还缺统一 schema validation、坏数据隔离、event `seq`、create-if-absent 断言。 |
+| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 event `seq` 和事件路径覆盖拒绝；还缺统一 schema validation、坏数据隔离、backend create-if-absent 断言。 |
 | JSON error contract | Agent callers need stable machine-readable failures. | 部分实现。还缺所有公开 AgentFS 命令统一 `error.code`、`retryable`、`details`。 |
 | File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 未实现。设计已固定：metadata 写入前生成 path operation plan。 |
 | FS status decision surface | Agents need one command to know whether they can act. | 部分实现。还缺完整 status JSON：role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
@@ -889,7 +889,7 @@ It covers the product behaviors that are implemented today:
 
 | Test | E2E Scenarios Covered |
 | --- | --- |
-| `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; events and commit metadata exist |
+| `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; `fs events` replay、`watch --agentfs`、event `seq`、`authorized_by` 都可验证 |
 | `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit |
 | `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |

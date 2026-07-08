@@ -404,6 +404,24 @@ impl SectiondControlPlane {
         })
     }
 
+    pub fn fs_events(
+        &self,
+        fs_ref: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::AgentFsEventRecord>> {
+        let rt = tokio::runtime::Runtime::new()?;
+        let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
+        let resolved = self.find_agentfs(&rt, &resolved_ref)?;
+        let events = agentfs::list_events(&rt, &resolved.operator)?;
+        let after_seq = parse_event_offset(after, &events)?;
+        Ok(events
+            .into_iter()
+            .filter(|event| event.seq > after_seq)
+            .take(limit)
+            .collect())
+    }
+
     pub fn commit_status(&self, input_path: &Path) -> Result<AgentFsCommitStatus> {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
@@ -867,6 +885,15 @@ impl SectiondControlPlane {
         list_watch_events(&self.store, &source_id, &source_path, after_id)
     }
 
+    pub fn watch_agentfs_events(
+        &self,
+        fs_ref: &str,
+        after_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::AgentFsEventRecord>> {
+        self.fs_events(fs_ref, Some(&after_seq.to_string()), limit)
+    }
+
     pub fn status_snapshot(&self) -> Result<StatusSnapshot> {
         let mount_active = is_mount_active(&self.config.mount_point);
         self.runtime()?
@@ -1038,6 +1065,22 @@ impl SectiondControlPlane {
         })
     }
 
+    fn agentfs_ref_from_local_marker(&self, fs_ref: &str) -> Result<String> {
+        let path = Path::new(fs_ref);
+        let looks_like_path = path.is_absolute()
+            || fs_ref.starts_with('.')
+            || fs_ref.contains(std::path::MAIN_SEPARATOR);
+        if !looks_like_path && !path.exists() {
+            return Ok(fs_ref.to_string());
+        }
+
+        match discover_root_marker(&absolutize_path(path)?) {
+            Ok(marker) => Ok(marker.fs_id.unwrap_or(marker.source_id)),
+            Err(_) if looks_like_path => Err(AgentFsError::unknown_fs(fs_ref).into()),
+            Err(_) => Ok(fs_ref.to_string()),
+        }
+    }
+
     fn rollback_failed_attach(
         &self,
         source_name: &str,
@@ -1064,6 +1107,24 @@ struct ResolvedAgentFs {
     fs: AgentFsRecord,
     head: AgentFsHeadRecord,
     operator: opendal::Operator,
+}
+
+fn parse_event_offset(after: Option<&str>, events: &[crate::AgentFsEventRecord]) -> Result<i64> {
+    let Some(after) = after else {
+        return Ok(0);
+    };
+    let after = after.trim();
+    if after.is_empty() {
+        return Ok(0);
+    }
+    if let Ok(seq) = after.parse::<i64>() {
+        return Ok(seq);
+    }
+    events
+        .iter()
+        .find(|event| event.event_id == after)
+        .map(|event| event.seq)
+        .ok_or_else(|| anyhow::anyhow!("AgentFS event offset {after} was not found"))
 }
 
 fn attached_source_summary(source: &SourceRegistryEntry) -> AgentFsAttachedSource {

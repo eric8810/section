@@ -54,6 +54,9 @@ enum Commands {
     Watch {
         /// Local filesystem path or bound root
         path: PathBuf,
+        /// Watch AgentFS governance events instead of low-level source/path events
+        #[arg(long)]
+        agentfs: bool,
         /// Exit after printing currently available events
         #[arg(long)]
         once: bool,
@@ -253,6 +256,17 @@ pub enum FsAction {
         /// FS name, fs_id, source name, or attached local path
         fs: String,
     },
+    /// Replay AgentFS governance events
+    Events {
+        /// FS name, fs_id, source name, or attached local path
+        fs: String,
+        /// Resume after an event seq or event_id
+        #[arg(long)]
+        after: Option<String>,
+        /// Maximum events to print
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -330,9 +344,17 @@ fn main() -> Result<()> {
         Commands::Path { action } => cmd::path::run(cli.config.as_deref(), action, json),
         Commands::Watch {
             path,
+            agentfs,
             once,
             interval_ms,
-        } => cmd::watch::run(cli.config.as_deref(), &path, once, interval_ms, json),
+        } => cmd::watch::run(
+            cli.config.as_deref(),
+            &path,
+            agentfs,
+            once,
+            interval_ms,
+            json,
+        ),
         Commands::Ls { path, long } => {
             let (config, store) = load_config_and_store(cli.config.as_deref())?;
             cmd::file::ls(&config, &store, path.as_deref(), json, long)

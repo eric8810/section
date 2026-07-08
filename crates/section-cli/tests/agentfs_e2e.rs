@@ -179,6 +179,35 @@ impl AgentFsActor {
         ])
     }
 
+    fn fs_events(&self, fs_ref: &str, after: Option<&str>) -> Value {
+        let mut args = vec![
+            "--json".to_string(),
+            "fs".to_string(),
+            "events".to_string(),
+            fs_ref.to_string(),
+        ];
+        if let Some(after) = after {
+            args.push("--after".to_string());
+            args.push(after.to_string());
+        }
+        self.json_owned(args)
+    }
+
+    fn watch_agentfs_once(&self, fs_ref: &Path) -> Vec<Value> {
+        let output = self.run_owned(vec![
+            "--json".to_string(),
+            "watch".to_string(),
+            fs_ref.to_str().expect("utf8 fs ref").to_string(),
+            "--agentfs".to_string(),
+            "--once".to_string(),
+        ]);
+        assert_success(&output, "watch --agentfs --once");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("watch event json"))
+            .collect()
+    }
+
     fn write_local(&self, relative_path: &str, content: &str) {
         let path = self.local_root.join(relative_path);
         if let Some(parent) = path.parent() {
@@ -335,6 +364,47 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
     assert!(events.contains(&"grant.created".to_string()));
     assert!(events.contains(&"commit.accepted".to_string()));
     assert!(events.contains(&"commit.materialized".to_string()));
+
+    let replay = writer.fs_events(FS_NAME, None);
+    let replay_events = replay["events"].as_array().expect("replay events");
+    assert!(
+        replay_events.len() >= 4,
+        "expected core AgentFS events, got {replay_events:?}"
+    );
+    let mut last_seq = 0;
+    for event in replay_events {
+        let seq = event["seq"].as_i64().expect("event seq");
+        assert!(seq > last_seq, "event seq must increase: {replay_events:?}");
+        last_seq = seq;
+    }
+    let accepted_event = replay_events
+        .iter()
+        .find(|event| event["kind"] == "commit.accepted")
+        .expect("commit.accepted event");
+    assert_eq!(
+        accepted_event["data"]["authorized_by"]["type"], "grant",
+        "writer commit should explain grant authority"
+    );
+    assert_eq!(
+        accepted_event["data"]["authorized_by"]["grant_id"],
+        grant["grant"]["grant_id"]
+    );
+
+    let first_seq = replay_events[0]["seq"].as_i64().expect("first seq");
+    let after = writer.fs_events(FS_NAME, Some(&first_seq.to_string()));
+    assert!(after["events"]
+        .as_array()
+        .expect("after events")
+        .iter()
+        .all(|event| event["seq"].as_i64().expect("after seq") > first_seq));
+
+    let watched = writer.watch_agentfs_once(&writer.local_root);
+    assert!(
+        watched.iter().any(|line| {
+            line["stream"] == "agentfs" && line["event"]["kind"] == "commit.accepted"
+        }),
+        "watch --agentfs should expose commit.accepted, got {watched:?}"
+    );
 
     let owner_fresh_root = fixture.root.join("owner-fresh-root");
     owner.attach_to(&owner_fresh_root);

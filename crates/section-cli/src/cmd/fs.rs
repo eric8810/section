@@ -151,6 +151,21 @@ fn run_inner(config_path: Option<&Path>, action: FsAction, json_mode: bool) -> R
                 );
             }
         }
+        FsAction::Events { fs, after, limit } => {
+            let events = control_plane.fs_events(&fs, after.as_deref(), limit)?;
+            if json_mode {
+                println!("{}", json!({ "ok": true, "events": events }));
+            } else if events.is_empty() {
+                println!("No AgentFS events.");
+            } else {
+                for event in events {
+                    println!(
+                        "[{}] {} {} {}",
+                        event.seq, event.kind, event.fs_id, event.subject_id
+                    );
+                }
+            }
+        }
     }
 
     Ok(())

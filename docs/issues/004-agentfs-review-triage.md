@@ -84,9 +84,9 @@ These must be handled before making stronger claims about AgentFS correctness.
 
 | ID | Finding | Validity | Status |
 | --- | --- | --- | --- |
-| 3 / 49 | `watch` and replay cannot observe AgentFS events. | confirmed | open |
+| 3 / 49 | `watch` and replay cannot observe AgentFS events. | confirmed | fixed-local |
 | 5 | Commit dirty detection compares local tree to current remote, not the mounted base/path sync state. | confirmed | open |
-| 7 | A second granted agent cannot attach by grant alone; it still needs manual source setup. | confirmed | open |
+| 7 | A second granted agent cannot attach by grant alone; it still needs manual source setup. | confirmed | fixed-local |
 | 12 | Commit record and actual materialization have a TOCTOU gap. | confirmed | open |
 | 18 | `fs create` can create `head=null` over a non-empty backing source. | confirmed | fixed-local |
 | 19 | Stale-base checks trust editable `.section/root.json`. | confirmed | open |
@@ -108,10 +108,10 @@ These should be fixed before calling the AgentFS MVP complete.
 | 9 | AgentFS JSON error contract is incomplete and inconsistent. | confirmed | open |
 | 10 | Shared metadata lacks schema/version/cross-record consistency validation. | confirmed | open |
 | 13 | Materialization retry/repair does not exist. | confirmed | open |
-| 14 | Event ordering can reverse within the same millisecond due to random suffix sorting. | confirmed | open |
+| 14 | Event ordering can reverse within the same millisecond due to random suffix sorting. | confirmed | fixed-local |
 | 15 | FS metadata initialization is not failure-safe. | confirmed | open |
 | 16 | Non-UTF-8 local paths are lossy-converted instead of rejected. | confirmed | open |
-| 26 | Accepted commits do not record which grant allowed the mutation. | confirmed | open |
+| 26 | Accepted commits do not record which grant allowed the mutation. | confirmed | fixed-local |
 | 29 | A committed/materialized mutation can be reported as failed if final local marker write fails. | confirmed | open |
 | 39 | Local root identity is not canonicalized. | confirmed | open |
 | 40 | A bad `fs.json` in an unrelated source can block lookup of a healthy FS. | confirmed | open |
@@ -186,18 +186,18 @@ This table preserves every reviewer finding for traceability.
 | --- | --- | --- | --- | --- | --- |
 | 1 | `fs attach` can publish local-only files without accepted commit. | P0 | confirmed | fixed-local | Keep empty-root attach rule; add lower-level source escape protections. |
 | 2 | AgentFS metadata writes have no required head lock. | P1 | partial | partial | Current lock is conservative; add create-if-absent/CAS semantics or document backend limits. |
-| 3 | `watch` cannot observe AgentFS events. | P0 | confirmed | open | Add AgentFS event replay and merge into watch output. |
+| 3 | `watch` cannot observe AgentFS events. | P0 | confirmed | fixed-local | `fs events` and `watch --agentfs` now expose AgentFS events with `seq`. |
 | 4 | Attach/status do not enforce or expose failed materialization. | P2 | partial | fixed-local | Keep tests for attach rejection and status output. |
 | 5 | Commit dirty detection uses current remote, not mounted base/path sync state. | P0 | confirmed | open | Introduce mount-base snapshot or commit-base manifest; detect drift before acceptance. |
 | 6 | `fs create` mutates source registry before validating remote metadata. | P1 | partial | partial | Remote preflight and source rollback are in place; add staged initialization/recovery for partial remote metadata. |
-| 7 | Granted second agent cannot attach by grant alone. | P0 | confirmed | open | Design invite/discovery or shared source bootstrap. |
+| 7 | Granted second agent cannot attach by grant alone. | P0 | confirmed | fixed-local | Keep service-backed `fs share`, `fs available`, `fs accept`, and attach tests. |
 | 8 | Multiple local roots per FS are not supported. | P1 | decision | decision-needed | Decide whether MVP really requires same-local-store multi-root; otherwise update contract. |
 | 9 | JSON error contract is incomplete. | P1 | confirmed | open | Route all AgentFS CLI errors through typed error payloads. |
 | 10 | Shared metadata lacks schema/version/consistency validation. | P1 | confirmed | open | Add validation traits for every metadata record. |
 | 11 | `fs status` role can be wrong with multiple grants. | P2 | partial | fixed-local | Keep grant replacement tests; handle legacy duplicate active grants if needed. |
 | 12 | Commit record can differ from actual materialized bytes. | P0 | confirmed | open | Freeze or stage local snapshot before accepted commit. |
 | 13 | Materialization retry/repair is missing. | P1 | confirmed | open | Add retry command using existing commit id. |
-| 14 | Event ordering can reverse within the same millisecond. | P1 | confirmed | open | Add sequence/monotonic counter under lock or timestamp-plus-counter IDs. |
+| 14 | Event ordering can reverse within the same millisecond. | P1 | confirmed | fixed-local | Events now carry monotonic per-FS `seq` and replay sorts by `seq`. |
 | 15 | FS metadata initialization is not failure-safe. | P1 | confirmed | open | Stage metadata or add initialization state and recovery. |
 | 16 | Non-UTF-8 paths are lossy converted. | P1 | confirmed | open | Reject non-UTF-8 paths with typed error. |
 | 17 | Materialization failure does not emit `fs.error`. | P2 | confirmed | open | Emit both commit failure and FS state event. |
@@ -209,7 +209,7 @@ This table preserves every reviewer finding for traceability.
 | 23 | `fs attach --json` can leak source credentials. | P0 | confirmed | fixed-local | Use sanitized source result or remove source options from attach JSON. |
 | 24 | Grant/revoke target agent id is not validated. | P2 | confirmed | fixed-local | Keep validation tests. |
 | 25 | Grant downgrade leaves old capability active. | P0 | confirmed | fixed-local | Keep replacement semantics and tests. |
-| 26 | Accepted commit does not record authorizing grant. | P1 | confirmed | open | Record grant id or owner authority in commit/event. |
+| 26 | Accepted commit does not record authorizing grant. | P1 | confirmed | fixed-local | Commit records and `commit.accepted` events include `authorized_by`; E2E verifies it through `fs events`. |
 | 27 | `fs status <local path>` is documented but unsupported. | P2 | confirmed | open | Resolve local path via root marker before FS lookup. |
 | 28 | `fs status` lacks dirty/materialization state. | P2 | partial | partial | Materialization state added; dirty state still missing. |
 | 29 | Successful commit can be reported as failed after marker write failure. | P1 | confirmed | open | Treat marker update as post-commit local warning or write marker before final success boundary. |
@@ -231,8 +231,8 @@ This table preserves every reviewer finding for traceability.
 | 45 | File/dir type replacement is accepted then fails materialization. | P1 | confirmed | open | Preflight type conflicts or plan delete-create replacement. |
 | 46 | AgentFS tests do not cover the test plan. | P1 | partial | partial | CLI E2E tests now cover the implemented product path; continue converting product-complete gaps into tests as features land. |
 | 47 | Overlapping local roots can leak child markers. | P1 | confirmed | open | Reject overlapping roots after canonicalization. |
-| 48 | Low-level source commands can break AgentFS markers. | P1 | confirmed | open | Guard source bind/unbind/remove when source is AgentFS-backed, or document escape hatch clearly. |
-| 49 | AgentFS event replay/resume has no control-plane entry. | P0 | covered | open | Covered by #3; add explicit replay API and watch integration. |
+| 48 | Low-level source commands can break AgentFS markers. | P1 | confirmed | fixed-local | Low-level source/path commands reject AgentFS-backed sources by default. |
+| 49 | AgentFS event replay/resume has no control-plane entry. | P0 | covered | fixed-local | `section fs events` supports replay and `--after`; `watch --agentfs` streams the same event records. |
 | 50 | `fs status` swallows corrupt local marker. | P2 | confirmed | open | Report marker error in status output. |
 | 51 | Event files are not immutable. | P1 | partial | partial | Existing event paths are rejected; still need create-if-absent semantics where backend supports it. |
 | 52 | Grant `capabilities` field is not used for enforcement. | P2 | confirmed | fixed-local | Keep enforcement based on stored capabilities; schema validation still needed under #10. |
@@ -261,18 +261,16 @@ Before more code, settle these contract decisions:
 1. Is multi-root per FS required inside one local store for MVP?
 2. Should `fs list/status` reveal FS metadata without read grants?
 3. Is all `.section/**` reserved, or only `.section/agentfs/**` plus local marker?
-4. What is the bootstrap model for a granted agent: invite token, source export, shared source URI, or discovery service?
-5. Are low-level `source` commands official escape hatches, or must they be guarded for AgentFS-backed sources?
 
 ### Next Implementation Batch
 
 After the decisions above, prioritize:
 
-1. AgentFS event replay/watch integration (#3, #49),
-2. trusted mount base and commit dirty detection (#5, #12, #19, #44),
+1. trusted mount base and commit dirty detection (#5, #12, #19, #44),
+2. materialization repair (#13),
 3. safe FS initialization and recovery (#6, #15, #20),
 4. schema validation and backend-level event immutability (#10, #51),
-5. source command guardrails and local root canonicalization (#39, #47, #48).
+5. local root canonicalization and overlap (#39, #47).
 
 ## Verification Record
 
