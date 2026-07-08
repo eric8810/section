@@ -8,8 +8,8 @@ use crate::sync::{
 use crate::{
     agentfs, AgentFsAcceptResult, AgentFsAvailableShare, AgentFsCapability,
     AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsCommitStagingRecord, AgentFsError,
-    AgentFsGrantRecord, AgentFsHeadRecord, AgentFsMaterializationState, AgentFsRecord, AgentFsRole,
-    AgentFsShareResult, ControlServiceStore,
+    AgentFsEventRecord, AgentFsGrantRecord, AgentFsHeadRecord, AgentFsMaterializationState,
+    AgentFsRecord, AgentFsRole, AgentFsShareResult, ControlServiceStore,
 };
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
@@ -532,6 +532,7 @@ impl SectiondControlPlane {
         let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
         let resolved = self.find_agentfs(&rt, &resolved_ref)?;
         let events = agentfs::list_events(&rt, &resolved.operator)?;
+        ensure_events_match_fs(&events, &resolved.fs.fs_id)?;
         let after_seq = parse_event_offset(after, &events)?;
         Ok(events
             .into_iter()
@@ -652,6 +653,7 @@ impl SectiondControlPlane {
                 &resolved.operator,
                 agentfs::HEAD_PATH,
             )?;
+            ensure_head_matches_fs(&current_head, &resolved.fs.fs_id)?;
             let authorized_by = self.control_service.authorize_capability(
                 &resolved.fs.fs_id,
                 &actor.agent_id,
@@ -829,6 +831,7 @@ impl SectiondControlPlane {
                 target_commit_id
             ),
         )?;
+        ensure_commit_matches_head(&commit, &resolved.fs.fs_id, &target_commit_id)?;
         if commit.fs_id != resolved.fs.fs_id {
             anyhow::bail!(AgentFsError::malformed_metadata(format!(
                 "commit {} belongs to fs {}, not {}",
@@ -1365,6 +1368,7 @@ impl SectiondControlPlane {
                 .collect(),
         };
         let head = agentfs::read_json::<AgentFsHeadRecord>(rt, &operator, agentfs::HEAD_PATH)?;
+        ensure_head_matches_fs(&head, &resolved.fs.fs_id)?;
         Ok(ResolvedAgentFs {
             source,
             fs: resolved.fs,
@@ -1714,6 +1718,7 @@ fn ensure_head_is_materialized(
         operator,
         &format!("{}/commits/{}.json", agentfs::METADATA_ROOT, commit_id),
     )?;
+    ensure_commit_matches_head(&commit, &head.fs_id, commit_id)?;
     if commit.materialization_state == AgentFsMaterializationState::Materialized {
         return Ok(());
     }
@@ -1741,7 +1746,50 @@ fn head_materialization_state(
         operator,
         &format!("{}/commits/{}.json", agentfs::METADATA_ROOT, commit_id),
     )?;
+    ensure_commit_matches_head(&commit, &head.fs_id, commit_id)?;
     Ok(Some(commit.materialization_state))
+}
+
+fn ensure_head_matches_fs(head: &AgentFsHeadRecord, fs_id: &str) -> Result<()> {
+    if head.fs_id != fs_id {
+        anyhow::bail!(AgentFsError::malformed_metadata(format!(
+            "head belongs to fs {}, not {}",
+            head.fs_id, fs_id
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_commit_matches_head(
+    commit: &AgentFsCommitRecord,
+    fs_id: &str,
+    commit_id: &str,
+) -> Result<()> {
+    if commit.commit_id != commit_id {
+        anyhow::bail!(AgentFsError::malformed_metadata(format!(
+            "commit file for {commit_id} contains commit {}",
+            commit.commit_id
+        )));
+    }
+    if commit.fs_id != fs_id {
+        anyhow::bail!(AgentFsError::malformed_metadata(format!(
+            "commit {} belongs to fs {}, not {}",
+            commit.commit_id, commit.fs_id, fs_id
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_events_match_fs(events: &[AgentFsEventRecord], fs_id: &str) -> Result<()> {
+    for event in events {
+        if event.fs_id != fs_id {
+            anyhow::bail!(AgentFsError::malformed_metadata(format!(
+                "event {} belongs to fs {}, not {}",
+                event.event_id, event.fs_id, fs_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn write_materialization_failure_events(

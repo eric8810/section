@@ -151,6 +151,9 @@ Rules:
 ## 4. Metadata Schemas
 
 All records include `schema_version: 1`.
+Readers must reject shared metadata with the wrong schema version, invalid IDs,
+invalid AgentFS paths, inconsistent grant capabilities, or cross-record links
+that point at another FS. The JSON error code is `malformed_shared_metadata`.
 
 ### `fs.json`
 

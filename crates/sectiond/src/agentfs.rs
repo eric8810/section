@@ -492,6 +492,352 @@ pub fn validate_agent_id(agent_id: &str) -> Result<()> {
     Ok(())
 }
 
+pub trait AgentFsMetadataRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()>;
+}
+
+impl AgentFsMetadataRecord for AgentFsRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        validate_non_empty(path, "name", &self.name)?;
+        validate_id_field(path, "owner_agent_id", &self.owner_agent_id, "agt_", 32)?;
+        validate_id_field(
+            path,
+            "source_profile_id",
+            &self.source_profile_id,
+            "srcp_",
+            32,
+        )?;
+        validate_non_empty(path, "source_name", &self.source_name)?;
+        validate_timestamp(path, "created_at_ms", self.created_at_ms)
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsSourceProfileRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(
+            path,
+            "source_profile_id",
+            &self.source_profile_id,
+            "srcp_",
+            32,
+        )?;
+        validate_non_empty(path, "name", &self.name)?;
+        validate_non_empty(path, "provider", &self.provider)?;
+        validate_timestamp(path, "created_at_ms", self.created_at_ms)?;
+        validate_timestamp(path, "updated_at_ms", self.updated_at_ms)
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsGrantRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(path, "grant_id", &self.grant_id, "grt_", 32)?;
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        validate_id_field(path, "agent_id", &self.agent_id, "agt_", 32)?;
+        validate_id_field(path, "granted_by", &self.granted_by, "agt_", 32)?;
+        validate_timestamp(path, "created_at_ms", self.created_at_ms)?;
+        if self.capabilities != self.role.capabilities() {
+            anyhow::bail!(malformed_record(path, "grant capabilities must match role"));
+        }
+        if let Some(revoked_at_ms) = self.revoked_at_ms {
+            validate_timestamp(path, "revoked_at_ms", revoked_at_ms)?;
+        }
+        if let Some(revoked_by) = &self.revoked_by {
+            validate_id_field(path, "revoked_by", revoked_by, "agt_", 32)?;
+        }
+        Ok(())
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsShareRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(path, "share_id", &self.share_id, "shr_", 32)?;
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        validate_id_field(path, "target_agent_id", &self.target_agent_id, "agt_", 32)?;
+        validate_id_field(path, "grant_id", &self.grant_id, "grt_", 32)?;
+        validate_id_field(
+            path,
+            "source_profile_id",
+            &self.source_profile_id,
+            "srcp_",
+            32,
+        )?;
+        validate_id_field(path, "created_by", &self.created_by, "agt_", 32)?;
+        validate_timestamp(path, "created_at_ms", self.created_at_ms)?;
+        if let Some(expires_at_ms) = self.expires_at_ms {
+            validate_timestamp(path, "expires_at_ms", expires_at_ms)?;
+        }
+        if let Some(accepted_at_ms) = self.accepted_at_ms {
+            validate_timestamp(path, "accepted_at_ms", accepted_at_ms)?;
+        }
+        if let Some(revoked_at_ms) = self.revoked_at_ms {
+            validate_timestamp(path, "revoked_at_ms", revoked_at_ms)?;
+        }
+        Ok(())
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsCredentialBindingRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(
+            path,
+            "credential_binding_id",
+            &self.credential_binding_id,
+            "cred_",
+            32,
+        )?;
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        validate_id_field(path, "agent_id", &self.agent_id, "agt_", 32)?;
+        validate_id_field(path, "installation_id", &self.installation_id, "ins_", 32)?;
+        validate_id_field(
+            path,
+            "source_profile_id",
+            &self.source_profile_id,
+            "srcp_",
+            32,
+        )?;
+        validate_timestamp(path, "issued_at_ms", self.issued_at_ms)?;
+        validate_timestamp(path, "expires_at_ms", self.expires_at_ms)
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsHeadRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        if let Some(commit_id) = &self.commit_id {
+            validate_id_field(path, "commit_id", commit_id, "cmt_", 32)?;
+        }
+        validate_timestamp(path, "updated_at_ms", self.updated_at_ms)
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsHeadLockRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        validate_id_field(path, "lock_token", &self.lock_token, "lck_", 32)?;
+        validate_id_field(path, "owner_agent_id", &self.owner_agent_id, "agt_", 32)?;
+        validate_timestamp(path, "created_at_ms", self.created_at_ms)?;
+        validate_timestamp(path, "expires_at_ms", self.expires_at_ms)
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsCommitRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(path, "commit_id", &self.commit_id, "cmt_", 32)?;
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        if let Some(parent_commit_id) = &self.parent_commit_id {
+            validate_id_field(path, "parent_commit_id", parent_commit_id, "cmt_", 32)?;
+        }
+        if let Some(base_commit_id) = &self.base_commit_id {
+            validate_id_field(path, "base_commit_id", base_commit_id, "cmt_", 32)?;
+        }
+        validate_id_field(path, "agent_id", &self.agent_id, "agt_", 32)?;
+        validate_non_empty(path, "summary", self.summary.trim())?;
+        if self.paths.is_empty() {
+            anyhow::bail!(malformed_record(path, "commit paths must not be empty"));
+        }
+        for commit_path in &self.paths {
+            commit_path.validate_metadata(path)?;
+        }
+        let authorized_by = self
+            .authorized_by
+            .as_ref()
+            .ok_or_else(|| malformed_record(path, "commit must record authorized_by"))?;
+        validate_authorization(path, authorized_by)?;
+        let staging = self
+            .staging_snapshot
+            .as_ref()
+            .ok_or_else(|| malformed_record(path, "commit must record staging_snapshot"))?;
+        validate_non_empty(
+            path,
+            "staging_snapshot.manifest_path",
+            &staging.manifest_path,
+        )?;
+        validate_non_empty(
+            path,
+            "staging_snapshot.manifest_hash",
+            &staging.manifest_hash,
+        )?;
+        validate_timestamp(path, "created_at_ms", self.created_at_ms)?;
+        match self.materialization_state {
+            AgentFsMaterializationState::Materialized => {
+                if self.materialized_at_ms.is_none() {
+                    anyhow::bail!(malformed_record(
+                        path,
+                        "materialized commit must record materialized_at_ms"
+                    ));
+                }
+            }
+            AgentFsMaterializationState::FailedToMaterialize => {
+                if self.error.as_deref().unwrap_or_default().trim().is_empty() {
+                    anyhow::bail!(malformed_record(path, "failed commit must record error"));
+                }
+            }
+            AgentFsMaterializationState::Pending => {}
+        }
+        Ok(())
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsCommitPathRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_agentfs_path_field(path, "paths.path", &self.path)?;
+        match self.kind.as_str() {
+            "file" | "dir" => {}
+            _ => anyhow::bail!(malformed_record(
+                path,
+                "commit path kind must be file or dir"
+            )),
+        }
+        match self.op.as_str() {
+            "create" | "update" | "delete" => {}
+            _ => anyhow::bail!(malformed_record(
+                path,
+                "commit path op must be create, update, or delete"
+            )),
+        }
+        Ok(())
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsEventRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_event_id(path, &self.event_id)?;
+        if self.seq <= 0 {
+            anyhow::bail!(malformed_record(path, "event seq must be positive"));
+        }
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        validate_non_empty(path, "kind", &self.kind)?;
+        validate_id_field(path, "actor_agent_id", &self.actor_agent_id, "agt_", 32)?;
+        validate_non_empty(path, "subject_id", &self.subject_id)?;
+        if let Some(event_path) = &self.path {
+            validate_agentfs_path_field(path, "path", event_path)?;
+        }
+        validate_timestamp(path, "created_at_ms", self.created_at_ms)
+    }
+}
+
+fn validate_schema(path: &str, schema_version: u32) -> Result<()> {
+    if schema_version != SCHEMA_VERSION {
+        anyhow::bail!(malformed_record(
+            path,
+            format!("schema_version {schema_version} is not {SCHEMA_VERSION}")
+        ));
+    }
+    Ok(())
+}
+
+fn validate_id_field(
+    path: &str,
+    field: &str,
+    value: &str,
+    prefix: &str,
+    hex_len: usize,
+) -> Result<()> {
+    let valid = value.strip_prefix(prefix).is_some_and(|hex| {
+        hex.len() == hex_len
+            && hex
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+    });
+    if !valid {
+        anyhow::bail!(malformed_record(
+            path,
+            format!("{field} must match {prefix}[0-9a-f]{{{hex_len}}}")
+        ));
+    }
+    Ok(())
+}
+
+fn validate_event_id(path: &str, event_id: &str) -> Result<()> {
+    let Some(rest) = event_id.strip_prefix("evt_") else {
+        anyhow::bail!(malformed_record(path, "event_id must start with evt_"));
+    };
+    let Some((millis, random)) = rest.split_once('_') else {
+        anyhow::bail!(malformed_record(
+            path,
+            "event_id must include timestamp and random suffix"
+        ));
+    };
+    let valid = millis.len() == 13
+        && millis.chars().all(|ch| ch.is_ascii_digit())
+        && random.len() == 16
+        && random
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase());
+    if !valid {
+        anyhow::bail!(malformed_record(
+            path,
+            "event_id must match evt_<13 digit ms>_<16 lowercase hex>"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_non_empty(path: &str, field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        anyhow::bail!(malformed_record(path, format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+fn validate_timestamp(path: &str, field: &str, value: i64) -> Result<()> {
+    if value <= 0 {
+        anyhow::bail!(malformed_record(path, format!("{field} must be positive")));
+    }
+    Ok(())
+}
+
+fn validate_agentfs_path_field(path: &str, field: &str, value: &str) -> Result<()> {
+    validate_source_relative_path(value).map_err(|err| {
+        malformed_record(path, format!("{field} is not a valid AgentFS path: {err}")).into()
+    })
+}
+
+fn validate_authorization(path: &str, authorization: &AgentFsAuthorization) -> Result<()> {
+    match authorization {
+        AgentFsAuthorization::Owner { agent_id } => {
+            validate_id_field(path, "authorized_by.agent_id", agent_id, "agt_", 32)
+        }
+        AgentFsAuthorization::Grant {
+            grant_id,
+            role,
+            capabilities,
+        } => {
+            validate_id_field(path, "authorized_by.grant_id", grant_id, "grt_", 32)?;
+            if !capabilities.contains(&AgentFsCapability::Commit) {
+                anyhow::bail!(malformed_record(
+                    path,
+                    "authorized grant must include commit capability"
+                ));
+            }
+            if !role.has_capability(AgentFsCapability::Commit) {
+                anyhow::bail!(malformed_record(
+                    path,
+                    "authorized grant role must include commit capability"
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn malformed_record(path: &str, message: impl Into<String>) -> AgentFsError {
+    AgentFsError::malformed_metadata(format!(
+        "invalid AgentFS metadata {path}: {}",
+        message.into()
+    ))
+}
+
 pub fn owner_grant(fs: &AgentFsRecord, owner: &AgentIdentityRecord) -> Result<AgentFsGrantRecord> {
     grant_record(fs, &owner.agent_id, AgentFsRole::Owner, &owner.agent_id)
 }
@@ -595,7 +941,7 @@ pub fn write_json<T: Serialize>(
     Ok(())
 }
 
-pub fn read_json<T: DeserializeOwned>(
+pub fn read_json<T: DeserializeOwned + AgentFsMetadataRecord>(
     rt: &tokio::runtime::Runtime,
     op: &Operator,
     path: &str,
@@ -603,22 +949,30 @@ pub fn read_json<T: DeserializeOwned>(
     let data = rt
         .block_on(op.read(path))
         .with_context(|| format!("failed to read AgentFS metadata {path}"))?;
-    serde_json::from_slice(data.to_bytes().as_ref()).map_err(|err| {
-        AgentFsError::malformed_metadata(format!("failed to parse {path}: {err}")).into()
-    })
+    let record: T = serde_json::from_slice(data.to_bytes().as_ref()).map_err(|err| {
+        anyhow::Error::from(AgentFsError::malformed_metadata(format!(
+            "failed to parse {path}: {err}"
+        )))
+    })?;
+    record.validate_metadata(path)?;
+    Ok(record)
 }
 
-pub fn read_optional_json<T: DeserializeOwned>(
+pub fn read_optional_json<T: DeserializeOwned + AgentFsMetadataRecord>(
     rt: &tokio::runtime::Runtime,
     op: &Operator,
     path: &str,
 ) -> Result<Option<T>> {
     match rt.block_on(op.read(path)) {
-        Ok(data) => serde_json::from_slice(data.to_bytes().as_ref())
-            .map(Some)
-            .map_err(|err| {
-                AgentFsError::malformed_metadata(format!("failed to parse {path}: {err}")).into()
-            }),
+        Ok(data) => {
+            let record: T = serde_json::from_slice(data.to_bytes().as_ref()).map_err(|err| {
+                anyhow::Error::from(AgentFsError::malformed_metadata(format!(
+                    "failed to parse {path}: {err}"
+                )))
+            })?;
+            record.validate_metadata(path)?;
+            Ok(Some(record))
+        }
         Err(err) if err.kind() == opendal::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err).with_context(|| format!("failed to read AgentFS metadata {path}")),
     }
@@ -779,7 +1133,7 @@ pub fn initialize_fs_metadata(
     Ok(grant)
 }
 
-fn list_json_records<T: DeserializeOwned>(
+fn list_json_records<T: DeserializeOwned + AgentFsMetadataRecord>(
     rt: &tokio::runtime::Runtime,
     op: &Operator,
     prefix: &str,

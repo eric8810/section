@@ -106,7 +106,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 6 | `fs create` can partially mutate local source registry before remote metadata validation succeeds. | partial | partial |
 | 8 | Multiple local roots per FS are not implemented; current store is still source-level single-root. | decision | decision-needed |
 | 9 | AgentFS JSON error contract is incomplete and inconsistent. | confirmed | fixed-local |
-| 10 | Shared metadata lacks schema/version/cross-record consistency validation. | confirmed | open |
+| 10 | Shared metadata lacks schema/version/cross-record consistency validation. | confirmed | fixed-local |
 | 13 | Materialization retry/repair does not exist. | confirmed | fixed-local |
 | 14 | Event ordering can reverse within the same millisecond due to random suffix sorting. | confirmed | fixed-local |
 | 15 | FS metadata initialization is not failure-safe. | confirmed | open |
@@ -193,7 +193,7 @@ This table preserves every reviewer finding for traceability.
 | 7 | Granted second agent cannot attach by grant alone. | P0 | confirmed | fixed-local | Keep service-backed `fs share`, `fs available`, `fs accept`, and attach tests. |
 | 8 | Multiple local roots per FS are not supported. | P1 | decision | decision-needed | Decide whether MVP really requires same-local-store multi-root; otherwise update contract. |
 | 9 | JSON error contract is incomplete. | P1 | confirmed | fixed-local | AgentFS CLI JSON errors now include stable `code`, `retryable`, and `details`; argument failures use `invalid_arguments`, generic runtime failures use `operation_failed`. |
-| 10 | Shared metadata lacks schema/version/consistency validation. | P1 | confirmed | open | Add validation traits for every metadata record. |
+| 10 | Shared metadata lacks schema/version/consistency validation. | P1 | confirmed | fixed-local | Shared metadata reads now validate schema/version, IDs, paths, grants, commits, events, and head/commit/event FS consistency; E2E verifies corrupted schema and cross-record links return `malformed_shared_metadata`. |
 | 11 | `fs status` role can be wrong with multiple grants. | P2 | partial | fixed-local | Keep grant replacement tests; handle legacy duplicate active grants if needed. |
 | 12 | Commit record can differ from actual materialized bytes. | P0 | confirmed | fixed-local | Commit now stages dirty paths first and materializes from the staging snapshot. |
 | 13 | Materialization retry/repair is missing. | P1 | confirmed | fixed-local | `commit repair` reuses the original commit id and staging snapshot. |
@@ -235,7 +235,7 @@ This table preserves every reviewer finding for traceability.
 | 49 | AgentFS event replay/resume has no control-plane entry. | P0 | covered | fixed-local | `section fs events` supports replay and `--after`; `watch --agentfs` streams the same event records. |
 | 50 | `fs status` swallows corrupt local marker. | P2 | confirmed | fixed-local | `fs status <local path> --json` now returns `malformed_shared_metadata` with a local marker parse/read message. |
 | 51 | Event files are not immutable. | P1 | partial | partial | Existing event paths are rejected; still need create-if-absent semantics where backend supports it. |
-| 52 | Grant `capabilities` field is not used for enforcement. | P2 | confirmed | fixed-local | Keep enforcement based on stored capabilities; schema validation still needed under #10. |
+| 52 | Grant `capabilities` field is not used for enforcement. | P2 | confirmed | fixed-local | Keep enforcement based on stored capabilities; schema validation now requires grant capabilities to match role. |
 
 ## Recommended Next Work
 

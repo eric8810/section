@@ -875,7 +875,7 @@ and P1 gaps:
 | Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 已有第一版：failed head 阻塞后续 commit，`commit repair` 用原 staging snapshot 修复同一个 commit。 |
 | Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 已有第一版：attach 和 source bind 会存 canonical local root；E2E 验证 attach JSON、marker、status 都使用 canonical root；父子 root 和 backing root overlap 会被拒绝。还缺持久 `mount_id`。 |
 | Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
-| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 event `seq`、事件路径覆盖拒绝、commit accepted 事件失败不推进 head；还缺统一 schema validation、坏数据隔离、backend create-if-absent 断言，以及服务端事件源或 outbox。 |
+| Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 schema/version/ID/path validation、head/commit/event FS 一致性检查、event `seq`、事件路径覆盖拒绝、commit accepted 事件失败不推进 head。还缺 backend create-if-absent 断言，以及服务端事件源或 outbox。 |
 | JSON error contract | Agent callers need stable machine-readable failures. | 已有第一版：`agent`、`fs`、`commit`、`watch --agentfs` 在 `--json` 失败时输出稳定 `error.code`、`retryable`、`details`。参数错误是 `invalid_arguments`，普通运行错误统一落到 `operation_failed`。 |
 | File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 已有第一版：同一路径文件/目录类型替换会在 accepted commit 写入前失败，返回 `path_type_conflict`；非空目录删除会物化为干净的远端删除。 |
 | FS status decision surface | Agents need one command to know whether they can act. | 已有第一版：`fs status --json` 支持本地 path，输出 role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
@@ -905,6 +905,7 @@ It covers the product behaviors that are implemented today:
 | `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; staging snapshot、repair、`fs events` replay、`watch --agentfs`、event `seq`、`authorized_by`、JSON error payload 都可验证 |
 | `e2e_fs_ref_resolves_source_name_and_rejects_ambiguity` | `fs status` resolves by source name; duplicate source-name refs fail with `ambiguous_fs_ref`; exact fs id still resolves |
 | `e2e_bad_metadata_in_unrelated_source_does_not_block_fs_lookup` | unrelated source 里坏的 `.section/agentfs/fs.json` 不会阻塞健康 FS 的 `fs status` 和 `fs events` |
+| `e2e_rejects_invalid_shared_metadata_schema_and_links` | corrupted commit schema, wrong head FS link, and wrong event FS link fail with `malformed_shared_metadata` |
 | `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit; `fs status` exposes role、capabilities、dirty、next_actions |
 | `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; 篡改本地 marker 不能绕过 trusted mount base；`fs status` exposes stale state and `sync` next action |
 | `e2e_backing_source_drift_cannot_be_committed_over` | backing source 被外部直接修改后，commit 返回 `remote_drift`；head、backing file、accepted event 数量都不变 |

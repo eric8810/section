@@ -647,6 +647,62 @@ fn e2e_bad_metadata_in_unrelated_source_does_not_block_fs_lookup() {
 }
 
 #[test]
+fn e2e_rejects_invalid_shared_metadata_schema_and_links() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
+    owner.attach();
+    owner.write_local("docs/schema.txt", "schema");
+    let commit = owner.commit_apply("create schema file");
+    let commit_id = commit["commit"]["commit_id"]
+        .as_str()
+        .expect("commit id")
+        .to_string();
+
+    let commit_path = fixture
+        .remote_root
+        .join(".section/agentfs/commits")
+        .join(format!("{commit_id}.json"));
+    let original_commit = read_json(&commit_path);
+    let mut bad_commit = original_commit.clone();
+    bad_commit["schema_version"] = Value::from(999);
+    write_json(&commit_path, &bad_commit);
+    let bad_commit_status = owner.fs_status_output(&owner.local_root.to_string_lossy());
+    assert_json_error(&bad_commit_status, "malformed_shared_metadata");
+    write_json(&commit_path, &original_commit);
+
+    let head_path = fixture
+        .remote_root
+        .join(".section/agentfs/heads/current.json");
+    let original_head = read_json(&head_path);
+    let mut wrong_head = original_head.clone();
+    wrong_head["fs_id"] = Value::String("fs_11111111111111111111111111111111".to_string());
+    write_json(&head_path, &wrong_head);
+    let wrong_head_status = owner.fs_status_output(FS_NAME);
+    assert_json_error(&wrong_head_status, "malformed_shared_metadata");
+    write_json(&head_path, &original_head);
+
+    let event_path = fs::read_dir(fixture.remote_root.join(".section/agentfs/events"))
+        .expect("events dir")
+        .map(|entry| entry.expect("event entry").path())
+        .find(|path| read_json(path)["fs_id"].as_str().expect("event fs_id") == fs_id)
+        .expect("event path");
+    let original_event = read_json(&event_path);
+    let mut wrong_event = original_event.clone();
+    wrong_event["fs_id"] = Value::String("fs_22222222222222222222222222222222".to_string());
+    write_json(&event_path, &wrong_event);
+    let wrong_event_replay = owner.run_owned(vec![
+        "--json".to_string(),
+        "fs".to_string(),
+        "events".to_string(),
+        FS_NAME.to_string(),
+    ]);
+    assert_json_error(&wrong_event_replay, "malformed_shared_metadata");
+}
+
+#[test]
 fn e2e_grants_control_attach_manage_and_commit_authority() {
     let fixture = AgentFsFixture::new();
     let owner = fixture.agent("owner");
