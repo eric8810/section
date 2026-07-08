@@ -517,12 +517,11 @@ This proves manage authority is distinct from commit authority.
 | --- | --- | --- | --- |
 | 1 | owner | create, attach, and commit baseline file | head points to baseline commit |
 | 2 | external process | mutate backing file directly outside AgentFS | backing source now differs from governed base |
-| 3 | writer | `commit status` or `commit apply` from old local root | drift/conflict/stale state is surfaced |
+| 3 | writer | `commit status` or `commit apply` from old local root | `remote_drift` is surfaced |
 | 4 | test | inspect head and commit records | no accepted commit silently blesses external drift |
 
-This proves external backing-source changes are not governed commits. The exact
-CLI error may evolve, but the E2E must prove the mutation is not silently
-accepted as AgentFS truth.
+This proves external backing-source changes are not governed commits. The E2E
+must prove the mutation is not silently accepted as AgentFS truth.
 
 #### 12. Commit Snapshot Matches Materialized Bytes
 
@@ -857,7 +856,7 @@ and P1 gaps:
 | Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness。还缺生产服务端、真实 credential TTL 和刷新。 |
 | AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 已有第一版：`fs events` 支持 replay/after，`watch --agentfs` 输出 AgentFS 事件，事件有递增 `seq`。还缺更强的服务端事件 API 和并发顺序保障。 |
 | Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | 已有第一版：commit record 和 `commit.accepted` event 记录 `authorized_by`，E2E 已通过 `fs events` 验证。 |
-| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 部分实现：本地 store 记录 mount/base，E2E 验证篡改 `.section/root.json` 不能绕过 stale-base。还缺 `base_manifest_hash` 和严格 tree diff。 |
+| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 部分实现：本地 store 记录 mount/base，E2E 验证篡改 `.section/root.json` 不能绕过 stale-base；外部直接修改 backing source 时，commit 返回 `remote_drift`，不会写 accepted commit。还缺 `base_manifest_hash` 和更完整的 tree diff 证明。 |
 | Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | 已有第一版：`commit apply` 先写 staging snapshot，commit metadata 记录 snapshot，物化从 snapshot 读取。E2E 验证 live root 后续修改仍是 dirty work；本地 marker 更新失败只作为 warning 返回，不推翻已完成的治理真相。 |
 | Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 已有第一版：failed head 阻塞后续 commit，`commit repair` 用原 staging snapshot 修复同一个 commit。 |
 | Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 部分实现：已有 backing root、父子 root、runtime guardrails。还缺持久 `mount_id`/canonical root 完整断言。 |
@@ -893,6 +892,7 @@ It covers the product behaviors that are implemented today:
 | `e2e_fs_ref_resolves_source_name_and_rejects_ambiguity` | `fs status` resolves by source name; duplicate source-name refs fail with `ambiguous_fs_ref`; exact fs id still resolves |
 | `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit; `fs status` exposes role、capabilities、dirty、next_actions |
 | `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; 篡改本地 marker 不能绕过 trusted mount base；`fs status` exposes stale state and `sync` next action |
+| `e2e_backing_source_drift_cannot_be_committed_over` | backing source 被外部直接修改后，commit 返回 `remote_drift`；head、backing file、accepted event 数量都不变 |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
 | `e2e_rejects_file_dir_type_replacement_before_acceptance` | file/dir type replacement is rejected before a new accepted commit; head and backing source remain unchanged |
 | `e2e_commit_success_survives_local_marker_update_failure` | accepted/materialized commit still succeeds when final local marker update fails; warning is returned and trusted mount base is updated |

@@ -791,6 +791,57 @@ fn e2e_stale_writer_cannot_overwrite_new_truth() {
 }
 
 #[test]
+fn e2e_backing_source_drift_cannot_be_committed_over() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    owner.write_local("docs/drift.txt", "base content");
+    let initial_commit = owner.commit_apply("create drift base");
+    let initial_commit_id = initial_commit["commit"]["commit_id"]
+        .as_str()
+        .expect("initial commit id")
+        .to_string();
+    let accepted_before = owner.fs_events(FS_NAME, None)["events"]
+        .as_array()
+        .expect("events before drift")
+        .iter()
+        .filter(|event| event["kind"] == "commit.accepted")
+        .count();
+
+    fs::write(fixture.path("docs/drift.txt"), "external drift")
+        .expect("write external remote drift");
+    owner.write_local("docs/drift.txt", "local update");
+
+    let rejected = owner.commit_apply_output("overwrite external drift");
+    let error = assert_json_error(&rejected, "remote_drift");
+    assert_eq!(error["error"]["details"]["path"], "docs/drift.txt");
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/drift.txt")).expect("read drifted remote file"),
+        "external drift"
+    );
+
+    let head = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    assert_eq!(head["commit_id"], initial_commit_id);
+    let accepted_after = owner.fs_events(FS_NAME, None)["events"]
+        .as_array()
+        .expect("events after drift")
+        .iter()
+        .filter(|event| event["kind"] == "commit.accepted")
+        .count();
+    assert_eq!(
+        accepted_after, accepted_before,
+        "remote drift must be rejected before a new accepted commit"
+    );
+}
+
+#[test]
 fn e2e_hardening_rejects_unsafe_backing_source_and_attach_root() {
     let non_empty = AgentFsFixture::new();
     fs::write(non_empty.path("preexisting.txt"), "not imported").expect("write remote file");

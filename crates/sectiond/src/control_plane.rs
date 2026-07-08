@@ -371,6 +371,20 @@ impl SectiondControlPlane {
                 return Err(err);
             }
         };
+        if let Err(err) = refresh_agentfs_trusted_base(
+            &rt,
+            &resolved.operator,
+            &self.store,
+            &resolved.source.name,
+            &local_root,
+        ) {
+            self.rollback_failed_attach(
+                &resolved.source.name,
+                &local_root,
+                previous_root.as_deref(),
+            )?;
+            return Err(err);
+        }
         self.store.upsert_agentfs_mount(&AgentFsMountRecord {
             source_name: resolved.source.name.clone(),
             fs_id: resolved.fs.fs_id.clone(),
@@ -434,8 +448,24 @@ impl SectiondControlPlane {
         let mut warnings = Vec::new();
         let mut next_actions = Vec::new();
         let dirty_count = match local_root.as_ref() {
-            Some(local_root) => collect_dirty_paths(&rt, &resolved.operator, local_root)?.len(),
+            Some(local_root)
+                if !stale
+                    && matches!(
+                        materialization_state,
+                        None | Some(AgentFsMaterializationState::Materialized)
+                    ) =>
+            {
+                collect_dirty_paths(
+                    &rt,
+                    &resolved.operator,
+                    &self.store,
+                    &resolved.source.name,
+                    local_root,
+                )?
+                .len()
+            }
             None => 0,
+            Some(_) => 0,
         };
         let dirty = dirty_count > 0;
 
@@ -526,8 +556,18 @@ impl SectiondControlPlane {
 
         let mount = local_mount_from_marker(&self.store, &resolved.source.name, &marker)?;
         let local_root = mount.local_root.clone();
-        let dirty_paths = collect_dirty_paths(&rt, &resolved.operator, &local_root)?;
         let stale = mount.base_commit_id != resolved.head.commit_id;
+        let dirty_paths = if stale {
+            Vec::new()
+        } else {
+            collect_dirty_paths(
+                &rt,
+                &resolved.operator,
+                &self.store,
+                &resolved.source.name,
+                &local_root,
+            )?
+        };
 
         Ok(AgentFsCommitStatus {
             fs: resolved.fs,
@@ -575,7 +615,13 @@ impl SectiondControlPlane {
         }
 
         let local_root = mount.local_root.clone();
-        let dirty_paths = collect_dirty_paths(&rt, &resolved.operator, &local_root)?;
+        let dirty_paths = collect_dirty_paths(
+            &rt,
+            &resolved.operator,
+            &self.store,
+            &resolved.source.name,
+            &local_root,
+        )?;
         if dirty_paths.is_empty() {
             bail!(
                 "empty commit: no dirty paths under {}",
@@ -1989,19 +2035,28 @@ fn normalized_dir_for_agentfs(path: &str) -> String {
 fn collect_dirty_paths(
     rt: &tokio::runtime::Runtime,
     operator: &Operator,
+    store: &ProviderStore,
+    source_name: &str,
     local_root: &Path,
 ) -> Result<Vec<AgentFsCommitPathRecord>> {
     let local = collect_local_agent_paths(local_root)?;
     let remote = collect_remote_agent_paths(rt, operator)?;
+    let trusted_base = store
+        .list_path_sync_states(source_name)?
+        .into_iter()
+        .map(|record| (record.path.clone(), record))
+        .collect::<BTreeMap<_, _>>();
     let mut paths = BTreeSet::new();
     paths.extend(local.keys().cloned());
     paths.extend(remote.keys().cloned());
+    paths.extend(trusted_base.keys().cloned());
 
     let mut dirty = Vec::new();
     for path in paths {
         agentfs::validate_source_relative_path(&path)?;
         let local_entry = local.get(&path);
         let remote_entry = remote.get(&path);
+        ensure_remote_matches_trusted_base(&path, trusted_base.get(&path), remote_entry)?;
         if local_entry == remote_entry {
             continue;
         }
@@ -2035,6 +2090,135 @@ fn collect_dirty_paths(
     }
 
     Ok(dirty)
+}
+
+fn refresh_agentfs_trusted_base(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    store: &ProviderStore,
+    source_name: &str,
+    local_root: &Path,
+) -> Result<()> {
+    let local = collect_local_agent_paths(local_root)?;
+    let remote = collect_remote_agent_paths(rt, operator)?;
+    let mut paths = BTreeSet::new();
+    paths.extend(local.keys().cloned());
+    paths.extend(remote.keys().cloned());
+
+    for path in paths {
+        agentfs::validate_source_relative_path(&path)?;
+        let local_entry = local.get(&path);
+        let remote_entry = remote.get(&path);
+        if local_entry != remote_entry {
+            bail!("fs attach materialized working copy differs from backing source at {path}");
+        }
+
+        if let Some(remote_entry) = remote_entry {
+            store.upsert_path_sync_state(&PathSyncStateRecord {
+                source_name: source_name.to_string(),
+                path,
+                entry_kind: remote_entry.kind.clone(),
+                public_state: "ready".to_string(),
+                local_present: true,
+                dirty_local: false,
+                dirty_remote: false,
+                pinned: false,
+                stale: false,
+                last_local_version: local_entry.and_then(|entry| entry.version.clone()),
+                base_remote_version: remote_entry.version.clone(),
+                current_remote_version: remote_entry.version.clone(),
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_remote_matches_trusted_base(
+    path: &str,
+    trusted_state: Option<&PathSyncStateRecord>,
+    remote_entry: Option<&AgentPathObservation>,
+) -> Result<()> {
+    let Some(trusted_state) = trusted_state else {
+        if let Some(remote_entry) = remote_entry {
+            anyhow::bail!(AgentFsError::remote_drift(
+                path,
+                None,
+                None,
+                Some(&remote_entry.kind),
+                remote_entry.version.as_deref(),
+            ));
+        }
+        return Ok(());
+    };
+
+    let trusted_absent = !trusted_state.local_present
+        && trusted_state.base_remote_version.is_none()
+        && trusted_state.current_remote_version.is_none();
+    if trusted_absent {
+        if let Some(remote_entry) = remote_entry {
+            anyhow::bail!(AgentFsError::remote_drift(
+                path,
+                None,
+                None,
+                Some(&remote_entry.kind),
+                remote_entry.version.as_deref(),
+            ));
+        }
+        return Ok(());
+    }
+
+    match remote_entry {
+        Some(remote_entry)
+            if trusted_state.entry_kind == remote_entry.kind
+                && versions_match_trusted_base(
+                    &trusted_state.base_remote_version,
+                    &remote_entry.version,
+                ) =>
+        {
+            Ok(())
+        }
+        Some(remote_entry) => anyhow::bail!(AgentFsError::remote_drift(
+            path,
+            Some(&trusted_state.entry_kind),
+            trusted_state.base_remote_version.as_deref(),
+            Some(&remote_entry.kind),
+            remote_entry.version.as_deref(),
+        )),
+        None => anyhow::bail!(AgentFsError::remote_drift(
+            path,
+            Some(&trusted_state.entry_kind),
+            trusted_state.base_remote_version.as_deref(),
+            None,
+            None,
+        )),
+    }
+}
+
+fn versions_match_trusted_base(expected: &Option<String>, actual: &Option<String>) -> bool {
+    match (expected, actual) {
+        (None, None) => true,
+        (Some(expected), Some(actual)) if expected == actual => true,
+        (Some(expected), Some(actual)) => {
+            match (
+                normalized_sha256_hex(expected),
+                normalized_sha256_hex(actual),
+            ) {
+                (Some(expected), Some(actual)) => expected.eq_ignore_ascii_case(actual),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn normalized_sha256_hex(version: &str) -> Option<&str> {
+    let hex = version.strip_prefix("sha256:").unwrap_or(version);
+    if hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(hex)
+    } else {
+        None
+    }
 }
 
 fn collect_local_agent_paths(root: &Path) -> Result<BTreeMap<String, AgentPathObservation>> {

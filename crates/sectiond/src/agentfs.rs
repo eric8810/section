@@ -342,6 +342,29 @@ impl AgentFsError {
         }))
     }
 
+    pub fn remote_drift(
+        path: &str,
+        expected_kind: Option<&str>,
+        expected_version: Option<&str>,
+        actual_kind: Option<&str>,
+        actual_version: Option<&str>,
+    ) -> Self {
+        Self::new(
+            "remote_drift",
+            format!(
+                "backing source path {path} changed outside AgentFS; sync or repair before committing"
+            ),
+            true,
+        )
+        .with_details(json!({
+            "path": path,
+            "expected_kind": expected_kind,
+            "expected_version": expected_version,
+            "actual_kind": actual_kind,
+            "actual_version": actual_version,
+        }))
+    }
+
     pub fn payload(&self) -> &AgentFsErrorPayload {
         &self.payload
     }

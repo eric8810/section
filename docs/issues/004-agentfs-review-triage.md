@@ -85,7 +85,7 @@ These must be handled before making stronger claims about AgentFS correctness.
 | ID | Finding | Validity | Status |
 | --- | --- | --- | --- |
 | 3 / 49 | `watch` and replay cannot observe AgentFS events. | confirmed | fixed-local |
-| 5 | Commit dirty detection compares local tree to current remote, not the mounted base/path sync state. | confirmed | open |
+| 5 | Commit dirty detection compares local tree to current remote, not the mounted base/path sync state. | confirmed | fixed-local |
 | 7 | A second granted agent cannot attach by grant alone; it still needs manual source setup. | confirmed | fixed-local |
 | 12 | Commit record and actual materialization have a TOCTOU gap. | confirmed | fixed-local |
 | 18 | `fs create` can create `head=null` over a non-empty backing source. | confirmed | fixed-local |
@@ -188,7 +188,7 @@ This table preserves every reviewer finding for traceability.
 | 2 | AgentFS metadata writes have no required head lock. | P1 | partial | partial | Current lock is conservative; add create-if-absent/CAS semantics or document backend limits. |
 | 3 | `watch` cannot observe AgentFS events. | P0 | confirmed | fixed-local | `fs events` and `watch --agentfs` now expose AgentFS events with `seq`. |
 | 4 | Attach/status do not enforce or expose failed materialization. | P2 | partial | fixed-local | Keep tests for attach rejection and status output. |
-| 5 | Commit dirty detection uses current remote, not mounted base/path sync state. | P0 | confirmed | open | Introduce mount-base snapshot or commit-base manifest; detect drift before acceptance. |
+| 5 | Commit dirty detection uses current remote, not mounted base/path sync state. | P0 | confirmed | fixed-local | Commit now checks current backing source against trusted path sync base first; external drift returns `remote_drift` before acceptance. |
 | 6 | `fs create` mutates source registry before validating remote metadata. | P1 | partial | partial | Remote preflight and source rollback are in place; add staged initialization/recovery for partial remote metadata. |
 | 7 | Granted second agent cannot attach by grant alone. | P0 | confirmed | fixed-local | Keep service-backed `fs share`, `fs available`, `fs accept`, and attach tests. |
 | 8 | Multiple local roots per FS are not supported. | P1 | decision | decision-needed | Decide whether MVP really requires same-local-store multi-root; otherwise update contract. |
