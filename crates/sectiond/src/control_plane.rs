@@ -137,6 +137,7 @@ pub struct AgentFsCommitStatus {
 pub struct AgentFsCommitApplyResult {
     pub commit: AgentFsCommitRecord,
     pub sync: SourceSyncResult,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -693,27 +694,20 @@ impl SectiondControlPlane {
                     serde_json::json!({ "pushed": sync.pushed, "pulled": sync.pulled }),
                 )?;
                 agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
-                write_root_marker_for_agentfs(
+                let warnings = self.record_local_materialized_commit(
                     &resolved.source.name,
                     &local_root,
                     &resolved.fs.fs_id,
                     &resolved.fs.source_profile_id,
                     &actor.agent_id,
                     &actor.installation_id,
-                    &self.control_service.endpoint(),
-                    Some(commit.commit_id.clone()),
-                )?;
-                self.store.upsert_agentfs_mount(&AgentFsMountRecord {
-                    source_name: resolved.source.name.clone(),
-                    fs_id: resolved.fs.fs_id.clone(),
-                    source_profile_id: resolved.fs.source_profile_id.clone(),
-                    agent_id: actor.agent_id.clone(),
-                    installation_id: actor.installation_id.clone(),
-                    local_root: local_root.clone(),
-                    base_commit_id: Some(commit.commit_id.clone()),
-                    updated_at_ms: agentfs::now_ms(),
-                })?;
-                Ok(AgentFsCommitApplyResult { commit, sync })
+                    &commit.commit_id,
+                );
+                Ok(AgentFsCommitApplyResult {
+                    commit,
+                    sync,
+                    warnings,
+                })
             }
             Ok(sync) => {
                 commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
@@ -851,29 +845,23 @@ impl SectiondControlPlane {
                     serde_json::json!({ "pushed": sync.pushed, "pulled": sync.pulled, "repair": true }),
                 )?;
                 agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
+                let mut warnings = Vec::new();
                 if !local_root.as_os_str().is_empty() {
-                    write_root_marker_for_agentfs(
+                    warnings.extend(self.record_local_materialized_commit(
                         &resolved.source.name,
                         &local_root,
                         &resolved.fs.fs_id,
                         &resolved.fs.source_profile_id,
                         &actor.agent_id,
                         &actor.installation_id,
-                        &self.control_service.endpoint(),
-                        Some(commit.commit_id.clone()),
-                    )?;
-                    self.store.upsert_agentfs_mount(&AgentFsMountRecord {
-                        source_name: resolved.source.name.clone(),
-                        fs_id: resolved.fs.fs_id.clone(),
-                        source_profile_id: resolved.fs.source_profile_id.clone(),
-                        agent_id: actor.agent_id.clone(),
-                        installation_id: actor.installation_id.clone(),
-                        local_root: local_root.clone(),
-                        base_commit_id: Some(commit.commit_id.clone()),
-                        updated_at_ms: agentfs::now_ms(),
-                    })?;
+                        &commit.commit_id,
+                    ));
                 }
-                Ok(AgentFsCommitApplyResult { commit, sync })
+                Ok(AgentFsCommitApplyResult {
+                    commit,
+                    sync,
+                    warnings,
+                })
             }
             Ok(sync) => {
                 commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
@@ -1350,6 +1338,49 @@ impl SectiondControlPlane {
             Err(_) if looks_like_path => Err(AgentFsError::unknown_fs(fs_ref).into()),
             Err(_) => Ok(fs_ref.to_string()),
         }
+    }
+
+    fn record_local_materialized_commit(
+        &self,
+        source_name: &str,
+        local_root: &Path,
+        fs_id: &str,
+        source_profile_id: &str,
+        agent_id: &str,
+        installation_id: &str,
+        commit_id: &str,
+    ) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if let Err(err) = self.store.upsert_agentfs_mount(&AgentFsMountRecord {
+            source_name: source_name.to_string(),
+            fs_id: fs_id.to_string(),
+            source_profile_id: source_profile_id.to_string(),
+            agent_id: agent_id.to_string(),
+            installation_id: installation_id.to_string(),
+            local_root: local_root.to_path_buf(),
+            base_commit_id: Some(commit_id.to_string()),
+            updated_at_ms: agentfs::now_ms(),
+        }) {
+            warnings.push(format!(
+                "local mount base update failed after commit materialized: {err}"
+            ));
+        }
+
+        if let Err(err) = write_root_marker_for_agentfs(
+            source_name,
+            local_root,
+            fs_id,
+            source_profile_id,
+            agent_id,
+            installation_id,
+            &self.control_service.endpoint(),
+            Some(commit_id.to_string()),
+        ) {
+            warnings.push(format!(
+                "local root marker update failed after commit materialized: {err}"
+            ));
+        }
+        warnings
     }
 
     fn rollback_failed_attach(

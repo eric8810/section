@@ -833,6 +833,61 @@ fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
 
 #[cfg(unix)]
 #[test]
+fn e2e_commit_success_survives_local_marker_update_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    let marker_path = owner.local_root.join(".section/root.json");
+    let mut readonly = fs::metadata(&marker_path)
+        .expect("marker metadata")
+        .permissions();
+    readonly.set_mode(0o400);
+    fs::set_permissions(&marker_path, readonly).expect("make marker read-only");
+
+    owner.write_local("marker-warning.txt", "committed despite marker warning");
+    let commit = owner.commit_apply("commit despite marker warning");
+    let commit_id = commit["commit"]["commit_id"]
+        .as_str()
+        .expect("commit id")
+        .to_string();
+    let warnings = commit["warnings"].as_array().expect("commit warnings");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .expect("warning string")
+            .contains("local root marker update failed")),
+        "commit should report marker update warning: {warnings:?}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(fixture.path("marker-warning.txt")).expect("remote committed file"),
+        "committed despite marker warning"
+    );
+    let head = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    assert_eq!(head["commit_id"], commit_id);
+
+    let status = owner.fs_status(&owner.local_root.to_string_lossy());
+    assert_eq!(status["status"]["base_commit_id"], commit_id);
+    assert_eq!(status["status"]["stale"], false);
+
+    let mut writable = fs::metadata(&marker_path)
+        .expect("marker metadata")
+        .permissions();
+    writable.set_mode(0o600);
+    fs::set_permissions(&marker_path, writable).expect("restore marker permissions");
+}
+
+#[cfg(unix)]
+#[test]
 fn e2e_hardening_rejects_symlink_commit_paths() {
     let fixture = AgentFsFixture::new();
     let owner = fixture.agent("owner");

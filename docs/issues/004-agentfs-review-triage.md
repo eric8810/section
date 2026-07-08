@@ -112,7 +112,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 15 | FS metadata initialization is not failure-safe. | confirmed | open |
 | 16 | Non-UTF-8 local paths are lossy-converted instead of rejected. | confirmed | open |
 | 26 | Accepted commits do not record which grant allowed the mutation. | confirmed | fixed-local |
-| 29 | A committed/materialized mutation can be reported as failed if final local marker write fails. | confirmed | open |
+| 29 | A committed/materialized mutation can be reported as failed if final local marker write fails. | confirmed | fixed-local |
 | 39 | Local root identity is not canonicalized. | confirmed | open |
 | 40 | A bad `fs.json` in an unrelated source can block lookup of a healthy FS. | confirmed | open |
 | 43 | FS reference resolution does not support local source aliases and can pick the first name collision. | confirmed | open |
@@ -212,7 +212,7 @@ This table preserves every reviewer finding for traceability.
 | 26 | Accepted commit does not record authorizing grant. | P1 | confirmed | fixed-local | Commit records and `commit.accepted` events include `authorized_by`; E2E verifies it through `fs events`. |
 | 27 | `fs status <local path>` is documented but unsupported. | P2 | confirmed | fixed-local | `fs status` now resolves local root markers before FS lookup. |
 | 28 | `fs status` lacks dirty/materialization state. | P2 | partial | fixed-local | Status now reports materialization, dirty count, stale state, warnings, and next actions. |
-| 29 | Successful commit can be reported as failed after marker write failure. | P1 | confirmed | open | Treat marker update as post-commit local warning or write marker before final success boundary. |
+| 29 | Successful commit can be reported as failed after marker write failure. | P1 | confirmed | fixed-local | Marker/store update happens after materialization as a local finalization step; marker failure returns a warning while the accepted/materialized commit succeeds. |
 | 30 | Directory delete can race child deletes. | P2 | confirmed | open | Order delete plans deepest-first or coalesce subtree deletes. |
 | 31 | `fs.attached` leaks local absolute path. | P2 | confirmed | fixed-local | Keep event payload free of local paths. |
 | 32 | `commit.materialized` lacks paths/state details. | P2 | confirmed | open | Include path summary and state in event data. |
@@ -270,7 +270,7 @@ After the decisions above, prioritize:
 2. safe FS initialization and recovery (#6, #15, #20),
 3. schema validation and backend-level event immutability (#10, #51),
 4. local root canonicalization and overlap (#39, #47),
-5. marker update success boundary (#29).
+5. bad metadata isolation and FS reference ambiguity (#40, #43).
 
 ## Verification Record
 

@@ -35,13 +35,14 @@ fn run_inner(config_path: Option<&Path>, action: CommitAction, json_mode: bool) 
             if json_mode {
                 println!(
                     "{}",
-                    json!({ "ok": true, "commit": result.commit, "sync": result.sync })
+                    json!({ "ok": true, "commit": result.commit, "sync": result.sync, "warnings": result.warnings })
                 );
             } else {
                 println!(
                     "Commit {} accepted and materialized.",
                     result.commit.commit_id
                 );
+                print_warnings(&result.warnings);
             }
         }
         CommitAction::Repair { fs, commit } => {
@@ -49,13 +50,20 @@ fn run_inner(config_path: Option<&Path>, action: CommitAction, json_mode: bool) 
             if json_mode {
                 println!(
                     "{}",
-                    json!({ "ok": true, "commit": result.commit, "sync": result.sync })
+                    json!({ "ok": true, "commit": result.commit, "sync": result.sync, "warnings": result.warnings })
                 );
             } else {
                 println!("Commit {} materialized.", result.commit.commit_id);
+                print_warnings(&result.warnings);
             }
         }
     }
 
     Ok(())
+}
+
+fn print_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
 }

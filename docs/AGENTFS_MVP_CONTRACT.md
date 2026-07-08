@@ -321,9 +321,10 @@ Dirty paths are discovered by comparing the local tree against the last known mo
 
 Freshness base:
 
-- `.section/root.json` records `base_commit_id` for the attached working copy.
+- the trusted local mount store records `base_commit_id` for the attached working copy.
+- `.section/root.json` helps discover the mount identity, but it is not trusted for freshness.
 - `heads/current.json` records current shared head.
-- commit is rejected with `stale_base` when these differ.
+- commit is rejected with `stale_base` when the trusted local mount base and current shared head differ.
 
 Rules:
 
@@ -355,7 +356,12 @@ Commit acceptance writes governance metadata first:
 7. release head lock,
 8. materialize file changes from staging snapshot to backing source,
 9. update commit materialization state,
-10. write `commit.materialized` or `commit.materialization_failed` event.
+10. write `commit.materialized` or `commit.materialization_failed` event,
+11. update local mount store and root marker as a local finalization step.
+
+If step 11 fails after accepted metadata and backing-source materialization have
+succeeded, the command still succeeds and returns a local warning. The accepted
+commit remains the governance truth.
 
 If materialization fails:
 
@@ -412,7 +418,7 @@ Attach behavior:
 - creates or updates the source local-root binding,
 - writes `.section/root.json`,
 - syncs current materialized backing-source state into the local root,
-- records `base_commit_id` in `.section/root.json`.
+- records `base_commit_id` in the trusted local mount store and mirrors it into `.section/root.json`.
 
 `root.json` fields:
 
