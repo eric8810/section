@@ -871,7 +871,7 @@ and P1 gaps:
 
 | Gap | Why It Matters | Current Status |
 | --- | --- | --- |
-| Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness；pending share 在 backing grant 被 revoke 后不能再 available/accept；`fs accept` 返回带过期时间的 service-issued credential binding；`fs list/status/events/watch` 只对有 read capability 的 agent 暴露。还缺生产服务端和 credential refresh。 |
+| Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`fs share`、`fs available`、`fs accept` 走 Control Service harness；pending share 在 backing grant 被 revoke 后不能再 available/accept；`fs accept` 返回带过期时间的 service-issued credential binding；`fs attach`、`commit status`、`commit apply` 在访问 backing source 前都会刷新 service-issued credential；`fs list/status/events/watch` 只对有 read capability 的 agent 暴露。还缺生产服务端。 |
 | AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 已有第一版：`fs events` 支持 replay/after，`watch --agentfs` 输出 AgentFS 事件，事件有递增 `seq`，且需要 read capability；grant/revoke 事件以 Control Service 为权威，并和 backing event mirror 合并输出。还缺生产服务端并发顺序保障。 |
 | Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | 已有第一版：commit record 和 `commit.accepted` event 记录 `authorized_by`，E2E 已通过 `fs events` 验证。 |
 | Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 已有第一版：本地 store 记录 mount/base，E2E 验证篡改 `.section/root.json` 不能绕过 stale-base；外部直接修改 backing source 时，commit 返回 `remote_drift`，不会写 accepted commit。更完整的 tree diff 证明可作为后续增强。 |
@@ -908,7 +908,7 @@ It covers the product behaviors that are implemented today:
 
 | Test | E2E Scenarios Covered |
 | --- | --- |
-| `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; `fs accept` returns service-issued credential binding with expiry; owner observes accepted content; staging snapshot、repair、repair 后继续 commit、`fs events` replay、`watch --agentfs`、event `seq`、`authorized_by`、JSON error payload 都可验证 |
+| `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; `fs accept` returns service-issued credential binding with expiry; `fs attach`、`commit status`、`commit apply` refresh service-issued credentials before backing-source access; owner observes accepted content; staging snapshot、repair、repair 后继续 commit、`fs events` replay、`watch --agentfs`、event `seq`、`authorized_by`、JSON error payload 都可验证 |
 | `e2e_fs_ref_resolves_source_name_and_rejects_ambiguity` | `fs status` resolves by source name; duplicate source-name refs fail with `ambiguous_fs_ref`; exact fs id still resolves |
 | `e2e_bad_metadata_in_unrelated_source_does_not_block_fs_lookup` | unrelated source 里坏的 `.section/agentfs/fs.json` 不会阻塞健康 FS 的 `fs status` 和 `fs events` |
 | `e2e_rejects_invalid_shared_metadata_schema_and_links` | corrupted commit schema, wrong head FS link, and wrong event FS link fail with `malformed_shared_metadata` |
@@ -1001,7 +1001,7 @@ AgentFS 核心完整完成，必须同时满足：
 | P0 和 P1 场景都有 E2E | `agentfs_e2e.rs` 覆盖 owner/writer/reader/manager、share/accept/attach、commit、events/status、failure/repair、metadata lock、guardrails；`agentfs_control_plane.rs` 覆盖服务端 source profile/credential/cache 和低层 source/path 拒绝 | covered |
 | 所有 E2E 都通过公开 CLI 跑通 | E2E 使用 `run_section` 执行 `section` CLI，不直接调用 `sectiond` API | covered |
 | owner、reader、writer、manager 权限行为都有测试 | `e2e_grants_control_attach_manage_and_commit_authority`，并覆盖 manager grant/share/revoke、owner grant 不可 revoke | covered |
-| share、available、accept、attach 的跨机业务路径有测试 | `e2e_writer_commit_becomes_shared_truth_for_owner`、`e2e_revoke_removes_commit_access_and_blocks_pending_share_accept`、`writer_share_accept_attach_commit_and_owner_observes_truth`、`client_seed_cannot_overwrite_existing_source_profile` | covered |
+| share、available、accept、attach 的跨机业务路径有测试 | `e2e_writer_commit_becomes_shared_truth_for_owner`、`e2e_revoke_removes_commit_access_and_blocks_pending_share_accept`、`writer_share_accept_attach_commit_and_owner_observes_truth`、`client_seed_cannot_overwrite_existing_source_profile`；同一 E2E 还证明 attach/status/commit 会刷新 service-issued credential | covered |
 | commit 检查权限、base、dirty、reserved path | 权限：`e2e_grants_control_attach_manage_and_commit_authority`；base：`e2e_stale_writer_cannot_overwrite_new_truth`；dirty：`e2e_commit_preflight_rejects_empty_message_and_empty_commit`；reserved path：`e2e_section_directory_is_not_committed_as_user_content` | covered |
 | commit 使用 staging snapshot，metadata 和物化文件一致 | `e2e_writer_commit_becomes_shared_truth_for_owner` 检查 staging manifest；同一测试里 live root 后续修改保持 dirty work，repair 用原 snapshot 物化原内容 | covered |
 | 本地 marker 更新失败不会让已 accepted/materialized 的 commit 被报告为失败 | `e2e_commit_success_survives_local_marker_update_failure` | covered |

@@ -229,7 +229,7 @@ impl SectiondControlPlane {
             .control_service
             .create_filesystem(name, source_profile_name, &agent)?;
         let initialized = (|| -> Result<()> {
-            self.ensure_local_source_from_config(&created.fs.source_name, &created.source)?;
+            self.ensure_agentfs_source_from_service(&created.fs.source_name, &created.source)?;
             self.cache_accepted_filesystem(&created.fs, created.event.created_at_ms)?;
             mirror_created_filesystem(&rt, &operator, &created)
         })();
@@ -261,7 +261,7 @@ impl SectiondControlPlane {
     ) -> Result<AgentFsGrantRecord> {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let resolved = self.find_agentfs(&rt, fs_ref)?;
+        let resolved = self.find_agentfs(&rt, fs_ref, &actor)?;
         let mutation =
             self.control_service
                 .fs_grant(&resolved.fs.fs_id, &actor.agent_id, agent_id, role)?;
@@ -272,7 +272,7 @@ impl SectiondControlPlane {
     pub fn fs_revoke(&self, fs_ref: &str, agent_id: &str) -> Result<Vec<AgentFsGrantRecord>> {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let resolved = self.find_agentfs(&rt, fs_ref)?;
+        let resolved = self.find_agentfs(&rt, fs_ref, &actor)?;
         let mutation =
             self.control_service
                 .fs_revoke(&resolved.fs.fs_id, &actor.agent_id, agent_id)?;
@@ -283,7 +283,7 @@ impl SectiondControlPlane {
     pub fn fs_share(&self, fs_ref: &str, agent_id: &str) -> Result<AgentFsShareResult> {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let resolved = self.find_agentfs(&rt, fs_ref)?;
+        let resolved = self.find_agentfs(&rt, fs_ref, &actor)?;
         self.control_service
             .fs_share(&resolved.fs.fs_id, &actor.agent_id, agent_id)
     }
@@ -298,7 +298,7 @@ impl SectiondControlPlane {
         let (accepted, source) =
             self.control_service
                 .accept_share(share_id, &actor.agent_id, &actor.installation_id)?;
-        self.ensure_local_source_from_config(&accepted.fs.source_name, &source)?;
+        self.ensure_agentfs_source_from_service(&accepted.fs.source_name, &source)?;
         self.cache_accepted_filesystem(
             &accepted.fs,
             accepted
@@ -313,15 +313,7 @@ impl SectiondControlPlane {
     pub fn fs_attach(&self, fs_ref: &str, local_root: &Path) -> Result<AgentFsAttachResult> {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let resolved = self.find_agentfs(&rt, fs_ref)?;
-        let issued = self.control_service.issue_credential(
-            &resolved.fs.fs_id,
-            &actor.agent_id,
-            &actor.installation_id,
-        )?;
-        self.ensure_local_source_from_config(&resolved.fs.source_name, &issued.source)?;
-        self.cache_accepted_filesystem(&resolved.fs, issued.binding.issued_at_ms)?;
-        self.cache_credential_binding_record(&issued.binding)?;
+        let resolved = self.find_agentfs(&rt, fs_ref, &actor)?;
         ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
 
         let local_root = canonicalize_local_root_input(local_root)?;
@@ -426,8 +418,8 @@ impl SectiondControlPlane {
     pub fn fs_status(&self, fs_ref: &str) -> Result<AgentFsStatusSnapshot> {
         let rt = tokio::runtime::Runtime::new()?;
         let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
-        let resolved = self.find_agentfs(&rt, &resolved_ref)?;
         let agent = self.require_agent_identity()?;
+        let resolved = self.find_agentfs(&rt, &resolved_ref, &agent)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
             &agent.agent_id,
@@ -524,8 +516,8 @@ impl SectiondControlPlane {
     ) -> Result<Vec<crate::AgentFsEventRecord>> {
         let rt = tokio::runtime::Runtime::new()?;
         let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
-        let resolved = self.find_agentfs(&rt, &resolved_ref)?;
         let agent = self.require_agent_identity()?;
+        let resolved = self.find_agentfs(&rt, &resolved_ref, &agent)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
             &agent.agent_id,
@@ -553,7 +545,7 @@ impl SectiondControlPlane {
             .fs_id
             .clone()
             .ok_or_else(|| AgentFsError::unknown_fs(&marker.source_id))?;
-        let resolved = self.find_agentfs(&rt, &fs_id)?;
+        let resolved = self.find_agentfs(&rt, &fs_id, &actor)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
             &actor.agent_id,
@@ -604,7 +596,7 @@ impl SectiondControlPlane {
             .fs_id
             .clone()
             .ok_or_else(|| AgentFsError::unknown_fs(&marker.source_id))?;
-        let resolved = self.find_agentfs(&rt, &fs_id)?;
+        let resolved = self.find_agentfs(&rt, &fs_id, &actor)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
             &actor.agent_id,
@@ -811,7 +803,7 @@ impl SectiondControlPlane {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
         let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
-        let resolved = self.find_agentfs(&rt, &resolved_ref)?;
+        let resolved = self.find_agentfs(&rt, &resolved_ref, &actor)?;
         self.control_service.authorize_capability(
             &resolved.fs.fs_id,
             &actor.agent_id,
@@ -1239,8 +1231,10 @@ impl SectiondControlPlane {
         })
     }
 
-    fn ensure_local_source_from_config(&self, name: &str, source: &SourceConfig) -> Result<()> {
-        self.ensure_name_is_not_config_owned(name, "change")?;
+    fn ensure_agentfs_source_from_service(&self, name: &str, source: &SourceConfig) -> Result<()> {
+        if !self.store.is_agentfs_source(name)? {
+            self.ensure_name_is_not_config_owned(name, "change")?;
+        }
         self.store.add_source(name, source)?;
         Ok(())
     }
@@ -1354,17 +1348,31 @@ impl SectiondControlPlane {
             .ok_or_else(|| AgentFsError::unknown_agent().into())
     }
 
-    fn find_agentfs(&self, rt: &tokio::runtime::Runtime, fs_ref: &str) -> Result<ResolvedAgentFs> {
+    fn find_agentfs(
+        &self,
+        rt: &tokio::runtime::Runtime,
+        fs_ref: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<ResolvedAgentFs> {
         let resolved = self.control_service.resolve_filesystem(fs_ref)?;
-        let operator = build_operator(&resolved.source.provider, &resolved.source.options)?;
+        let issued = self.control_service.issue_credential(
+            &resolved.fs.fs_id,
+            &actor.agent_id,
+            &actor.installation_id,
+        )?;
+        self.ensure_agentfs_source_from_service(&resolved.fs.source_name, &issued.source)?;
+        self.cache_accepted_filesystem(&resolved.fs, issued.binding.issued_at_ms)?;
+        self.cache_credential_binding_record(&issued.binding)?;
+
+        let operator = build_operator(&issued.source.provider, &issued.source.options)?;
         let source = SourceRegistryEntry {
             name: resolved.fs.source_name.clone(),
-            provider: resolved.source.provider.clone(),
+            provider: issued.source.provider.clone(),
             origin: SourceOrigin::ProviderStore,
-            metadata_ttl_secs: resolved.source.cache.metadata_ttl_secs,
-            content_ttl_secs: resolved.source.cache.content_ttl_secs,
+            metadata_ttl_secs: issued.source.cache.metadata_ttl_secs,
+            content_ttl_secs: issued.source.cache.content_ttl_secs,
             local_root: self.store.get_source_local_root(&resolved.fs.source_name)?,
-            options: resolved
+            options: issued
                 .source
                 .options
                 .iter()

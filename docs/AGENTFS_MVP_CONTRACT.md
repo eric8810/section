@@ -475,6 +475,8 @@ Rules:
 
 - `fs create` asks Section Control Service to bind a SourceProfile.
 - Section Control Service makes the final SourceProfile decision.
+- AgentFS commands that read or write the backing source must refresh a service-issued read credential before constructing the internal source operator.
+- The local cached source config is not authority; it is refreshed from Section Control Service after credential issuance.
 - `fs create` 必须完整初始化 shared metadata；不能留下半个 FS。
 - 如果 shared metadata 初始化失败，必须回滚 Control Service 的 FS/grant/event 记录。
 - 如果 shared metadata 初始化失败，必须清理本地 AgentFS source cache。

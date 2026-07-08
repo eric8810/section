@@ -457,8 +457,14 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
             .contains(fixture.remote_root.to_str().expect("utf8 remote root")),
         "accept JSON must not expose backing source paths"
     );
+    let credential_count_after_accept = fixture.control_row_count("credential_bindings");
 
     let attach = writer.attach();
+    let credential_count_after_attach = fixture.control_row_count("credential_bindings");
+    assert!(
+        credential_count_after_attach > credential_count_after_accept,
+        "attach must refresh a service-issued credential before touching backing source"
+    );
     assert_eq!(attach["attach"]["fs"]["fs_id"], fs_id);
     assert!(
         attach["attach"]["source"]["options"].is_null(),
@@ -478,6 +484,11 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
     );
 
     let status = writer.commit_status();
+    let credential_count_after_status = fixture.control_row_count("credential_bindings");
+    assert!(
+        credential_count_after_status > credential_count_after_attach,
+        "commit status must refresh a service-issued credential before reading backing source"
+    );
     let dirty_paths = status["status"]["dirty_paths"]
         .as_array()
         .expect("dirty paths");
@@ -489,6 +500,10 @@ fn e2e_writer_commit_becomes_shared_truth_for_owner() {
     );
 
     let commit = writer.commit_apply("add writer note");
+    assert!(
+        fixture.control_row_count("credential_bindings") > credential_count_after_status,
+        "commit apply must refresh a service-issued credential before accepting shared truth"
+    );
     let commit_id = commit["commit"]["commit_id"]
         .as_str()
         .expect("commit id")
