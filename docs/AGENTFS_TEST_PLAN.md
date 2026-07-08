@@ -877,7 +877,7 @@ and P1 gaps:
 | Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
 | Metadata schema and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 部分实现。已有 event `seq`、事件路径覆盖拒绝、commit accepted 事件失败不推进 head；还缺统一 schema validation、坏数据隔离、backend create-if-absent 断言，以及服务端事件源或 outbox。 |
 | JSON error contract | Agent callers need stable machine-readable failures. | 已有第一版：`agent`、`fs`、`commit`、`watch --agentfs` 在 `--json` 失败时输出稳定 `error.code`、`retryable`、`details`。参数错误是 `invalid_arguments`，普通运行错误统一落到 `operation_failed`。 |
-| File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 已有第一版：同一路径文件/目录类型替换会在 accepted commit 写入前失败，返回 `path_type_conflict`。 |
+| File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 已有第一版：同一路径文件/目录类型替换会在 accepted commit 写入前失败，返回 `path_type_conflict`；非空目录删除会物化为干净的远端删除。 |
 | FS status decision surface | Agents need one command to know whether they can act. | 已有第一版：`fs status --json` 支持本地 path，输出 role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
 
 ### Future Feature E2E Gates
@@ -910,7 +910,10 @@ It covers the product behaviors that are implemented today:
 | `e2e_backing_source_drift_cannot_be_committed_over` | backing source 被外部直接修改后，commit 返回 `remote_drift`；head、backing file、accepted event 数量都不变 |
 | `e2e_hardening_rejects_unsafe_backing_source_and_attach_root` | non-empty backing source rejected; backing root cannot be attached as working root |
 | `e2e_attach_canonicalizes_local_root_identity` | attach 使用带 `..` 的路径拼写时，返回 JSON、root marker、`fs status` 都记录 canonical local root |
+| `e2e_fs_status_reports_corrupt_local_marker` | corrupt `.section/root.json` is reported as `malformed_shared_metadata` by `fs status <local path> --json` instead of being swallowed as `unknown_fs` |
 | `e2e_rejects_file_dir_type_replacement_before_acceptance` | file/dir type replacement is rejected before a new accepted commit; head and backing source remain unchanged |
+| `e2e_non_empty_directory_delete_materializes_cleanly` | non-empty directory delete commits as shared truth; remote subtree is removed and working copy becomes clean |
+| `e2e_materialization_failure_emits_fs_error_event` | real backing-source materialization failure leaves failed head, emits `commit.materialization_failed` and `fs.error`, and keeps unwritten file out of backing source |
 | `e2e_event_write_failure_does_not_advance_commit_head` | `commit.accepted` event 写失败时，commit 命令失败；head 不前进，用户文件不物化 |
 | `e2e_rejects_non_utf8_commit_paths` | 非 UTF-8 本地文件名不会被 lossy 转成共享路径；commit 返回 `non_utf8_path`，head 和 accepted event 不变 |
 | `e2e_commit_success_survives_local_marker_update_failure` | accepted/materialized commit still succeeds when final local marker update fails; warning is returned and trusted mount base is updated |

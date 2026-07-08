@@ -1384,7 +1384,13 @@ impl SectiondControlPlane {
 
         match discover_root_marker(&absolutize_path(path)?) {
             Ok(marker) => Ok(marker.fs_id.unwrap_or(marker.source_id)),
-            Err(_) if looks_like_path => Err(AgentFsError::unknown_fs(fs_ref).into()),
+            Err(err) if looks_like_path => {
+                if err.downcast_ref::<AgentFsError>().is_some() {
+                    Err(err)
+                } else {
+                    Err(AgentFsError::unknown_fs(fs_ref).into())
+                }
+            }
             Err(_) => Ok(fs_ref.to_string()),
         }
     }
@@ -2529,8 +2535,19 @@ fn discover_root_marker(path: &Path) -> Result<RootDiscoveryMarker> {
     loop {
         let marker_path = current.join(".section").join("root.json");
         if marker_path.exists() {
-            let marker = std::fs::read(&marker_path)?;
-            return Ok(serde_json::from_slice(&marker)?);
+            let marker = std::fs::read(&marker_path).map_err(|err| {
+                AgentFsError::malformed_metadata(format!(
+                    "failed to read local root marker {}: {err}",
+                    marker_path.display()
+                ))
+            })?;
+            return serde_json::from_slice(&marker).map_err(|err| {
+                AgentFsError::malformed_metadata(format!(
+                    "failed to parse local root marker {}: {err}",
+                    marker_path.display()
+                ))
+                .into()
+            });
         }
 
         if !current.pop() {

@@ -136,10 +136,10 @@ internal and clearly marked incomplete.
 | 22 | `fs list/status` can expose FS metadata without checking read grant. | decision | decision-needed |
 | 27 | `section fs status <attached local path>` does not resolve from a local path. | confirmed | fixed-local |
 | 28 | `fs status` lacks dirty state and full materialization detail. | partial | fixed-local |
-| 30 | Non-empty directory deletion can race parent/child deletes in sync transport. | confirmed | open |
+| 30 | Non-empty directory deletion can race parent/child deletes in sync transport. | confirmed | fixed-local |
 | 32 | `commit.materialized` event lacks path/state details. | confirmed | fixed-local |
 | 35 | `.section/**` filtering is broader than the written contract's `.section/agentfs/**` reservation. | decision | decision-needed |
-| 50 | `fs status` swallows corrupt local root markers. | confirmed | open |
+| 50 | `fs status` swallows corrupt local root markers. | confirmed | fixed-local |
 
 ### Fixed In Current Local Branch
 
@@ -213,7 +213,7 @@ This table preserves every reviewer finding for traceability.
 | 27 | `fs status <local path>` is documented but unsupported. | P2 | confirmed | fixed-local | `fs status` now resolves local root markers before FS lookup. |
 | 28 | `fs status` lacks dirty/materialization state. | P2 | partial | fixed-local | Status now reports materialization, dirty count, stale state, warnings, and next actions. |
 | 29 | Successful commit can be reported as failed after marker write failure. | P1 | confirmed | fixed-local | Marker/store update happens after materialization as a local finalization step; marker failure returns a warning while the accepted/materialized commit succeeds. |
-| 30 | Directory delete can race child deletes. | P2 | confirmed | open | Order delete plans deepest-first or coalesce subtree deletes. |
+| 30 | Directory delete can race child deletes. | P2 | confirmed | fixed-local | AgentFS materialization orders deletes deepest-first and E2E verifies non-empty directory delete leaves remote and working copy clean. |
 | 31 | `fs.attached` leaks local absolute path. | P2 | confirmed | fixed-local | Keep event payload free of local paths. |
 | 32 | `commit.materialized` lacks paths/state details. | P2 | confirmed | fixed-local | Event data now includes `materialization_state` and commit path summary; E2E verifies it through `fs events`. |
 | 33 | Reattach new empty root can delete remote due to old sync state. | P0 | confirmed | fixed-local | Keep clear-sync-state-before-attach behavior. |
@@ -233,7 +233,7 @@ This table preserves every reviewer finding for traceability.
 | 47 | Overlapping local roots can leak child markers. | P1 | confirmed | fixed-local | Parent/child roots are rejected after canonicalization so nested root markers cannot become user content. |
 | 48 | Low-level source commands can break AgentFS markers. | P1 | confirmed | fixed-local | Low-level source/path commands reject AgentFS-backed sources by default. |
 | 49 | AgentFS event replay/resume has no control-plane entry. | P0 | covered | fixed-local | `section fs events` supports replay and `--after`; `watch --agentfs` streams the same event records. |
-| 50 | `fs status` swallows corrupt local marker. | P2 | confirmed | open | Report marker error in status output. |
+| 50 | `fs status` swallows corrupt local marker. | P2 | confirmed | fixed-local | `fs status <local path> --json` now returns `malformed_shared_metadata` with a local marker parse/read message. |
 | 51 | Event files are not immutable. | P1 | partial | partial | Existing event paths are rejected; still need create-if-absent semantics where backend supports it. |
 | 52 | Grant `capabilities` field is not used for enforcement. | P2 | confirmed | fixed-local | Keep enforcement based on stored capabilities; schema validation still needed under #10. |
 

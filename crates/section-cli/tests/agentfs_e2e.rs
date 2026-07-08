@@ -977,6 +977,28 @@ fn e2e_attach_canonicalizes_local_root_identity() {
 }
 
 #[test]
+fn e2e_fs_status_reports_corrupt_local_marker() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    let marker_path = owner.local_root.join(".section/root.json");
+    fs::write(&marker_path, "{bad marker").expect("corrupt local marker");
+
+    let status = owner.fs_status_output(&owner.local_root.to_string_lossy());
+    let error = assert_json_error(&status, "malformed_shared_metadata");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("local root marker"),
+        "status should report the marker parse problem: {error:?}"
+    );
+}
+
+#[test]
 fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
     let fixture = AgentFsFixture::new();
     let owner = fixture.agent("owner");
@@ -1034,6 +1056,50 @@ fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
     assert_eq!(
         accepted_after, accepted_before,
         "type replacement must be rejected before a new accepted commit"
+    );
+}
+
+#[test]
+fn e2e_non_empty_directory_delete_materializes_cleanly() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    owner.write_local("docs/tree/a.txt", "a");
+    owner.write_local("docs/tree/nested/b.txt", "b");
+    owner.commit_apply("create nested tree");
+    assert!(fixture.path("docs/tree/a.txt").is_file());
+    assert!(fixture.path("docs/tree/nested/b.txt").is_file());
+
+    fs::remove_dir_all(owner.local_root.join("docs/tree")).expect("remove local tree");
+    let delete_commit = owner.commit_apply("delete nested tree");
+    assert_eq!(
+        delete_commit["commit"]["materialization_state"],
+        "materialized"
+    );
+    assert!(
+        !fixture.path("docs/tree").exists(),
+        "remote subtree should be removed by the delete commit"
+    );
+    assert!(delete_commit["commit"]["paths"]
+        .as_array()
+        .expect("delete commit paths")
+        .iter()
+        .any(|path| path["path"]
+            .as_str()
+            .expect("path")
+            .starts_with("docs/tree")
+            && path["op"] == "delete"));
+
+    let status = owner.commit_status();
+    assert!(
+        status["status"]["dirty_paths"]
+            .as_array()
+            .expect("dirty paths")
+            .is_empty(),
+        "delete commit should leave the working copy clean: {status:?}"
     );
 }
 
