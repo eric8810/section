@@ -1037,6 +1037,98 @@ fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn e2e_materialization_failure_emits_fs_error_event() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    owner.write_local("docs/base.txt", "base");
+    let base_commit = owner.commit_apply("create docs base");
+    let base_commit_id = base_commit["commit"]["commit_id"]
+        .as_str()
+        .expect("base commit id")
+        .to_string();
+
+    let docs_path = fixture.path("docs");
+    let original_mode = fs::metadata(&docs_path)
+        .expect("docs metadata")
+        .permissions()
+        .mode();
+    let mut readonly = fs::metadata(&docs_path)
+        .expect("docs metadata")
+        .permissions();
+    readonly.set_mode(0o500);
+    fs::set_permissions(&docs_path, readonly).expect("make remote docs read-only");
+
+    owner.write_local("docs/fail.txt", "cannot materialize");
+    let rejected = owner.commit_apply_output("fail materialization");
+
+    let mut restored = fs::metadata(&docs_path)
+        .expect("docs metadata")
+        .permissions();
+    restored.set_mode(original_mode);
+    fs::set_permissions(&docs_path, restored).expect("restore remote docs permissions");
+
+    let error = assert_json_error(&rejected, "materialization_failed");
+    assert_eq!(error["error"]["retryable"], true);
+    assert!(
+        !fixture.path("docs/fail.txt").exists(),
+        "failed materialization must not write the blocked file"
+    );
+
+    let head = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/heads/current.json"),
+    );
+    let failed_commit_id = head["commit_id"]
+        .as_str()
+        .expect("failed head commit id")
+        .to_string();
+    assert_ne!(failed_commit_id, base_commit_id);
+    let failed_commit = read_json(
+        fixture
+            .remote_root
+            .join(".section/agentfs/commits")
+            .join(format!("{failed_commit_id}.json")),
+    );
+    assert_eq!(
+        failed_commit["materialization_state"],
+        "failed_to_materialize"
+    );
+
+    let events = owner.fs_events(FS_NAME, None);
+    let replay_events = events["events"].as_array().expect("events");
+    assert!(
+        replay_events.iter().any(|event| {
+            event["kind"] == "commit.materialization_failed"
+                && event["subject_id"] == failed_commit_id
+        }),
+        "commit failure event must be replayable: {replay_events:?}"
+    );
+    let fs_error = replay_events
+        .iter()
+        .find(|event| event["kind"] == "fs.error" && event["subject_id"] == failed_commit_id)
+        .expect("fs.error event");
+    assert_eq!(fs_error["data"]["code"], "materialization_failed");
+    assert_eq!(fs_error["data"]["commit_id"], failed_commit_id);
+    assert_eq!(
+        fs_error["data"]["materialization_state"],
+        "failed_to_materialize"
+    );
+    assert!(fs_error["data"]["paths"]
+        .as_array()
+        .expect("fs.error paths")
+        .iter()
+        .any(|path| path["path"] == "docs/fail.txt" && path["op"] == "create"));
+}
+
 #[test]
 fn e2e_event_write_failure_does_not_advance_commit_head() {
     let fixture = AgentFsFixture::new();

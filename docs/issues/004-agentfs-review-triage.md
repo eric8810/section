@@ -131,7 +131,7 @@ internal and clearly marked incomplete.
 | --- | --- | --- | --- |
 | 4 | Attach/status should reject or expose failed materialization head. | partial | fixed-local |
 | 11 | `fs status` role can be stale when multiple active grants exist. | partial | fixed-local |
-| 17 | Materialization failure does not emit `fs.error`. | confirmed | open |
+| 17 | Materialization failure does not emit `fs.error`. | confirmed | fixed-local |
 | 21 | Failed attach can leave a half-bound working copy. | partial | fixed-local |
 | 22 | `fs list/status` can expose FS metadata without checking read grant. | decision | decision-needed |
 | 27 | `section fs status <attached local path>` does not resolve from a local path. | confirmed | fixed-local |
@@ -200,7 +200,7 @@ This table preserves every reviewer finding for traceability.
 | 14 | Event ordering can reverse within the same millisecond. | P1 | confirmed | fixed-local | Events now carry monotonic per-FS `seq` and replay sorts by `seq`. |
 | 15 | FS metadata initialization is not failure-safe. | P1 | confirmed | open | Stage metadata or add initialization state and recovery. |
 | 16 | Non-UTF-8 paths are lossy converted. | P1 | confirmed | fixed-local | AgentFS commit now rejects non-UTF-8 local paths with `non_utf8_path` before acceptance. |
-| 17 | Materialization failure does not emit `fs.error`. | P2 | confirmed | open | Emit both commit failure and FS state event. |
+| 17 | Materialization failure does not emit `fs.error`. | P2 | confirmed | fixed-local | Materialization failure now emits both `commit.materialization_failed` and `fs.error`; E2E verifies a real backing-source failure. |
 | 18 | Non-empty backing source can become head-null FS truth. | P0 | confirmed | fixed-local | Reject non-empty backing source or import it as initial commit. |
 | 19 | Stale-base check trusts editable root marker. | P0 | confirmed | fixed-local | Commit/status use the trusted local mount store for base; E2E verifies marker base tampering cannot bypass stale-base. |
 | 20 | Governance mutation can succeed while event write fails. | P0 | confirmed | partial | Commit accepted/materialized state now writes the required event before advancing head or commit state; still need a service-side event authority or recoverable outbox for all mirrored governance mutations. |

@@ -356,7 +356,7 @@ Commit acceptance writes governance metadata first:
 7. release head lock,
 8. materialize file changes from staging snapshot to backing source,
 9. update commit materialization state,
-10. write `commit.materialized` or `commit.materialization_failed` event,
+10. write `commit.materialized`, or write both `commit.materialization_failed` and `fs.error`,
 11. update local mount store and root marker as a local finalization step.
 
 If step 11 fails after accepted metadata and backing-source materialization have
@@ -590,7 +590,7 @@ staging snapshot 路径：
 - repair 不创建新 commit。
 - repair 不移动 head。
 - repair 成功写 `commit.materialized`。
-- repair 失败写 `commit.materialization_failed`。
+- repair 失败写 `commit.materialization_failed` 和 `fs.error`。
 - 如果 staging snapshot 不存在，返回 `missing_commit_snapshot`。
 
 MVP 不提供兜底修复路径。

@@ -211,7 +211,7 @@ Required codes:
 | Case | Steps | Expected |
 | --- | --- | --- |
 | successful materialization | commit accepted | commit state becomes `materialized`, event `commit.materialized` includes materialization state and changed paths |
-| materialization failure | make backing source unwritable or invalid | commit remains head, state becomes `failed_to_materialize`, event emitted |
+| materialization failure | make backing source unwritable or invalid | commit remains head, state becomes `failed_to_materialize`, events `commit.materialization_failed` and `fs.error` are emitted |
 | retry materialization | retry failed commit | same commit id used; no duplicate accepted commit |
 | block next commit | head failed materialization | next `commit apply` fails |
 
@@ -554,7 +554,7 @@ write are one distributed transaction.
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
-| 1 | writer | commit a dirty path while backing source fails materialization | commit remains accepted with `failed_to_materialize` |
+| 1 | writer | commit a dirty path while backing source fails materialization | commit remains accepted with `failed_to_materialize`; `commit.materialization_failed` and `fs.error` are emitted |
 | 2 | writer | attempt another commit | command fails before accepting a new commit |
 | 3 | owner or writer | inspect status | FS reports non-ready materialization state |
 | 4 | test | inspect head | head remains on the failed accepted commit |

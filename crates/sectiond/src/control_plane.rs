@@ -764,7 +764,7 @@ impl SectiondControlPlane {
                     "source sync reported {} conflict(s)",
                     sync.conflicts
                 ));
-                write_materialization_failed_event(
+                write_materialization_failure_events(
                     &rt,
                     &resolved.operator,
                     &resolved.fs.fs_id,
@@ -780,7 +780,7 @@ impl SectiondControlPlane {
             Err(err) => {
                 commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
                 commit.error = Some(err.to_string());
-                write_materialization_failed_event(
+                write_materialization_failure_events(
                     &rt,
                     &resolved.operator,
                     &resolved.fs.fs_id,
@@ -918,7 +918,7 @@ impl SectiondControlPlane {
                     "repair source materialization reported {} conflict(s)",
                     sync.conflicts
                 ));
-                write_materialization_failed_event(
+                write_materialization_failure_events(
                     &rt,
                     &resolved.operator,
                     &resolved.fs.fs_id,
@@ -934,7 +934,7 @@ impl SectiondControlPlane {
             Err(err) => {
                 commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
                 commit.error = Some(err.to_string());
-                write_materialization_failed_event(
+                write_materialization_failure_events(
                     &rt,
                     &resolved.operator,
                     &resolved.fs.fs_id,
@@ -1738,14 +1738,14 @@ fn head_materialization_state(
     Ok(Some(commit.materialization_state))
 }
 
-fn write_materialization_failed_event(
+fn write_materialization_failure_events(
     rt: &tokio::runtime::Runtime,
     operator: &Operator,
     fs_id: &str,
     actor_agent_id: &str,
     commit: &AgentFsCommitRecord,
 ) -> Result<()> {
-    let event = agentfs::event_record(
+    let commit_event = agentfs::event_record(
         fs_id,
         "commit.materialization_failed",
         actor_agent_id,
@@ -1753,7 +1753,23 @@ fn write_materialization_failed_event(
         None,
         serde_json::json!({ "error": commit.error }),
     )?;
-    agentfs::write_event(rt, operator, &event)
+    agentfs::write_event(rt, operator, &commit_event)?;
+
+    let fs_event = agentfs::event_record(
+        fs_id,
+        "fs.error",
+        actor_agent_id,
+        &commit.commit_id,
+        None,
+        serde_json::json!({
+            "code": "materialization_failed",
+            "commit_id": commit.commit_id.clone(),
+            "materialization_state": commit.materialization_state,
+            "error": commit.error.clone(),
+            "paths": commit.paths.clone(),
+        }),
+    )?;
+    agentfs::write_event(rt, operator, &fs_event)
 }
 
 fn materialized_event_data(
