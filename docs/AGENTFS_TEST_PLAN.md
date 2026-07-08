@@ -904,6 +904,7 @@ It covers the product behaviors that are implemented today:
 | --- | --- |
 | `e2e_writer_commit_becomes_shared_truth_for_owner` | owner creates FS; writer commit becomes shared truth; owner observes accepted content; staging snapshot、repair、`fs events` replay、`watch --agentfs`、event `seq`、`authorized_by`、JSON error payload 都可验证 |
 | `e2e_fs_ref_resolves_source_name_and_rejects_ambiguity` | `fs status` resolves by source name; duplicate source-name refs fail with `ambiguous_fs_ref`; exact fs id still resolves |
+| `e2e_bad_metadata_in_unrelated_source_does_not_block_fs_lookup` | unrelated source 里坏的 `.section/agentfs/fs.json` 不会阻塞健康 FS 的 `fs status` 和 `fs events` |
 | `e2e_grants_control_attach_manage_and_commit_authority` | reader denied commit; ungranted agent denied attach; downgrade removes commit authority; manager can manage but cannot commit; `fs status` exposes role、capabilities、dirty、next_actions |
 | `e2e_stale_writer_cannot_overwrite_new_truth` | stale writer cannot commit over a newer accepted head; 篡改本地 marker 不能绕过 trusted mount base；`fs status` exposes stale state and `sync` next action |
 | `e2e_backing_source_drift_cannot_be_committed_over` | backing source 被外部直接修改后，commit 返回 `remote_drift`；head、backing file、accepted event 数量都不变 |

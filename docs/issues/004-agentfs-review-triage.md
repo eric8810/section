@@ -114,7 +114,7 @@ These should be fixed before calling the AgentFS MVP complete.
 | 26 | Accepted commits do not record which grant allowed the mutation. | confirmed | fixed-local |
 | 29 | A committed/materialized mutation can be reported as failed if final local marker write fails. | confirmed | fixed-local |
 | 39 | Local root identity is not canonicalized. | confirmed | open |
-| 40 | A bad `fs.json` in an unrelated source can block lookup of a healthy FS. | confirmed | open |
+| 40 | A bad `fs.json` in an unrelated source can block lookup of a healthy FS. | confirmed | fixed-local |
 | 43 | FS reference resolution does not support local source aliases and can pick the first name collision. | confirmed | fixed-local |
 | 45 | File/directory type replacement is accepted before sync later reports conflict. | confirmed | fixed-local |
 | 46 | AgentFS tests do not cover the test plan. | partial | partial |
@@ -223,7 +223,7 @@ This table preserves every reviewer finding for traceability.
 | 37 | Same local root can be stolen by another source. | P1 | confirmed | fixed-local | Keep cross-source collision rejection; add canonical path check separately. |
 | 38 | `fs create` overwrites existing store-owned source. | P1 | confirmed | fixed-local | Keep source-exists guard. |
 | 39 | Local root is not canonicalized. | P1 | confirmed | open | Canonicalize existing roots; handle not-yet-created roots carefully. |
-| 40 | Bad metadata in unrelated source blocks healthy FS lookup. | P1 | confirmed | open | Only parse candidate source when ref points to source; otherwise collect per-source errors. |
+| 40 | Bad metadata in unrelated source blocks healthy FS lookup. | P1 | confirmed | fixed-local | AgentFS lookup resolves through Control Service records; E2E proves unrelated malformed source metadata does not block healthy FS status/events. |
 | 41 | Manager can self-grant writer. | P0 | confirmed | fixed-local | Keep self-escalation guard. |
 | 42 | Backing root can be attached as working root for `fs` provider. | P0 | confirmed | fixed-local | Reject local roots overlapping provider backing root for local fs provider. |
 | 43 | FS ref lookup mishandles local aliases and name collisions. | P1 | confirmed | fixed-local | Lookup now prefers exact fs id, then source name, then FS name; duplicate source/name matches return `ambiguous_fs_ref`. |

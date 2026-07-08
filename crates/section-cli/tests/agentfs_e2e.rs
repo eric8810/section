@@ -593,6 +593,44 @@ fn e2e_fs_ref_resolves_source_name_and_rejects_ambiguity() {
 }
 
 #[test]
+fn e2e_bad_metadata_in_unrelated_source_does_not_block_fs_lookup() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    owner.login("owner");
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
+
+    let bad_source_root = fixture.root.join("bad-source");
+    fs::create_dir_all(bad_source_root.join(".section/agentfs"))
+        .expect("create bad source metadata dir");
+    fs::write(
+        bad_source_root.join(".section/agentfs/fs.json"),
+        "{not valid json",
+    )
+    .expect("write malformed unrelated fs metadata");
+    let add_bad_source = owner.run_owned(vec![
+        "--json".to_string(),
+        "source".to_string(),
+        "add".to_string(),
+        "bad-source".to_string(),
+        "--provider".to_string(),
+        "fs".to_string(),
+        "--opt".to_string(),
+        format!("root={}", bad_source_root.display()),
+    ]);
+    assert_success(&add_bad_source, "source add bad metadata source");
+
+    let status = owner.fs_status(FS_NAME);
+    assert_eq!(status["status"]["fs"]["fs_id"], fs_id);
+    let events = owner.fs_events(FS_NAME, None);
+    assert!(events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .any(|event| event["kind"] == "fs.created"));
+}
+
+#[test]
 fn e2e_grants_control_attach_manage_and_commit_authority() {
     let fixture = AgentFsFixture::new();
     let owner = fixture.agent("owner");
