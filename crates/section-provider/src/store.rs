@@ -54,6 +54,20 @@ pub struct AgentFsMountRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFsHookRunRecord {
+    pub run_id: String,
+    pub hook_id: String,
+    pub fs_id: String,
+    pub event_id: String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub started_at_ms: i64,
+    pub finished_at_ms: i64,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocalRootBinding {
     pub source_name: String,
     pub local_root: PathBuf,
@@ -222,6 +236,18 @@ impl ProviderStore {
                 local_root TEXT NOT NULL UNIQUE,
                 base_commit_id TEXT,
                 updated_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS agentfs_hook_runs (
+                run_id TEXT PRIMARY KEY,
+                hook_id TEXT NOT NULL,
+                fs_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                started_at_ms INTEGER NOT NULL,
+                finished_at_ms INTEGER NOT NULL,
+                stdout_tail TEXT NOT NULL,
+                stderr_tail TEXT NOT NULL
             );",
         )?;
 
@@ -467,6 +493,58 @@ impl ProviderStore {
         Ok(())
     }
 
+    pub fn insert_agentfs_hook_run(&self, record: &AgentFsHookRunRecord) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO agentfs_hook_runs (
+                run_id,
+                hook_id,
+                fs_id,
+                event_id,
+                status,
+                exit_code,
+                started_at_ms,
+                finished_at_ms,
+                stdout_tail,
+                stderr_tail
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                record.run_id,
+                record.hook_id,
+                record.fs_id,
+                record.event_id,
+                record.status,
+                record.exit_code,
+                record.started_at_ms,
+                record.finished_at_ms,
+                record.stdout_tail,
+                record.stderr_tail,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_agentfs_hook_runs(&self, fs_id: &str) -> anyhow::Result<Vec<AgentFsHookRunRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                run_id,
+                hook_id,
+                fs_id,
+                event_id,
+                status,
+                exit_code,
+                started_at_ms,
+                finished_at_ms,
+                stdout_tail,
+                stderr_tail
+             FROM agentfs_hook_runs
+             WHERE fs_id = ?1
+             ORDER BY started_at_ms, run_id",
+        )?;
+        let rows = stmt.query_map([fs_id], read_agentfs_hook_run_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn remove_agentfs_filesystem_cache(
         &self,
         fs_id: &str,
@@ -508,6 +586,8 @@ impl ProviderStore {
                 "DELETE FROM agentfs_credential_bindings WHERE fs_id = ?1",
                 [fs_id],
             )?;
+            self.conn
+                .execute("DELETE FROM agentfs_hook_runs WHERE fs_id = ?1", [fs_id])?;
             Ok(())
         })();
 
@@ -1196,6 +1276,21 @@ fn read_agentfs_mount_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFsMo
         local_root: PathBuf::from(row.get::<_, String>(5)?),
         base_commit_id: row.get(6)?,
         updated_at_ms: row.get(7)?,
+    })
+}
+
+fn read_agentfs_hook_run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFsHookRunRecord> {
+    Ok(AgentFsHookRunRecord {
+        run_id: row.get(0)?,
+        hook_id: row.get(1)?,
+        fs_id: row.get(2)?,
+        event_id: row.get(3)?,
+        status: row.get(4)?,
+        exit_code: row.get(5)?,
+        started_at_ms: row.get(6)?,
+        finished_at_ms: row.get(7)?,
+        stdout_tail: row.get(8)?,
+        stderr_tail: row.get(9)?,
     })
 }
 

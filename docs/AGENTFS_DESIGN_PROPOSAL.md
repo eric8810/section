@@ -314,29 +314,43 @@ Post-MVP behavior:
 
 ## Hooks
 
-Hooks are deferred.
+Hooks v1 已有第一版，但不是 MVP 核心。
 
-Reason: hooks require a trust model. Before hooks can block commits, the design must define:
-
-- who can install hooks
-- where hooks execute
-- which identity hooks run as
-- whether hooks receive secrets
-- whether hook output is trusted
-- how hook failures affect commit state
-
-Post-MVP hook events:
+Hooks v1 只做一件事：
 
 ```text
-fs.attach
-grant.changed
-commit.preflight
-commit.accepted
-commit.failed
-conflict.detected
+本机 agent 完成一次普通提交，并且提交已落地后，
+运行这个 FS 上的本地脚本。
 ```
 
-MVP should reserve the event names but not implement hook execution.
+事件名仍然是 `commit.materialized`。
+产品语言叫：提交已落地。
+
+规则：
+
+- 只支持 `commit.materialized`。
+- hook 不阻塞提交。
+- hook 失败不影响提交成为共享事实。
+- hook 定义由 Control Service 保存。
+- hook 执行在当前本地 agent 机器上。
+- hook 执行结果第一版只记录在本地。
+- 没有 attach local root 的机器不执行 hook。
+- hook 子进程清空环境，只注入固定 `SECTION_*` 变量。
+- 管理 hook 只走 Control Service，不读取底层同步目录。
+- 修复落地失败的提交不触发 hook。
+
+不做：
+
+- 阻塞型 hook
+- 服务端执行 hook
+- watch 触发
+- secret 管理
+- 沙箱
+- 启用/停用
+- hook 测试命令
+- 服务端 hook run 查询
+- 多事件类型
+- 路径过滤
 
 ## Control Plane Surface
 
@@ -1139,16 +1153,45 @@ hooks 是自动化层，不是治理核心。
 目标：
 
 ```text
-让 owner/manager 可以把 AgentFS 事件交给 agent 或 script 处理。
+普通提交已落地后，让本机 agent 可以自动运行脚本。
 ```
 
-设计：
+Hooks v1 只支持：
 
-- 增加 `section hooks add/list/remove/test`。
-- hook metadata 放在 `.section/agentfs/hooks/<hook_id>.json`。
-- 只有 owner 或有 `manage` 的 Agent 可以安装、修改、删除 hook。
-- hook 默认是 post-event automation，不阻塞 commit。
-- `commit.preflight` hook 可以阻塞 commit，但必须显式声明 `blocking: true`。
+```text
+commit.materialized
+```
+
+不支持其他事件。
+
+`commit.materialized` 是事件名。
+产品语言叫：提交已落地。
+
+命令：
+
+```text
+section hooks add <fs> --name <name> -- <command...>
+section hooks list <fs>
+section hooks remove <fs> <hook_id>
+```
+
+权限：
+
+| 操作 | 权限 |
+| --- | --- |
+| add | Manage |
+| remove | Manage |
+| list | Read |
+| run | 本地 agent 自动执行 |
+
+Hook 定义放在 Control Service。
+
+原因：
+
+- hook 属于 FS。
+- 谁能创建 hook 是权限问题。
+- 多台机器要看到同一套 hook 定义。
+- backing source mirror 不能作为权限来源。
 
 hook record：
 
@@ -1157,29 +1200,116 @@ hook record：
   "schema_version": 1,
   "hook_id": "hook_...",
   "fs_id": "fs_...",
-  "event": "commit.accepted",
+  "name": "summarize",
+  "event": "commit.materialized",
   "command": ["section-agent", "handle-commit"],
-  "blocking": false,
-  "timeout_ms": 30000,
-  "installed_by": "agt_...",
+  "created_by_agent_id": "agt_...",
   "created_at_ms": 1780000000000
 }
 ```
 
+Hook run 第一版只本地记录。
+
+hook run record：
+
+```json
+{
+  "run_id": "hookrun_...",
+  "hook_id": "hook_...",
+  "event_id": "evt_...",
+  "status": "success",
+  "exit_code": 0,
+  "started_at_ms": 1780000000000,
+  "finished_at_ms": 1780000001000,
+  "stdout_tail": "...",
+  "stderr_tail": "..."
+}
+```
+
+触发流程：
+
+```text
+普通提交已落地
+  -> 提交已落地事件已写入
+  -> 本地 agent 向 Control Service 读取 hooks
+  -> 只执行 event = commit.materialized 的 hooks
+  -> hook 收到事件 JSON
+  -> 本地记录 hook run
+```
+
+hook 输入：
+
+- stdin 是事件 JSON。
+- 环境变量提供固定上下文：
+- 子进程环境会先清空，再注入下面这些变量。
+
+```text
+SECTION_FS_ID
+SECTION_HOOK_ID
+SECTION_EVENT_ID
+SECTION_EVENT_KIND
+SECTION_EVENT_SEQ
+SECTION_AGENT_ID
+SECTION_LOCAL_ROOT
+```
+
+工作目录：
+
+```text
+已挂载的本地目录
+```
+
+如果本机没有 attach 这个 FS：
+
+```text
+不执行 hook。
+不创建 hook run。
+```
+
 规则：
 
-- hook 默认不拿 secrets。
-- hook 输入是结构化 JSON event。
-- hook 输出也必须是 JSON。
-- blocking hook 运行在提交方当前 installation。
-- 服务端只保存 hook 配置、事件和审计，不负责通用脚本执行。
-- blocking hook timeout 或失败时，commit 返回明确错误。
-- 非 blocking hook 失败只写 `hook.failed` event，不回滚 commit。
+- hook 不阻塞提交。
+- hook 失败不回滚提交。
+- hook 不自动拿 secrets。
+- hook stdout/stderr 只保留尾部，避免本地记录无限增长。
+- 第一版不做后台队列。
+- 第一版只在本机普通提交已落地后触发。
+- 修复落地失败的提交不触发 hook。
+- 管理 hook 只走 Control Service，不读取底层同步目录。
 
 验收：
 
-- post hook 能收到 `commit.accepted`。
-- blocking preflight hook 能阻止 commit。
+- manage agent 可以 add/remove hook。
+- read agent 可以 list hook。
+- reader 不能 add hook。
+- writer 普通提交已落地后，本机 hook 被执行。
+- hook 收到 `commit.materialized` JSON。
+- hook 失败时，提交仍然成功。
+- hook run 只在本地可查。
+- 没有 attach local root 的机器不会执行 hook。
+- 提交进程里的普通环境变量不会泄漏给 hook。
+- 底层同步目录元数据损坏时，hook 管理仍然可用。
+
+不做：
+
+- 阻塞型 hook
+- 服务端执行 hook
+- watch 触发
+- secret 管理
+- 沙箱
+- 启用/停用
+- hook 测试命令
+- 服务端 hook run 查询
+- 多事件类型
+- 路径过滤
+
+以后如果要让 hook 阻塞 commit，要单独设计。
+
+原因：
+
+- 阻塞型 hook 会影响 shared truth。
+- 它需要 sandbox、timeout、权限和失败语义。
+- 它应该和 `AGENTS.md` required checks 一起设计。
 - 没有 manage 权限不能安装 hook。
 
 ### 15. `AGENTS.md` 规则
@@ -1336,9 +1466,12 @@ proposal/approval 不是当前核心路径。
 ### Hooks
 
 - MVP hooks 是后续功能，不进入当前核心。
-- blocking hook 如果实现，运行在提交方当前 installation。
-- Section Control Service 只保存 hook 配置和审计，不提供通用执行沙箱。
-- 需要远程 runner 时，另做产品设计。
+- Hooks v1 已有第一版，只做普通提交已落地后的本地非阻塞触发。
+- Section Control Service 保存 hook 定义。
+- 本地 agent 执行 hook。
+- hook run 第一版只本地记录。
+- 修复落地失败的提交不触发 hook。
+- 阻塞型 hook、服务端 runner、watch 触发都另做产品设计。
 
 ### Owner
 

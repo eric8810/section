@@ -799,32 +799,42 @@ This proves every accepted mutation explains which authority allowed it.
 
 This proves `fs status` is enough for an Agent to decide whether it can act.
 
-#### 30. Post-Event Hook Automation
+#### 30. Hooks v1：本地提交后自动化
 
-| Step | Actor | Command or action | Expected |
+| 步骤 | 角色 | 操作 | 预期 |
 | --- | --- | --- | --- |
-| 1 | owner | `hooks add project --event commit.accepted -- <script>` | hook record is stored |
-| 2 | writer | commit a file | commit succeeds normally |
-| 3 | hook script | write received JSON to `hook-output/` | JSON includes event kind, fs id, commit id, actor |
-| 4 | observer | `fs events` | optional hook success or hook failure event is visible |
-| 5 | reader | try to add hook | `grant_denied` |
+| 1 | owner | `hooks add project --name record -- <script>` | hook 定义被保存 |
+| 2 | writer | commit 一个文件 | commit 正常成功 |
+| 3 | hook script | 把收到的 JSON 写到 `hook-output/` | JSON 包含 `commit.materialized`、fs id、commit id、actor |
+| 4 | test harness | 检查 writer 本地 hook-run store | 本地记录了一次 run |
+| 5 | hook script | 读取提交进程里的测试环境变量 | 读不到，说明没有继承父进程环境 |
+| 6 | reader | 尝试 add hook | `grant_denied` |
+| 7 | owner | 添加失败 hook 后再次 commit | commit 仍然成功，本地记录失败 run |
 
-This proves hooks can automate work from AgentFS events and require manage
-authority.
+这个场景证明：Hooks v1 只在普通提交已落地后做本地自动化，不改变共享事实。
 
-#### 31. Blocking Preflight Hook
+#### 31. Hooks v1：没有本地目录就不执行
 
-| Step | Actor | Command or action | Expected |
+| 步骤 | 角色 | 操作 | 预期 |
 | --- | --- | --- | --- |
-| 1 | owner | add `commit.preflight` hook with `blocking: true` | hook is active |
-| 2 | writer | commit content that makes hook return non-zero | commit is rejected before head advances |
-| 3 | test | inspect remote/head | no shared truth mutation occurred |
-| 4 | writer | commit content that hook accepts | commit succeeds |
-| 5 | observer | `fs events` | hook result is visible in event data or hook event |
+| 1 | owner | 给 FS 添加 hook | hook 定义被保存 |
+| 2 | unmounted agent | 这个 FS 没有 attach local root | 本地状态没有 root |
+| 3 | owner | commit 一个文件 | commit 成功 |
+| 4 | test harness | 检查 unmounted agent 本地 hook-run store | 没有 run |
 
-This proves blocking hooks can allow or block commit acceptance.
+这个场景证明：hook 执行是本地行为，不创建假的 skipped run。
 
-#### 32. `AGENTS.md` Rule Enforcement
+#### 32. Hooks v1：管理 hook 只走控制面
+
+| 步骤 | 角色 | 操作 | 预期 |
+| --- | --- | --- | --- |
+| 1 | owner | create FS | 控制面保存 FS 记录 |
+| 2 | test harness | 破坏底层同步目录里的 head 元数据 | 底层同步目录不可用于解析当前状态 |
+| 3 | owner | `hooks add/list/remove project ...` | 全部成功 |
+
+这个场景证明：添加、查看、删除 hook 是权限和控制面行为，不依赖底层同步目录。
+
+#### 33. `AGENTS.md` Rule Enforcement
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -838,7 +848,7 @@ This proves blocking hooks can allow or block commit acceptance.
 This proves FS-local rules affect commit decisions only through defined
 machine-readable rules.
 
-#### 33. Proposal And Approval Commit
+#### 34. Proposal And Approval Commit
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -851,7 +861,7 @@ machine-readable rules.
 
 This proves proposal/approval is a separate path from direct commit.
 
-#### 34. Path-Scoped Grants
+#### 35. Path-Scoped Grants
 
 | Step | Actor | Command or action | Expected |
 | --- | --- | --- | --- |
@@ -893,7 +903,7 @@ implemented.
 
 | Feature | Why It Matters | Current Status |
 | --- | --- | --- |
-| Hooks | Automation should run from AgentFS events and optionally gate commits. | Design defined: post-event hooks and blocking preflight hooks; implementation open. |
+| Hooks | commit 成为 shared truth 后，需要本地自动化。 | 已实现第一版：本地、非阻塞、只支持 `commit.materialized`，已有 e2e 覆盖。 |
 | `AGENTS.md` rules | FS-local rules should affect Agent behavior through explicit machine-readable policy. | Design defined: minimal machine block, protected paths, required checks; implementation open. |
 | Proposal/approval | Some collaborators should propose changes without direct commit authority. | Design defined: `propose` capability, proposal lifecycle, accept/reject; implementation open. |
 | Path-scoped grants | Coarse FS-wide writer grants may be too broad. | Design defined: allow-only path scopes on grants; implementation open. |
@@ -965,14 +975,14 @@ cargo test -p section-cli --tests
 
 ## MVP Out-Of-Scope Assertions
 
-The MVP must not imply unsupported behavior:
+MVP 不能暗示已经支持这些能力：
 
 | Surface | Assertion |
 | --- | --- |
-| Hooks | event names may be reserved, hook execution is not implemented |
-| `AGENTS.md` | file is synced as normal content, Markdown rules are not enforced |
-| path-scoped grants | all grants are FS-wide |
-| proposals/approvals | direct commit is the only MVP mutation path |
+| Hooks | MVP 基线不包含 hook；Hooks v1 作为后续功能单独验证 |
+| `AGENTS.md` | MVP 只同步文件，不执行 Markdown 规则 |
+| path-scoped grants | MVP 只有整个 FS 级别的 grant |
+| proposals/approvals | MVP 只有直接 commit，不做提案审批 |
 
 ## 完成标准
 

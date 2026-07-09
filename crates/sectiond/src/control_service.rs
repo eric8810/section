@@ -1,8 +1,8 @@
 use crate::agentfs;
 use crate::{
     AgentFsAuthorization, AgentFsCapability, AgentFsCredentialBindingRecord, AgentFsError,
-    AgentFsErrorPayload, AgentFsEventRecord, AgentFsGrantRecord, AgentFsRecord, AgentFsRole,
-    AgentFsShareRecord, AgentFsSourceProfileRecord,
+    AgentFsErrorPayload, AgentFsEventRecord, AgentFsGrantRecord, AgentFsHookRecord, AgentFsRecord,
+    AgentFsRole, AgentFsShareRecord, AgentFsSourceProfileRecord,
 };
 use anyhow::{Context, Result};
 use opendal::{Operator, Scheme};
@@ -199,6 +199,21 @@ pub enum ControlServiceRequest {
         fs_id: String,
         actor: AgentIdentityWire,
     },
+    AddHook {
+        fs_id: String,
+        actor: AgentIdentityWire,
+        name: String,
+        command: Vec<String>,
+    },
+    ListHooks {
+        fs_id: String,
+        actor: AgentIdentityWire,
+    },
+    RemoveHook {
+        fs_id: String,
+        actor: AgentIdentityWire,
+        hook_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +236,8 @@ pub enum ControlServiceResponse {
         source: SourceConfig,
     },
     IssuedCredential(IssuedAgentFsCredential),
+    Hook(AgentFsHookRecord),
+    Hooks(Vec<AgentFsHookRecord>),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -408,6 +425,42 @@ impl ControlService {
                 store.issue_credential(fs_id, &actor.agent_id, &actor.installation_id)
             }
             Self::Remote(client) => client.issue_credential(fs_id, actor),
+        }
+    }
+
+    pub fn add_hook(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        name: &str,
+        command: Vec<String>,
+    ) -> Result<AgentFsHookRecord> {
+        match self {
+            Self::Local(store) => store.add_hook(fs_id, &actor.agent_id, name, command),
+            Self::Remote(client) => client.add_hook(fs_id, actor, name, command),
+        }
+    }
+
+    pub fn list_hooks(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Vec<AgentFsHookRecord>> {
+        match self {
+            Self::Local(store) => store.list_hooks(fs_id, &actor.agent_id),
+            Self::Remote(client) => client.list_hooks(fs_id, actor),
+        }
+    }
+
+    pub fn remove_hook(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        hook_id: &str,
+    ) -> Result<AgentFsHookRecord> {
+        match self {
+            Self::Local(store) => store.remove_hook(fs_id, &actor.agent_id, hook_id),
+            Self::Remote(client) => client.remove_hook(fs_id, actor, hook_id),
         }
     }
 }
@@ -657,6 +710,54 @@ impl HttpControlServiceClient {
             other => unexpected_rpc_response(other),
         }
     }
+
+    pub fn add_hook(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        name: &str,
+        command: Vec<String>,
+    ) -> Result<AgentFsHookRecord> {
+        match self.rpc(ControlServiceRequest::AddHook {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+            name: name.to_string(),
+            command,
+        })? {
+            ControlServiceResponse::Hook(hook) => Ok(hook),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn list_hooks(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+    ) -> Result<Vec<AgentFsHookRecord>> {
+        match self.rpc(ControlServiceRequest::ListHooks {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+        })? {
+            ControlServiceResponse::Hooks(hooks) => Ok(hooks),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
+    pub fn remove_hook(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        hook_id: &str,
+    ) -> Result<AgentFsHookRecord> {
+        match self.rpc(ControlServiceRequest::RemoveHook {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+            hook_id: hook_id.to_string(),
+        })? {
+            ControlServiceResponse::Hook(hook) => Ok(hook),
+            other => unexpected_rpc_response(other),
+        }
+    }
 }
 
 fn unexpected_rpc_response<T>(response: ControlServiceResponse) -> Result<T> {
@@ -786,6 +887,15 @@ impl ControlServiceStore {
                 subject_id TEXT NOT NULL,
                 path TEXT,
                 data_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS hooks (
+                hook_id TEXT PRIMARY KEY,
+                fs_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                event TEXT NOT NULL,
+                command_json TEXT NOT NULL,
+                created_by_agent_id TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
             );",
         )?;
@@ -1120,6 +1230,8 @@ impl ControlServiceStore {
             self.conn
                 .execute("DELETE FROM credential_bindings WHERE fs_id = ?1", [fs_id])?;
             self.conn
+                .execute("DELETE FROM hooks WHERE fs_id = ?1", [fs_id])?;
+            self.conn
                 .execute("DELETE FROM shares WHERE fs_id = ?1", [fs_id])?;
             self.conn
                 .execute("DELETE FROM grants WHERE fs_id = ?1", [fs_id])?;
@@ -1203,6 +1315,68 @@ impl ControlServiceStore {
         let rows = stmt.query_map([fs_id], read_event_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    pub fn add_hook(
+        &self,
+        fs_id: &str,
+        actor_agent_id: &str,
+        name: &str,
+        command: Vec<String>,
+    ) -> Result<AgentFsHookRecord> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<AgentFsHookRecord> {
+            let fs = self
+                .find_filesystem(fs_id)?
+                .ok_or_else(|| AgentFsError::unknown_fs(fs_id))?;
+            self.authorize_capability_for_fs(&fs, actor_agent_id, AgentFsCapability::Manage)?;
+            let hook = agentfs::hook_record(&fs.fs_id, name, command, actor_agent_id)?;
+            self.insert_hook(&hook)?;
+            Ok(hook)
+        })();
+        finish_transaction(&self.conn, result)
+    }
+
+    pub fn list_hooks(&self, fs_id: &str, actor_agent_id: &str) -> Result<Vec<AgentFsHookRecord>> {
+        let fs = self
+            .find_filesystem(fs_id)?
+            .ok_or_else(|| AgentFsError::unknown_fs(fs_id))?;
+        self.authorize_capability_for_fs(&fs, actor_agent_id, AgentFsCapability::Read)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT hook_id, fs_id, name, event, command_json, created_by_agent_id, created_at_ms
+             FROM hooks
+             WHERE fs_id = ?1
+             ORDER BY created_at_ms, hook_id",
+        )?;
+        let rows = stmt.query_map([fs.fs_id], read_hook_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn remove_hook(
+        &self,
+        fs_id: &str,
+        actor_agent_id: &str,
+        hook_id: &str,
+    ) -> Result<AgentFsHookRecord> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<AgentFsHookRecord> {
+            let fs = self
+                .find_filesystem(fs_id)?
+                .ok_or_else(|| AgentFsError::unknown_fs(fs_id))?;
+            self.authorize_capability_for_fs(&fs, actor_agent_id, AgentFsCapability::Manage)?;
+            let hook = self.find_hook(&fs.fs_id, hook_id)?.ok_or_else(|| {
+                AgentFsError::new(
+                    "unknown_hook",
+                    format!("hook {hook_id} was not found on fs {}", fs.fs_id),
+                    false,
+                )
+            })?;
+            self.conn
+                .execute("DELETE FROM hooks WHERE hook_id = ?1", [hook_id])?;
+            Ok(hook)
+        })();
+        finish_transaction(&self.conn, result)
     }
 
     pub fn active_role(&self, fs: &AgentFsRecord, agent_id: &str) -> Result<Option<AgentFsRole>> {
@@ -1861,6 +2035,38 @@ impl ControlServiceStore {
         Ok(())
     }
 
+    fn insert_hook(&self, hook: &AgentFsHookRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO hooks (
+                hook_id, fs_id, name, event, command_json, created_by_agent_id, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                hook.hook_id,
+                hook.fs_id,
+                hook.name,
+                hook.event,
+                serde_json::to_string(&hook.command)?,
+                hook.created_by_agent_id,
+                hook.created_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn find_hook(&self, fs_id: &str, hook_id: &str) -> Result<Option<AgentFsHookRecord>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT hook_id, fs_id, name, event, command_json, created_by_agent_id, created_at_ms
+                 FROM hooks
+                 WHERE fs_id = ?1 AND hook_id = ?2",
+                params![fs_id, hook_id],
+                read_hook_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     fn insert_event(&self, event: &AgentFsEventRecord) -> Result<AgentFsEventRecord> {
         let mut event = event.clone();
         event.seq = if event.seq > 0 {
@@ -2107,6 +2313,21 @@ fn read_share_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFsShareRecor
         expires_at_ms: row.get(8)?,
         accepted_at_ms: row.get(9)?,
         revoked_at_ms: row.get(10)?,
+    })
+}
+
+fn read_hook_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFsHookRecord> {
+    let command_json: String = row.get(4)?;
+    let command = serde_json::from_str(&command_json).map_err(json_to_sql_error)?;
+    Ok(AgentFsHookRecord {
+        schema_version: agentfs::SCHEMA_VERSION,
+        hook_id: row.get(0)?,
+        fs_id: row.get(1)?,
+        name: row.get(2)?,
+        event: row.get(3)?,
+        command,
+        created_by_agent_id: row.get(5)?,
+        created_at_ms: row.get(6)?,
     })
 }
 

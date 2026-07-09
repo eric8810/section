@@ -13,6 +13,13 @@ use std::thread;
 const FS_NAME: &str = "project";
 const SOURCE_PROFILE: &str = "test-profile";
 
+fn test_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| shell.starts_with('/') && Path::new(shell).exists())
+        .unwrap_or_else(|| "/bin/sh".to_string())
+}
+
 struct Fixture {
     _temp_dir: tempfile::TempDir,
     root: PathBuf,
@@ -272,6 +279,29 @@ impl Actor {
         ])
     }
 
+    fn hooks_add(&self, fs_ref: &str, name: &str, command: &[&str]) -> Value {
+        let mut args = vec![
+            "--json".to_string(),
+            "hooks".to_string(),
+            "add".to_string(),
+            fs_ref.to_string(),
+            "--name".to_string(),
+            name.to_string(),
+            "--".to_string(),
+        ];
+        args.extend(command.iter().map(|value| value.to_string()));
+        self.json_owned(args)
+    }
+
+    fn hooks_list(&self, fs_ref: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "hooks".to_string(),
+            "list".to_string(),
+            fs_ref.to_string(),
+        ])
+    }
+
     fn write_output(&self, path: &str) -> Output {
         self.run_owned(vec![
             "--json".to_string(),
@@ -403,6 +433,7 @@ fn assert_json_output_omits(output: &Output, forbidden: &[&str], context: &str) 
 #[test]
 fn http_control_service_shares_without_client_source_profile_or_keys() {
     let fixture = Fixture::new();
+    let shell = test_shell();
     let server_config = fixture.root.join("control-server.toml");
     let server_data = fixture.root.join("control-server-data");
     write_agentfs_config(
@@ -427,6 +458,7 @@ fn http_control_service_shares_without_client_source_profile_or_keys() {
     owner.login("owner");
     let create = owner.create_fs();
     assert_eq!(create["fs"]["name"], FS_NAME);
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
     owner.attach();
 
     let writer_id = login_agent_id(&writer.login("writer"));
@@ -465,12 +497,63 @@ fn http_control_service_shares_without_client_source_profile_or_keys() {
     );
     writer.attach();
 
+    let hook_output_dir = fixture.root.join("http-hook-output");
+    fs::create_dir_all(&hook_output_dir).expect("create hook output dir");
+    let hook_script = fixture.root.join("http-record-hook.sh");
+    fs::write(
+        &hook_script,
+        format!(
+            r#"#!/bin/sh
+set -eu
+mkdir -p {output:?}
+cat > {event:?}
+"#,
+            output = hook_output_dir,
+            event = hook_output_dir.join("event.json"),
+        ),
+    )
+    .expect("write http hook script");
+    let hook = owner.hooks_add(
+        FS_NAME,
+        "http-record",
+        &[
+            shell.as_str(),
+            hook_script.to_str().expect("utf8 hook script"),
+        ],
+    );
+    let hook_id = hook["hook"]["hook_id"]
+        .as_str()
+        .expect("hook id")
+        .to_string();
+    assert!(writer.hooks_list(FS_NAME)["hooks"]
+        .as_array()
+        .expect("http hooks")
+        .iter()
+        .any(|hook| hook["hook_id"] == hook_id));
+
     writer.write_local("docs/remote-service.txt", "from http control service");
-    writer.commit_apply("commit through http control service");
+    let commit = writer.commit_apply("commit through http control service");
+    let commit_id = commit["commit"]["commit_id"]
+        .as_str()
+        .expect("http commit id");
     assert_eq!(
         fs::read_to_string(fixture.remote_path("docs/remote-service.txt"))
             .expect("read remote committed file"),
         "from http control service"
+    );
+    let event = read_json(hook_output_dir.join("event.json"));
+    assert_eq!(event["kind"], "commit.materialized");
+    assert_eq!(event["fs_id"], fs_id);
+    assert_eq!(event["subject_id"], commit_id);
+    let writer_store =
+        section_provider::ProviderStore::open(&writer.data_dir).expect("open writer store");
+    let runs = writer_store
+        .list_agentfs_hook_runs(&fs_id)
+        .expect("list http hook runs");
+    assert!(
+        runs.iter()
+            .any(|run| run.hook_id == hook_id && run.status == "success"),
+        "http hook run should be stored locally: {runs:?}"
     );
 }
 

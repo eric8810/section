@@ -1,13 +1,20 @@
 mod support;
 
 use crate::support::{assert_success, run_section, write_agentfs_config};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output};
 
 const FS_NAME: &str = "project";
 const SOURCE_PROFILE: &str = "test-profile";
+
+fn test_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| shell.starts_with('/') && Path::new(shell).exists())
+        .unwrap_or_else(|| "/bin/sh".to_string())
+}
 
 struct AgentFsFixture {
     _temp_dir: tempfile::TempDir,
@@ -43,6 +50,7 @@ impl AgentFsFixture {
         );
         AgentFsActor {
             config_path,
+            data_dir,
             local_root: self.root.join(format!("{name}-root")),
         }
     }
@@ -93,6 +101,7 @@ impl AgentFsFixture {
 
 struct AgentFsActor {
     config_path: PathBuf,
+    data_dir: PathBuf,
     local_root: PathBuf,
 }
 
@@ -239,6 +248,25 @@ impl AgentFsActor {
         serde_json::from_slice(&output.stdout).expect("commit json")
     }
 
+    fn commit_apply_with_env(&self, message: &str, envs: &[(&str, &str)]) -> Value {
+        let output = self.run_owned_with_env(
+            vec![
+                "--json".to_string(),
+                "commit".to_string(),
+                "apply".to_string(),
+                self.local_root
+                    .to_str()
+                    .expect("utf8 local root")
+                    .to_string(),
+                "--message".to_string(),
+                message.to_string(),
+            ],
+            envs,
+        );
+        assert_success(&output, "commit apply");
+        serde_json::from_slice(&output.stdout).expect("commit json")
+    }
+
     fn commit_apply_output(&self, message: &str) -> Output {
         self.run_owned(vec![
             "--json".to_string(),
@@ -284,6 +312,74 @@ impl AgentFsActor {
         self.run_owned(args)
     }
 
+    fn hooks_add(&self, fs_ref: &str, name: &str, command: &[&str]) -> Value {
+        let output = self.hooks_add_output(fs_ref, name, command);
+        assert_success(&output, "hooks add");
+        serde_json::from_slice(&output.stdout).expect("hooks add json")
+    }
+
+    fn hooks_add_output(&self, fs_ref: &str, name: &str, command: &[&str]) -> Output {
+        let mut args = vec![
+            "--json".to_string(),
+            "hooks".to_string(),
+            "add".to_string(),
+            fs_ref.to_string(),
+            "--name".to_string(),
+            name.to_string(),
+            "--".to_string(),
+        ];
+        args.extend(command.iter().map(|value| value.to_string()));
+        self.run_owned(args)
+    }
+
+    fn hooks_list(&self, fs_ref: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "hooks".to_string(),
+            "list".to_string(),
+            fs_ref.to_string(),
+        ])
+    }
+
+    fn hooks_remove(&self, fs_ref: &str, hook_id: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "hooks".to_string(),
+            "remove".to_string(),
+            fs_ref.to_string(),
+            hook_id.to_string(),
+        ])
+    }
+
+    fn hook_runs(&self, fs_id: &str) -> Vec<Value> {
+        let conn = rusqlite::Connection::open(self.data_dir.join("section.db"))
+            .expect("open local section db");
+        let mut stmt = conn
+            .prepare(
+                "SELECT run_id, hook_id, fs_id, event_id, status, exit_code,
+                        stdout_tail, stderr_tail
+                 FROM agentfs_hook_runs
+                 WHERE fs_id = ?1
+                 ORDER BY started_at_ms, run_id",
+            )
+            .expect("prepare hook runs query");
+        stmt.query_map([fs_id], |row| {
+            Ok(json!({
+                "run_id": row.get::<_, String>(0)?,
+                "hook_id": row.get::<_, String>(1)?,
+                "fs_id": row.get::<_, String>(2)?,
+                "event_id": row.get::<_, String>(3)?,
+                "status": row.get::<_, String>(4)?,
+                "exit_code": row.get::<_, Option<i32>>(5)?,
+                "stdout_tail": row.get::<_, String>(6)?,
+                "stderr_tail": row.get::<_, String>(7)?,
+            }))
+        })
+        .expect("query hook runs")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("collect hook runs")
+    }
+
     fn watch_agentfs_once(&self, fs_ref: &Path) -> Vec<Value> {
         let output = self.run_owned(vec![
             "--json".to_string(),
@@ -310,6 +406,16 @@ impl AgentFsActor {
     fn run_owned(&self, args: Vec<String>) -> Output {
         let args = args.iter().map(String::as_str).collect::<Vec<_>>();
         run_section(&self.config_path, &args)
+    }
+
+    fn run_owned_with_env(&self, args: Vec<String>, envs: &[(&str, &str)]) -> Output {
+        let bin = env!("CARGO_BIN_EXE_section");
+        let mut command = Command::new(bin);
+        command.arg("--config").arg(&self.config_path).args(args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command.output().expect("run section")
     }
 
     fn json(&self, args: &[&str], context: &str) -> Value {
@@ -1532,6 +1638,214 @@ fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
         accepted_after, accepted_before,
         "type replacement must be rejected before a new accepted commit"
     );
+}
+
+#[test]
+fn e2e_hooks_v1_run_local_post_materialized_automation() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    let writer = fixture.agent("writer");
+    let reader = fixture.agent("reader");
+    let shell = test_shell();
+
+    owner.login("owner");
+    let create = owner.create_fs();
+    let fs_id = create["fs"]["fs_id"].as_str().expect("fs id").to_string();
+    owner.attach();
+
+    let writer_id = writer.login("writer");
+    owner.grant(&writer_id, "writer");
+    let writer_share = owner.share(&writer_id);
+    writer.accept(
+        writer_share["share"]["share_id"]
+            .as_str()
+            .expect("writer share id"),
+    );
+    writer.attach();
+
+    let reader_id = reader.login("reader");
+    owner.grant(&reader_id, "reader");
+    let reader_share = owner.share(&reader_id);
+    reader.accept(
+        reader_share["share"]["share_id"]
+            .as_str()
+            .expect("reader share id"),
+    );
+
+    let hook_output_dir = fixture.root.join("hook-output");
+    fs::create_dir_all(&hook_output_dir).expect("create hook output dir");
+    let hook_script = fixture.root.join("record-hook.sh");
+    fs::write(
+        &hook_script,
+        format!(
+            r#"#!/bin/sh
+set -eu
+mkdir -p {output:?}
+cat > {event:?}
+printf '%s\n' "$SECTION_FS_ID" > {fs_id:?}
+printf '%s\n' "$SECTION_HOOK_ID" > {hook_id:?}
+printf '%s\n' "$SECTION_EVENT_KIND" > {kind:?}
+printf '%s\n' "$SECTION_LOCAL_ROOT" > {local_root:?}
+printf '%s\n' "${{SECTION_TEST_PARENT_SECRET-}}" > {parent_secret:?}
+"#,
+            output = hook_output_dir,
+            event = hook_output_dir.join("event.json"),
+            fs_id = hook_output_dir.join("fs_id.txt"),
+            hook_id = hook_output_dir.join("hook_id.txt"),
+            kind = hook_output_dir.join("kind.txt"),
+            local_root = hook_output_dir.join("local_root.txt"),
+            parent_secret = hook_output_dir.join("parent_secret.txt"),
+        ),
+    )
+    .expect("write hook script");
+
+    let hook = owner.hooks_add(
+        FS_NAME,
+        "record",
+        &[
+            shell.as_str(),
+            hook_script.to_str().expect("utf8 hook script"),
+        ],
+    );
+    let hook_id = hook["hook"]["hook_id"]
+        .as_str()
+        .expect("hook id")
+        .to_string();
+    assert_eq!(hook["hook"]["event"], "commit.materialized");
+    assert_eq!(
+        hook["hook"]["created_by_agent_id"],
+        create["fs"]["owner_agent_id"]
+    );
+
+    let writer_hooks = writer.hooks_list(FS_NAME);
+    assert!(writer_hooks["hooks"]
+        .as_array()
+        .expect("writer hooks")
+        .iter()
+        .any(|hook| hook["hook_id"] == hook_id));
+
+    let denied = reader.hooks_add_output(FS_NAME, "reader-hook", &[shell.as_str(), "-c", "true"]);
+    assert_json_error(&denied, "grant_denied");
+
+    let removable = owner.hooks_add(FS_NAME, "remove-me", &[shell.as_str(), "-c", "true"]);
+    let removable_hook_id = removable["hook"]["hook_id"]
+        .as_str()
+        .expect("removable hook id");
+    let removed = owner.hooks_remove(FS_NAME, removable_hook_id);
+    assert_eq!(removed["hook"]["hook_id"], removable_hook_id);
+    let hooks_after_remove = owner.hooks_list(FS_NAME);
+    assert!(!hooks_after_remove["hooks"]
+        .as_array()
+        .expect("hooks after remove")
+        .iter()
+        .any(|hook| hook["hook_id"] == removable_hook_id));
+
+    writer.write_local("docs/hooked.txt", "hooked content");
+    let commit = writer.commit_apply_with_env(
+        "commit with hook",
+        &[("SECTION_TEST_PARENT_SECRET", "secret")],
+    );
+    let commit_id = commit["commit"]["commit_id"].as_str().expect("commit id");
+    assert_eq!(commit["commit"]["materialization_state"], "materialized");
+
+    let event = read_json(hook_output_dir.join("event.json"));
+    assert_eq!(event["kind"], "commit.materialized");
+    assert_eq!(event["fs_id"], fs_id);
+    assert_eq!(event["subject_id"], commit_id);
+    assert_eq!(event["actor_agent_id"], writer_id);
+    assert_eq!(
+        fs::read_to_string(hook_output_dir.join("fs_id.txt")).expect("hook fs id"),
+        format!("{fs_id}\n")
+    );
+    assert_eq!(
+        fs::read_to_string(hook_output_dir.join("hook_id.txt")).expect("hook id file"),
+        format!("{hook_id}\n")
+    );
+    assert_eq!(
+        fs::read_to_string(hook_output_dir.join("kind.txt")).expect("hook kind"),
+        "commit.materialized\n"
+    );
+    assert_eq!(
+        fs::read_to_string(hook_output_dir.join("local_root.txt")).expect("hook root"),
+        format!("{}\n", writer.local_root.display())
+    );
+    assert_eq!(
+        fs::read_to_string(hook_output_dir.join("parent_secret.txt")).expect("hook parent secret"),
+        "\n",
+        "hook must not inherit the section process environment"
+    );
+
+    let runs = writer.hook_runs(&fs_id);
+    assert_eq!(runs.len(), 1, "writer should record one hook run: {runs:?}");
+    assert_eq!(runs[0]["hook_id"], hook_id);
+    assert_eq!(runs[0]["event_id"], event["event_id"]);
+    assert_eq!(runs[0]["status"], "success");
+    assert_eq!(runs[0]["exit_code"], 0);
+    assert!(
+        reader.hook_runs(&fs_id).is_empty(),
+        "agent without attached local root must not record hook runs"
+    );
+
+    let failing = owner.hooks_add(
+        FS_NAME,
+        "fail",
+        &[shell.as_str(), "-c", "echo fail >&2; exit 7"],
+    );
+    let failing_hook_id = failing["hook"]["hook_id"]
+        .as_str()
+        .expect("failing hook id");
+    writer.write_local("docs/hooked-again.txt", "still commits");
+    let second_commit = writer.commit_apply("commit with failing hook");
+    assert_eq!(
+        second_commit["commit"]["materialization_state"],
+        "materialized"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/hooked-again.txt")).expect("remote hooked again"),
+        "still commits"
+    );
+
+    let runs = writer.hook_runs(&fs_id);
+    assert!(
+        runs.iter().any(|run| run["hook_id"] == failing_hook_id
+            && run["status"] == "failed"
+            && run["exit_code"] == 7
+            && run["stderr_tail"]
+                .as_str()
+                .expect("stderr")
+                .contains("fail")),
+        "failing hook should be recorded locally without failing commit: {runs:?}"
+    );
+}
+
+#[test]
+fn e2e_hooks_management_uses_control_service_without_backing_source_read() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    let shell = test_shell();
+
+    owner.login("owner");
+    owner.create_fs();
+    let head_path = fixture
+        .remote_root
+        .join(".section/agentfs/heads/current.json");
+    fs::write(&head_path, "{not valid json").expect("corrupt backing source head");
+
+    let hook = owner.hooks_add(FS_NAME, "control-only", &[shell.as_str(), "-c", "true"]);
+    let hook_id = hook["hook"]["hook_id"]
+        .as_str()
+        .expect("control-only hook id");
+    let hooks = owner.hooks_list(FS_NAME);
+    assert!(
+        hooks["hooks"]
+            .as_array()
+            .expect("hooks")
+            .iter()
+            .any(|hook| hook["hook_id"] == hook_id),
+        "hook management should resolve through Control Service: {hooks:?}"
+    );
+    let removed = owner.hooks_remove(FS_NAME, hook_id);
+    assert_eq!(removed["hook"]["hook_id"], hook_id);
 }
 
 #[test]

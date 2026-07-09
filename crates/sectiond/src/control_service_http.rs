@@ -210,6 +210,38 @@ fn execute_rpc(
                 store.issue_credential(&fs_id, &actor.agent_id, &actor.installation_id)?,
             ))
         }
+        ControlServiceRequest::AddHook {
+            fs_id,
+            actor,
+            name,
+            command,
+        } => {
+            let actor = authenticate(store, actor)?;
+            Ok(ControlServiceResponse::Hook(store.add_hook(
+                &fs_id,
+                &actor.agent_id,
+                &name,
+                command,
+            )?))
+        }
+        ControlServiceRequest::ListHooks { fs_id, actor } => {
+            let actor = authenticate(store, actor)?;
+            Ok(ControlServiceResponse::Hooks(
+                store.list_hooks(&fs_id, &actor.agent_id)?,
+            ))
+        }
+        ControlServiceRequest::RemoveHook {
+            fs_id,
+            actor,
+            hook_id,
+        } => {
+            let actor = authenticate(store, actor)?;
+            Ok(ControlServiceResponse::Hook(store.remove_hook(
+                &fs_id,
+                &actor.agent_id,
+                &hook_id,
+            )?))
+        }
     }
 }
 

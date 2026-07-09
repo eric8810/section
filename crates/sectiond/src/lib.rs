@@ -11,8 +11,9 @@ pub mod sync;
 pub use agentfs::{
     AgentFsAuthorization, AgentFsCapability, AgentFsCommitPathRecord, AgentFsCommitRecord,
     AgentFsCommitStagingRecord, AgentFsCredentialBindingRecord, AgentFsError, AgentFsErrorPayload,
-    AgentFsEventRecord, AgentFsGrantRecord, AgentFsHeadRecord, AgentFsMaterializationState,
-    AgentFsRecord, AgentFsRole, AgentFsShareRecord, AgentFsSourceProfileRecord,
+    AgentFsEventRecord, AgentFsGrantRecord, AgentFsHeadRecord, AgentFsHookRecord,
+    AgentFsMaterializationState, AgentFsRecord, AgentFsRole, AgentFsShareRecord,
+    AgentFsSourceProfileRecord,
 };
 pub use contract::{ResponsibilityBoundary, SectiondContract};
 pub use control_plane::{

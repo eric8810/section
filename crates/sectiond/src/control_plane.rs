@@ -8,8 +8,8 @@ use crate::sync::{
 use crate::{
     agentfs, AgentFsAcceptResult, AgentFsAvailableShare, AgentFsCapability,
     AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsCommitStagingRecord, AgentFsError,
-    AgentFsEventRecord, AgentFsGrantRecord, AgentFsHeadRecord, AgentFsMaterializationState,
-    AgentFsRecord, AgentFsRole, AgentFsShareResult, ControlService,
+    AgentFsEventRecord, AgentFsGrantRecord, AgentFsHeadRecord, AgentFsHookRecord,
+    AgentFsMaterializationState, AgentFsRecord, AgentFsRole, AgentFsShareResult, ControlService,
 };
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
@@ -18,14 +18,15 @@ use ring::digest::{digest, SHA256};
 use section_core::config::{CacheConfig, SourceConfig};
 use section_core::SectionConfig;
 use section_provider::{
-    AcceptedFilesystemRecord, AgentFsMountRecord, AgentIdentityRecord,
+    AcceptedFilesystemRecord, AgentFsHookRunRecord, AgentFsMountRecord, AgentIdentityRecord,
     CredentialBindingCacheRecord, PathSyncStateRecord, ProviderStore, SyncEventRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 const REFRESH_XATTR_NAME: &str = "section.refresh";
@@ -512,6 +513,40 @@ impl SectiondControlPlane {
             .collect())
     }
 
+    pub fn hooks_add(
+        &self,
+        fs_ref: &str,
+        name: &str,
+        command: Vec<String>,
+    ) -> Result<AgentFsHookRecord> {
+        let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
+        let actor = self.require_agent_identity()?;
+        let resolved = self
+            .control_service
+            .resolve_filesystem(&resolved_ref, &actor)?;
+        self.control_service
+            .add_hook(&resolved.fs.fs_id, &actor, name, command)
+    }
+
+    pub fn hooks_list(&self, fs_ref: &str) -> Result<Vec<AgentFsHookRecord>> {
+        let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
+        let actor = self.require_agent_identity()?;
+        let resolved = self
+            .control_service
+            .resolve_filesystem(&resolved_ref, &actor)?;
+        self.control_service.list_hooks(&resolved.fs.fs_id, &actor)
+    }
+
+    pub fn hooks_remove(&self, fs_ref: &str, hook_id: &str) -> Result<AgentFsHookRecord> {
+        let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
+        let actor = self.require_agent_identity()?;
+        let resolved = self
+            .control_service
+            .resolve_filesystem(&resolved_ref, &actor)?;
+        self.control_service
+            .remove_hook(&resolved.fs.fs_id, &actor, hook_id)
+    }
+
     pub fn commit_status(&self, input_path: &Path) -> Result<AgentFsCommitStatus> {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
@@ -714,7 +749,8 @@ impl SectiondControlPlane {
                     None,
                     materialized_event_data(&commit, &sync, false),
                 )?;
-                agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
+                let materialized_event =
+                    agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
                 agentfs::write_commit(&rt, &resolved.operator, &commit)?;
                 if release_error.is_some() {
                     release_error =
@@ -737,6 +773,12 @@ impl SectiondControlPlane {
                     &commit.commit_id,
                 );
                 warnings.extend(local_update_warnings);
+                warnings.extend(self.run_local_post_materialized_hooks(
+                    &resolved.fs,
+                    &local_root,
+                    &actor,
+                    &materialized_event,
+                ));
                 Ok(AgentFsCommitApplyResult {
                     commit,
                     sync,
@@ -1440,6 +1482,57 @@ impl SectiondControlPlane {
         warnings
     }
 
+    fn run_local_post_materialized_hooks(
+        &self,
+        fs: &AgentFsRecord,
+        local_root: &Path,
+        actor: &AgentIdentityRecord,
+        event: &AgentFsEventRecord,
+    ) -> Vec<String> {
+        if local_root.as_os_str().is_empty() {
+            return Vec::new();
+        }
+
+        let hooks = match self.control_service.list_hooks(&fs.fs_id, actor) {
+            Ok(hooks) => hooks,
+            Err(err) => {
+                return vec![format!(
+                    "failed to load hooks after commit materialized: {err}"
+                )];
+            }
+        };
+
+        let mut warnings = Vec::new();
+        for hook in hooks
+            .into_iter()
+            .filter(|hook| hook.event == "commit.materialized")
+        {
+            let run = match execute_agentfs_hook(&hook, event, actor, local_root) {
+                Ok(run) => run,
+                Err(err) => {
+                    warnings.push(format!(
+                        "failed to prepare hook {} after commit materialized: {err}",
+                        hook.hook_id
+                    ));
+                    continue;
+                }
+            };
+            if run.status != "success" {
+                warnings.push(format!(
+                    "hook {} failed after commit materialized",
+                    hook.hook_id
+                ));
+            }
+            if let Err(err) = self.store.insert_agentfs_hook_run(&run) {
+                warnings.push(format!(
+                    "failed to record hook {} run after commit materialized: {err}",
+                    hook.hook_id
+                ));
+            }
+        }
+        warnings
+    }
+
     fn rollback_failed_attach(
         &self,
         source_name: &str,
@@ -1459,6 +1552,104 @@ impl SectiondControlPlane {
         self.store.clear_source_sync_state(source_name)?;
         Ok(())
     }
+}
+
+const HOOK_OUTPUT_TAIL_BYTES: usize = 8192;
+
+fn execute_agentfs_hook(
+    hook: &AgentFsHookRecord,
+    event: &AgentFsEventRecord,
+    actor: &AgentIdentityRecord,
+    local_root: &Path,
+) -> Result<AgentFsHookRunRecord> {
+    let started_at_ms = agentfs::now_ms();
+    let run_id = agentfs::new_hook_run_id()?;
+    let event_json = serde_json::to_vec(event)?;
+
+    let Some((program, args)) = hook.command.split_first() else {
+        let finished_at_ms = agentfs::now_ms();
+        return Ok(AgentFsHookRunRecord {
+            run_id,
+            hook_id: hook.hook_id.clone(),
+            fs_id: hook.fs_id.clone(),
+            event_id: event.event_id.clone(),
+            status: "failed".to_string(),
+            exit_code: None,
+            started_at_ms,
+            finished_at_ms,
+            stdout_tail: String::new(),
+            stderr_tail: "hook command is empty".to_string(),
+        });
+    };
+
+    let mut child = match Command::new(program)
+        .args(args)
+        .current_dir(local_root)
+        .env_clear()
+        .env("SECTION_FS_ID", &event.fs_id)
+        .env("SECTION_HOOK_ID", &hook.hook_id)
+        .env("SECTION_EVENT_ID", &event.event_id)
+        .env("SECTION_EVENT_KIND", &event.kind)
+        .env("SECTION_EVENT_SEQ", event.seq.to_string())
+        .env("SECTION_AGENT_ID", &actor.agent_id)
+        .env("SECTION_LOCAL_ROOT", local_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            let finished_at_ms = agentfs::now_ms();
+            return Ok(AgentFsHookRunRecord {
+                run_id,
+                hook_id: hook.hook_id.clone(),
+                fs_id: hook.fs_id.clone(),
+                event_id: event.event_id.clone(),
+                status: "failed".to_string(),
+                exit_code: None,
+                started_at_ms,
+                finished_at_ms,
+                stdout_tail: String::new(),
+                stderr_tail: tail_text(err.to_string().as_bytes()),
+            });
+        }
+    };
+
+    let stdin_error = child
+        .stdin
+        .take()
+        .and_then(|mut stdin| stdin.write_all(&event_json).err());
+    let stdin_failed = stdin_error.is_some();
+    let output = child.wait_with_output()?;
+    let finished_at_ms = agentfs::now_ms();
+    let mut stderr_tail = tail_text(&output.stderr);
+    if let Some(err) = stdin_error {
+        stderr_tail = if stderr_tail.is_empty() {
+            format!("stdin write failed: {err}")
+        } else {
+            format!("stdin write failed: {err}\n{stderr_tail}")
+        };
+    }
+    let success = output.status.success() && !stdin_failed;
+
+    Ok(AgentFsHookRunRecord {
+        run_id,
+        hook_id: hook.hook_id.clone(),
+        fs_id: hook.fs_id.clone(),
+        event_id: event.event_id.clone(),
+        status: if success { "success" } else { "failed" }.to_string(),
+        exit_code: output.status.code(),
+        started_at_ms,
+        finished_at_ms,
+        stdout_tail: tail_text(&output.stdout),
+        stderr_tail,
+    })
+}
+
+fn tail_text(bytes: &[u8]) -> String {
+    let start = bytes.len().saturating_sub(HOOK_OUTPUT_TAIL_BYTES);
+    String::from_utf8_lossy(&bytes[start..]).to_string()
 }
 
 struct ResolvedAgentFs {
@@ -1843,7 +2034,8 @@ fn write_materialization_failure_events(
             "paths": commit.paths.clone(),
         }),
     )?;
-    agentfs::write_event(rt, operator, &fs_event)
+    agentfs::write_event(rt, operator, &fs_event)?;
+    Ok(())
 }
 
 fn materialized_event_data(

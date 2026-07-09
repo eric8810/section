@@ -2,7 +2,7 @@ pub mod crypto;
 pub mod store;
 
 pub use store::{
-    AcceptedFilesystemRecord, AgentFsMountRecord, AgentIdentityRecord,
+    AcceptedFilesystemRecord, AgentFsHookRunRecord, AgentFsMountRecord, AgentIdentityRecord,
     CredentialBindingCacheRecord, LocalScanCacheRecord, PathSyncStateRecord, ProviderStore,
     RemoteManifestRecord, SourceLocalRootBinding, SyncEventRecord,
 };

@@ -40,6 +40,11 @@ enum Commands {
         #[command(subcommand)]
         action: CommitAction,
     },
+    /// Manage AgentFS local automation hooks
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
     /// Manage data sources
     Source {
         #[command(subcommand)]
@@ -302,6 +307,33 @@ pub enum CommitAction {
 }
 
 #[derive(Subcommand)]
+pub enum HooksAction {
+    /// Add a local post-materialization hook to an FS
+    Add {
+        /// FS name, fs_id, source name, or attached local path
+        fs: String,
+        /// Hook name
+        #[arg(long)]
+        name: String,
+        /// Command to run after --
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// List hooks on an FS
+    List {
+        /// FS name, fs_id, source name, or attached local path
+        fs: String,
+    },
+    /// Remove a hook from an FS
+    Remove {
+        /// FS name, fs_id, source name, or attached local path
+        fs: String,
+        /// Hook id
+        hook_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum PathAction {
     /// Inspect sync state for a local path under a bound root
     Inspect {
@@ -362,6 +394,7 @@ fn main() -> Result<()> {
         Commands::Agent { action } => cmd::agent::run(cli.config.as_deref(), action, json),
         Commands::Fs { action } => cmd::fs::run(cli.config.as_deref(), action, json),
         Commands::Commit { action } => cmd::commit::run(cli.config.as_deref(), action, json),
+        Commands::Hooks { action } => cmd::hooks::run(cli.config.as_deref(), action, json),
         Commands::Source { action } => cmd::source::run(cli.config.as_deref(), action, json),
         Commands::Path { action } => cmd::path::run(cli.config.as_deref(), action, json),
         Commands::Watch {

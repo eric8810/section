@@ -115,6 +115,18 @@ pub struct AgentFsCredentialBindingRecord {
     pub expires_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentFsHookRecord {
+    pub schema_version: u32,
+    pub hook_id: String,
+    pub fs_id: String,
+    pub name: String,
+    pub event: String,
+    pub command: Vec<String>,
+    pub created_by_agent_id: String,
+    pub created_at_ms: i64,
+}
+
 impl AgentFsGrantRecord {
     pub fn is_active(&self) -> bool {
         self.revoked_at_ms.is_none()
@@ -440,6 +452,14 @@ pub fn new_commit_id() -> Result<String> {
     Ok(format!("cmt_{}", random_hex(16)?))
 }
 
+pub fn new_hook_id() -> Result<String> {
+    Ok(format!("hook_{}", random_hex(16)?))
+}
+
+pub fn new_hook_run_id() -> Result<String> {
+    Ok(format!("hookrun_{}", random_hex(16)?))
+}
+
 pub fn new_event_id(created_at_ms: i64) -> Result<String> {
     Ok(format!("evt_{created_at_ms:013}_{}", random_hex(8)?))
 }
@@ -608,6 +628,35 @@ impl AgentFsMetadataRecord for AgentFsCredentialBindingRecord {
         )?;
         validate_timestamp(path, "issued_at_ms", self.issued_at_ms)?;
         validate_timestamp(path, "expires_at_ms", self.expires_at_ms)
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsHookRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(path, "hook_id", &self.hook_id, "hook_", 32)?;
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        validate_non_empty(path, "name", &self.name)?;
+        if self.event != "commit.materialized" {
+            anyhow::bail!(malformed_record(
+                path,
+                "hook event must be commit.materialized"
+            ));
+        }
+        if self.command.is_empty() {
+            anyhow::bail!(malformed_record(path, "hook command must not be empty"));
+        }
+        for item in &self.command {
+            validate_non_empty(path, "command", item)?;
+        }
+        validate_id_field(
+            path,
+            "created_by_agent_id",
+            &self.created_by_agent_id,
+            "agt_",
+            32,
+        )?;
+        validate_timestamp(path, "created_at_ms", self.created_at_ms)
     }
 }
 
@@ -899,6 +948,26 @@ pub fn event_record(
     })
 }
 
+pub fn hook_record(
+    fs_id: &str,
+    name: &str,
+    command: Vec<String>,
+    created_by_agent_id: &str,
+) -> Result<AgentFsHookRecord> {
+    let hook = AgentFsHookRecord {
+        schema_version: SCHEMA_VERSION,
+        hook_id: new_hook_id()?,
+        fs_id: fs_id.to_string(),
+        name: name.trim().to_string(),
+        event: "commit.materialized".to_string(),
+        command,
+        created_by_agent_id: created_by_agent_id.to_string(),
+        created_at_ms: now_ms(),
+    };
+    hook.validate_metadata("hook")?;
+    Ok(hook)
+}
+
 pub fn has_capability(
     fs: &AgentFsRecord,
     grants: &[AgentFsGrantRecord],
@@ -1025,13 +1094,14 @@ pub fn write_event(
     rt: &tokio::runtime::Runtime,
     op: &Operator,
     event: &AgentFsEventRecord,
-) -> Result<()> {
+) -> Result<AgentFsEventRecord> {
     let mut event = event.clone();
     if event.seq <= 0 {
         event.seq = next_event_seq(rt, op)?;
     }
     let path = format!("{METADATA_ROOT}/events/{}.json", event.event_id);
-    write_json_if_not_exists(rt, op, &path, &event, &event.fs_id)
+    write_json_if_not_exists(rt, op, &path, &event, &event.fs_id)?;
+    Ok(event)
 }
 
 pub fn ensure_event_log_ready(
