@@ -12,8 +12,8 @@ pub use agentfs::{
     AgentFsAuthorization, AgentFsCapability, AgentFsCommitPathRecord, AgentFsCommitRecord,
     AgentFsCommitStagingRecord, AgentFsCredentialBindingRecord, AgentFsError, AgentFsErrorPayload,
     AgentFsEventRecord, AgentFsGrantRecord, AgentFsHeadRecord, AgentFsHookRecord,
-    AgentFsMaterializationState, AgentFsRecord, AgentFsRole, AgentFsShareRecord,
-    AgentFsSourceProfileRecord,
+    AgentFsMaterializationState, AgentFsProposalRecord, AgentFsRecord, AgentFsRole,
+    AgentFsShareRecord, AgentFsSourceProfileRecord,
 };
 pub use contract::{ResponsibilityBoundary, SectiondContract};
 pub use control_plane::{

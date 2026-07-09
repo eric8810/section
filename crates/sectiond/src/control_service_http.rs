@@ -154,11 +154,23 @@ fn execute_rpc(
                 store.authorize_capability(&fs_id, &actor.agent_id, capability)?,
             ))
         }
+        ControlServiceRequest::AuthorizePaths {
+            fs_id,
+            actor,
+            capability,
+            paths,
+        } => {
+            let actor = authenticate(store, actor)?;
+            Ok(ControlServiceResponse::Authorization(
+                store.authorize_paths(&fs_id, &actor.agent_id, capability, &paths)?,
+            ))
+        }
         ControlServiceRequest::FsGrant {
             fs_id,
             actor,
             target_agent_id,
             role,
+            path_scopes,
         } => {
             let actor = authenticate(store, actor)?;
             Ok(ControlServiceResponse::GrantMutation(store.fs_grant(
@@ -166,6 +178,7 @@ fn execute_rpc(
                 &actor.agent_id,
                 &target_agent_id,
                 role,
+                path_scopes,
             )?))
         }
         ControlServiceRequest::FsRevoke {

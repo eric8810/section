@@ -172,11 +172,18 @@ pub enum ControlServiceRequest {
         actor: AgentIdentityWire,
         capability: AgentFsCapability,
     },
+    AuthorizePaths {
+        fs_id: String,
+        actor: AgentIdentityWire,
+        capability: AgentFsCapability,
+        paths: Vec<String>,
+    },
     FsGrant {
         fs_id: String,
         actor: AgentIdentityWire,
         target_agent_id: String,
         role: AgentFsRole,
+        path_scopes: Option<Vec<String>>,
     },
     FsRevoke {
         fs_id: String,
@@ -355,16 +362,34 @@ impl ControlService {
         }
     }
 
+    pub fn authorize_paths(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        capability: AgentFsCapability,
+        paths: &[String],
+    ) -> Result<AgentFsAuthorization> {
+        match self {
+            Self::Local(store) => store.authorize_paths(fs_id, &actor.agent_id, capability, paths),
+            Self::Remote(client) => client.authorize_paths(fs_id, actor, capability, paths),
+        }
+    }
+
     pub fn fs_grant(
         &self,
         fs_id: &str,
         actor: &AgentIdentityRecord,
         target_agent_id: &str,
         role: AgentFsRole,
+        path_scopes: Option<Vec<String>>,
     ) -> Result<GrantMutationResult> {
         match self {
-            Self::Local(store) => store.fs_grant(fs_id, &actor.agent_id, target_agent_id, role),
-            Self::Remote(client) => client.fs_grant(fs_id, actor, target_agent_id, role),
+            Self::Local(store) => {
+                store.fs_grant(fs_id, &actor.agent_id, target_agent_id, role, path_scopes)
+            }
+            Self::Remote(client) => {
+                client.fs_grant(fs_id, actor, target_agent_id, role, path_scopes)
+            }
         }
     }
 
@@ -621,18 +646,38 @@ impl HttpControlServiceClient {
         }
     }
 
+    pub fn authorize_paths(
+        &self,
+        fs_id: &str,
+        actor: &AgentIdentityRecord,
+        capability: AgentFsCapability,
+        paths: &[String],
+    ) -> Result<AgentFsAuthorization> {
+        match self.rpc(ControlServiceRequest::AuthorizePaths {
+            fs_id: fs_id.to_string(),
+            actor: actor.clone().into(),
+            capability,
+            paths: paths.to_vec(),
+        })? {
+            ControlServiceResponse::Authorization(authorization) => Ok(authorization),
+            other => unexpected_rpc_response(other),
+        }
+    }
+
     pub fn fs_grant(
         &self,
         fs_id: &str,
         actor: &AgentIdentityRecord,
         target_agent_id: &str,
         role: AgentFsRole,
+        path_scopes: Option<Vec<String>>,
     ) -> Result<GrantMutationResult> {
         match self.rpc(ControlServiceRequest::FsGrant {
             fs_id: fs_id.to_string(),
             actor: actor.clone().into(),
             target_agent_id: target_agent_id.to_string(),
             role,
+            path_scopes,
         })? {
             ControlServiceResponse::GrantMutation(result) => Ok(result),
             other => unexpected_rpc_response(other),
@@ -851,6 +896,7 @@ impl ControlServiceStore {
                 agent_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 capabilities_json TEXT NOT NULL,
+                path_scopes_json TEXT,
                 granted_by TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL,
                 revoked_at_ms INTEGER,
@@ -905,6 +951,7 @@ impl ControlServiceStore {
             "auth_token_hash",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        add_column_if_missing(&self.conn, "grants", "path_scopes_json", "TEXT")?;
         add_column_if_missing(&self.conn, "events", "seq", "INTEGER NOT NULL DEFAULT 0")?;
         self.ensure_existing_event_seqs()?;
         Ok(())
@@ -1191,8 +1238,13 @@ impl ControlServiceStore {
                 ],
             )?;
 
-            let owner_grant =
-                agentfs::grant_record(&fs, &owner.agent_id, AgentFsRole::Owner, &owner.agent_id)?;
+            let owner_grant = agentfs::grant_record(
+                &fs,
+                &owner.agent_id,
+                AgentFsRole::Owner,
+                &owner.agent_id,
+                None,
+            )?;
             self.insert_grant(&owner_grant)?;
 
             let event = agentfs::event_record(
@@ -1293,7 +1345,7 @@ impl ControlServiceStore {
 
     pub fn list_grants(&self, fs_id: &str) -> Result<Vec<AgentFsGrantRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT grant_id, fs_id, agent_id, role, capabilities_json, granted_by,
+            "SELECT grant_id, fs_id, agent_id, role, capabilities_json, path_scopes_json, granted_by,
                     created_at_ms, revoked_at_ms, revoked_by
              FROM grants
              WHERE fs_id = ?1
@@ -1402,14 +1454,40 @@ impl ControlServiceStore {
         self.authorize_capability_for_fs(&fs, agent_id, capability)
     }
 
+    pub fn authorize_paths(
+        &self,
+        fs_id: &str,
+        agent_id: &str,
+        capability: AgentFsCapability,
+        paths: &[String],
+    ) -> Result<AgentFsAuthorization> {
+        let fs = self
+            .find_filesystem(fs_id)?
+            .ok_or_else(|| AgentFsError::unknown_fs(fs_id))?;
+        self.authorize_paths_for_fs(&fs, agent_id, capability, paths)
+    }
+
     pub fn fs_grant(
         &self,
         fs_id: &str,
         actor_agent_id: &str,
         target_agent_id: &str,
         role: AgentFsRole,
+        path_scopes: Option<Vec<String>>,
     ) -> Result<GrantMutationResult> {
         agentfs::validate_agent_id(target_agent_id)?;
+        if let Some(scopes) = &path_scopes {
+            if scopes.is_empty() {
+                anyhow::bail!(AgentFsError::new(
+                    "invalid_path_scope",
+                    "path-scoped grant must include at least one scope",
+                    false,
+                ));
+            }
+            for scope in scopes {
+                agentfs::validate_path_scope(scope)?;
+            }
+        }
         if role == AgentFsRole::Owner {
             anyhow::bail!(AgentFsError::grant_denied(
                 "owner grants are not supported in the MVP"
@@ -1478,7 +1556,8 @@ impl ControlServiceStore {
                 revoked.push(existing);
             }
 
-            let grant = agentfs::grant_record(&fs, target_agent_id, role, actor_agent_id)?;
+            let grant =
+                agentfs::grant_record(&fs, target_agent_id, role, actor_agent_id, path_scopes)?;
             self.insert_grant(&grant)?;
             let event = agentfs::event_record(
                 &fs.fs_id,
@@ -1489,6 +1568,7 @@ impl ControlServiceStore {
                 serde_json::json!({
                     "agent_id": grant.agent_id,
                     "role": grant.role,
+                    "path_scopes": grant.path_scopes,
                 }),
             )?;
             let event = self.insert_event(&event)?;
@@ -1786,6 +1866,60 @@ impl ControlServiceStore {
         })
     }
 
+    fn authorize_paths_for_fs(
+        &self,
+        fs: &AgentFsRecord,
+        agent_id: &str,
+        capability: AgentFsCapability,
+        paths: &[String],
+    ) -> Result<AgentFsAuthorization> {
+        if fs.owner_agent_id == agent_id && AgentFsRole::Owner.has_capability(capability) {
+            return Ok(AgentFsAuthorization::Owner {
+                agent_id: agent_id.to_string(),
+            });
+        }
+
+        let mut scoped_denial = None;
+        for grant in self.list_grants(&fs.fs_id)? {
+            if grant.agent_id == agent_id
+                && grant.is_active()
+                && grant.capabilities.contains(&capability)
+            {
+                match &grant.path_scopes {
+                    None => {
+                        return Ok(AgentFsAuthorization::Grant {
+                            grant_id: grant.grant_id,
+                            role: grant.role,
+                            capabilities: grant.capabilities,
+                            path_scopes: None,
+                            matched_path_scopes: None,
+                        });
+                    }
+                    Some(scopes) => match matched_path_scopes(paths, scopes) {
+                        Some(matched) => {
+                            return Ok(AgentFsAuthorization::Grant {
+                                grant_id: grant.grant_id,
+                                role: grant.role,
+                                capabilities: grant.capabilities,
+                                path_scopes: Some(scopes.clone()),
+                                matched_path_scopes: Some(matched),
+                            });
+                        }
+                        None => scoped_denial = Some(scopes.clone()),
+                    },
+                }
+            }
+        }
+
+        if let Some(scopes) = scoped_denial {
+            anyhow::bail!(AgentFsError::path_scope_denied(&fs.fs_id, paths, &scopes));
+        }
+        anyhow::bail!(AgentFsError::grant_denied(format!(
+            "agent {agent_id} does not have {capability:?} access to fs {}",
+            fs.fs_id
+        )));
+    }
+
     fn authorize_capability_for_fs(
         &self,
         fs: &AgentFsRecord,
@@ -1806,6 +1940,8 @@ impl ControlServiceStore {
                     grant_id: grant.grant_id,
                     role: grant.role,
                     capabilities: grant.capabilities,
+                    path_scopes: grant.path_scopes,
+                    matched_path_scopes: None,
                 });
             }
         }
@@ -1975,15 +2111,20 @@ impl ControlServiceStore {
     fn insert_grant(&self, grant: &AgentFsGrantRecord) -> Result<()> {
         self.conn.execute(
             "INSERT INTO grants (
-                grant_id, fs_id, agent_id, role, capabilities_json, granted_by,
+                grant_id, fs_id, agent_id, role, capabilities_json, path_scopes_json, granted_by,
                 created_at_ms, revoked_at_ms, revoked_by
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 grant.grant_id,
                 grant.fs_id,
                 grant.agent_id,
                 serde_json::to_string(&grant.role)?,
                 serde_json::to_string(&grant.capabilities)?,
+                grant
+                    .path_scopes
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
                 grant.granted_by,
                 grant.created_at_ms,
                 grant.revoked_at_ms,
@@ -1996,14 +2137,20 @@ impl ControlServiceStore {
     fn update_grant(&self, grant: &AgentFsGrantRecord) -> Result<()> {
         self.conn.execute(
             "UPDATE grants
-             SET role = ?1,
+                 SET role = ?1,
                  capabilities_json = ?2,
-                 revoked_at_ms = ?3,
-                 revoked_by = ?4
-             WHERE grant_id = ?5",
+                 path_scopes_json = ?3,
+                 revoked_at_ms = ?4,
+                 revoked_by = ?5
+                 WHERE grant_id = ?6",
             params![
                 serde_json::to_string(&grant.role)?,
                 serde_json::to_string(&grant.capabilities)?,
+                grant
+                    .path_scopes
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
                 grant.revoked_at_ms,
                 grant.revoked_by,
                 grant.grant_id,
@@ -2281,8 +2428,12 @@ fn read_fs_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFsRecord> {
 fn read_grant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFsGrantRecord> {
     let role_json: String = row.get(3)?;
     let capabilities_json: String = row.get(4)?;
+    let path_scopes_json: Option<String> = row.get(5)?;
     let role = serde_json::from_str(&role_json).map_err(json_to_sql_error)?;
     let capabilities = serde_json::from_str(&capabilities_json).map_err(json_to_sql_error)?;
+    let path_scopes = path_scopes_json
+        .map(|json| serde_json::from_str(&json).map_err(json_to_sql_error))
+        .transpose()?;
     Ok(AgentFsGrantRecord {
         schema_version: agentfs::SCHEMA_VERSION,
         grant_id: row.get(0)?,
@@ -2290,10 +2441,11 @@ fn read_grant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFsGrantRecor
         agent_id: row.get(2)?,
         role,
         capabilities,
-        granted_by: row.get(5)?,
-        created_at_ms: row.get(6)?,
-        revoked_at_ms: row.get(7)?,
-        revoked_by: row.get(8)?,
+        path_scopes,
+        granted_by: row.get(6)?,
+        created_at_ms: row.get(7)?,
+        revoked_at_ms: row.get(8)?,
+        revoked_by: row.get(9)?,
     })
 }
 
@@ -2600,4 +2752,23 @@ mod tests {
             "partial AgentFS metadata tree should be removed"
         );
     }
+}
+
+fn matched_path_scopes(paths: &[String], scopes: &[String]) -> Option<Vec<String>> {
+    let mut matched = Vec::new();
+    for path in paths {
+        let mut path_allowed = false;
+        for scope in scopes {
+            if agentfs::path_matches_scope(path, scope) {
+                path_allowed = true;
+                if !matched.contains(scope) {
+                    matched.push(scope.clone());
+                }
+            }
+        }
+        if !path_allowed {
+            return None;
+        }
+    }
+    Some(matched)
 }

@@ -14,9 +14,7 @@ test below should prove one contract boundary for:
 Agent / FS / Grant / Commit / Event
 ```
 
-Hook execution, proposal or approval workflows, path-scoped grants, and
-`AGENTS.md` enforcement are out of scope for the current MVP slice. Future E2E
-gates below define the product proof required when those features are built.
+The core MVP slice is direct commit governance. Hooks、`AGENTS.md` protected paths、path-scoped grants、proposal/approval are extension gates. This plan now records both the MVP proof set and the implemented v1 extension proof set.
 
 ## Verification Layers
 
@@ -834,66 +832,43 @@ This proves `fs status` is enough for an Agent to decide whether it can act.
 
 这个场景证明：添加、查看、删除 hook 是权限和控制面行为，不依赖底层同步目录。
 
-#### 33. `AGENTS.md` Rule Enforcement
+#### 33. `AGENTS.md` protected_paths v1
 
-| Step | Actor | Command or action | Expected |
+| 步骤 | 角色 | 操作 | 预期 |
 | --- | --- | --- | --- |
-| 1 | manager | commit `AGENTS.md` with `required_checks` and `protected_paths` machine block | rules become active |
-| 2 | writer | commit normal path with required check passing | commit succeeds |
-| 3 | writer | commit normal path with required check failing | commit rejected before head advances |
-| 4 | writer | commit protected path without manage authority | `grant_denied` or policy error |
-| 5 | manager | commit protected path | commit succeeds |
-| 6 | manager | commit invalid `AGENTS.md` machine block | rejected with `agent_rules_invalid`; previous rules remain active |
+| 1 | owner | commit `AGENTS.md`，机器块里包含 `protected_paths` | 规则成为 active rules |
+| 2 | writer | commit 普通路径 | 成功 |
+| 3 | writer | commit protected path | `grant_denied`，head 不前进 |
+| 4 | writer | commit invalid `AGENTS.md` | `agent_rules_invalid`，远端旧规则不变 |
+| 5 | owner | commit protected path | 成功 |
 
-This proves FS-local rules affect commit decisions only through defined
-machine-readable rules.
+这个场景证明：`AGENTS.md` v1 只执行机器可读的 `protected_paths`，不解释自然语言，也不执行 `required_checks`。
 
 #### 34. Proposal And Approval Commit
 
-| Step | Actor | Command or action | Expected |
+| 步骤 | 角色 | 操作 | 预期 |
 | --- | --- | --- | --- |
 | 1 | owner | grant contributor to `contributor` | contributor has `read` and `propose`, not `commit` |
 | 2 | contributor | edit and run `commit apply` | `grant_denied` |
 | 3 | contributor | `commit propose <root> --message "change"` | proposal id returned; head unchanged |
-| 4 | manager-only | inspect proposal and try accept | accept is rejected; head unchanged |
-| 5 | owner | inspect proposal and accept | proposal becomes accepted commit; head advances |
-| 6 | writer-b | advance head before another proposal accept | stale proposal accept is rejected |
+| 4 | manager-only | try accept | accept is rejected; head unchanged |
+| 5 | owner | accept proposal | proposal becomes accepted commit; head advances |
+| 6 | owner | accept stale proposal | `stale_base` |
+| 7 | owner | reject open proposal | proposal becomes rejected; head unchanged |
 
-This proves proposal/approval is a separate path from direct commit.
+这个场景证明：proposal/approval 是 direct commit 之外的独立路径，accept 时重新检查 head。
 
 #### 35. Path-Scoped Grants
 
-| Step | Actor | Command or action | Expected |
+| 步骤 | 角色 | 操作 | 预期 |
 | --- | --- | --- | --- |
 | 1 | owner | grant writer to `writer` with scope `docs/**` | writer has scoped commit authority |
 | 2 | writer | edit `docs/a.md` and commit | commit succeeds |
-| 3 | writer | edit `src/a.rs` and commit | rejected with path-scope policy error |
+| 3 | writer | edit `src/a.rs` and commit | rejected with `path_scope_denied` |
 | 4 | writer | edit both `docs/b.md` and `src/b.rs` in one commit | entire commit is rejected |
-| 5 | observer | inspect accepted docs commit audit | `authorized_by` includes grant id and matched path scope |
+| 5 | observer | inspect accepted docs commit audit | `authorized_by` includes grant id, `path_scopes`, and `matched_path_scopes` |
 
-This proves path scopes restrict which local changes can become shared truth.
-
-### AgentFS Product-Complete E2E Gaps
-
-The E2E definition above is broader than the current implementation.
-
-Before calling the AgentFS core product complete, the suite must close the P0
-and P1 gaps:
-
-| Gap | Why It Matters | Current Status |
-| --- | --- | --- |
-| Server-side share and accept | A grant should be usable from the grantee perspective after login, not only from the owner's local setup. | 已有第一版：`sectiond serve` 提供 HTTP Control Service；客户端只配置 endpoint，不配置 SourceProfile 或 backing source；`fs share`、`fs available`、`fs accept` 走 Control Service；pending share 在 backing grant 被 revoke 后不能再 available/accept；`fs accept` 返回带过期时间的 service-issued credential binding；`fs attach`、`commit status`、`commit apply` 在访问 backing source 前都会刷新 service-issued credential；`fs list/status/events/watch` 只对有 read capability 的 agent 暴露。后续生产硬化项是传输认证和高并发部署。 |
-| AgentFS watch/replay | Observable mutation is part of the product contract. Reading metadata files is only a secondary oracle. | 已有第一版：`fs events` 支持 replay/after，`watch --agentfs` 输出 AgentFS 事件，事件有递增 `seq`，且需要 read capability；grant/revoke 事件以 Control Service 为权威，并和 backing event mirror 合并输出。后续生产硬化项是多副本服务端的并发顺序保障。 |
-| Authorizing grant audit | Agents should know which grant or owner authority allowed a mutation. | 已有第一版：commit record 和 `commit.accepted` event 记录 `authorized_by`，E2E 已通过 `fs events` 验证。 |
-| Trustworthy dirty base | Commit correctness depends on comparing against the mounted base, not just current remote state. | 已有第一版：本地 store 记录 mount/base，E2E 验证篡改 `.section/root.json` 不能绕过 stale-base；外部直接修改 backing source 时，commit 返回 `remote_drift`，不会写 accepted commit。更完整的 tree diff 证明可作为后续增强。 |
-| Commit/materialization snapshot match | Accepted commit metadata must describe the bytes that became truth. | 已有第一版：`commit apply` 先写 staging snapshot，commit metadata 记录 snapshot，物化从 snapshot 读取。E2E 验证 live root 后续修改仍是 dirty work；本地 marker 更新失败只作为 warning 返回，不推翻已完成的治理真相。 |
-| Materialization failure and repair | Contract says accepted failed commits block later commits and can be repaired. | 已有第一版：failed head 阻塞后续 commit，`commit repair` 用原 staging snapshot 修复同一个 commit，repair 后可以继续接受新 commit。 |
-| Local root canonicalization and overlap | Attached root identity must survive path spelling and avoid nested-root leakage. | 已有第一版：attach 和 source bind 会存 canonical local root；E2E 验证 attach JSON、marker、status 都使用 canonical root；父子 root 和 backing root overlap 会被拒绝；同一 FS 在同一 local store 只有一个 active local root，reattach 会移动 root。 |
-| Low-level source command guardrails | Source commands can bypass or damage AgentFS governance if treated as ordinary user operations. | 已有第一版 guardrails。MVP 明确不提供低层 force 绕过。 |
-| Metadata schema, lock, and event immutability | Shared metadata is the governance record and must be robust across agents/backends. | 已有第一版：schema/version/ID/path validation、head/commit/event FS 一致性检查、初始化失败回滚、service event authority、event `seq`、event 文件用 backend `if_not_exists` 写入、active head lock 会阻塞 commit，commit accepted 事件失败不推进 head。后端必须支持条件创建和锁目录一致列举，不做 fallback。 |
-| JSON error contract | Agent callers need stable machine-readable failures. | 已有第一版：`agent`、`fs`、`commit`、`watch --agentfs` 在 `--json` 失败时输出稳定 `error.code`、`retryable`、`details`。参数错误是 `invalid_arguments`，普通运行错误统一落到 `operation_failed`。 |
-| File/dir replacement preflight | Materialization must not leave half-applied filesystem shape changes. | 已有第一版：同一路径文件/目录类型替换会在 accepted commit 写入前失败，返回 `path_type_conflict`；非空目录删除会物化为干净的远端删除。 |
-| FS status decision surface | Agents need one command to know whether they can act. | 已有第一版：`fs status --json` 支持本地 path，输出 role、capabilities、head、base、dirty、stale、materialization、warnings、next_actions。 |
+这个场景证明：path scopes 限制哪些本地改动可以成为共享事实。
 
 ### Future Feature E2E Gates
 
@@ -904,9 +879,9 @@ implemented.
 | Feature | Why It Matters | Current Status |
 | --- | --- | --- |
 | Hooks | commit 成为 shared truth 后，需要本地自动化。 | 已实现第一版：本地、非阻塞、只支持 `commit.materialized`，已有 e2e 覆盖。 |
-| `AGENTS.md` rules | FS-local rules should affect Agent behavior through explicit machine-readable policy. | Design defined: minimal machine block, protected paths, required checks; implementation open. |
-| Proposal/approval | Some collaborators should propose changes without direct commit authority. | Design defined: `propose` capability, proposal lifecycle, accept/reject; implementation open. |
-| Path-scoped grants | Coarse FS-wide writer grants may be too broad. | Design defined: allow-only path scopes on grants; implementation open. |
+| `AGENTS.md` rules | FS-local rules should affect Agent behavior through explicit machine-readable policy. | 已实现第一版：只执行 `protected_paths`，不执行 `required_checks`。 |
+| Proposal/approval | Some collaborators should propose changes without direct commit authority. | 已实现第一版：contributor propose，owner accept/reject，accept 时检查 freshness。 |
+| Path-scoped grants | Coarse FS-wide writer grants may be too broad. | 已实现第一版：grant `--scope`，commit path 检查，audit 记录命中 scope。 |
 
 ### Current CLI Product Test Implementation
 
@@ -944,22 +919,27 @@ It covers the product behaviors that are implemented today:
 | `e2e_rejects_non_utf8_commit_paths` | 非 UTF-8 本地文件名不会被 lossy 转成共享路径；commit 返回 `non_utf8_path`，head 和 accepted event 不变 |
 | `e2e_commit_success_survives_local_marker_update_failure` | accepted/materialized commit still succeeds when final local marker update fails; warning is returned and trusted mount base is updated |
 | `e2e_hardening_rejects_symlink_commit_paths` | symlink paths cannot materialize files outside the working root |
+| `e2e_hooks_v1_run_local_post_materialized_automation` | Hooks v1 runs local post-materialized automation, does not inherit parent env, records success/failure locally, and does not block accepted commits |
+| `e2e_hooks_management_uses_control_service_without_backing_source_read` | hook add/list/remove uses Control Service and does not depend on backing source metadata reads |
+| `e2e_path_scoped_grant_restricts_commit_paths` | scoped writer can commit allowed paths, cannot commit out-of-scope or mixed changes, and commit audit records matched scopes |
+| `e2e_agents_md_protected_paths_are_enforced` | `AGENTS.md` protected paths reject writer changes, owner can change protected paths, invalid rules do not replace remote rules |
+| `e2e_proposal_approval_flow_keeps_head_governed` | contributor can propose but not commit; manager-only cannot accept; owner accept advances head; stale accept fails; reject closes proposal |
 
-The list above is the current proof set for the AgentFS core. It does not claim
-the P2 extension features below are implemented.
+The list above is the current proof set for the AgentFS core plus implemented v1 extension gates.
 
 ### Current MVP E2E Non-Goals
 
-Until the future feature E2Es below are implemented, the current MVP E2E suite
-must not claim unsupported P2 behavior:
+The MVP baseline still means direct commit governance. Extension gates are verified separately and must not be treated as fallback behavior.
 
-- no path-scoped grant enforcement,
-- no hook execution,
-- no `AGENTS.md` enforcement,
-- no low-level force bypass mode for AgentFS-backed sources.
+Still unsupported:
 
-Low-level source/path tests remain regression tests for the sync substrate. They
-are not proof of AgentFS governance.
+- blocking hooks,
+- `AGENTS.md required_checks`,
+- deny path scopes,
+- proposal expiry,
+- low-level force bypass mode for AgentFS-backed sources.
+
+Low-level source/path tests remain regression tests for the sync substrate. They are not proof of AgentFS governance.
 
 ## Regression Tests
 
@@ -980,9 +960,9 @@ MVP 不能暗示已经支持这些能力：
 | Surface | Assertion |
 | --- | --- |
 | Hooks | MVP 基线不包含 hook；Hooks v1 作为后续功能单独验证 |
-| `AGENTS.md` | MVP 只同步文件，不执行 Markdown 规则 |
-| path-scoped grants | MVP 只有整个 FS 级别的 grant |
-| proposals/approvals | MVP 只有直接 commit，不做提案审批 |
+| `AGENTS.md` | MVP 基线只同步文件；`protected_paths` v1 作为后续功能单独验证 |
+| path-scoped grants | MVP 基线只有整个 FS 级别的 grant；path scopes v1 单独验证 |
+| proposals/approvals | MVP 基线只有直接 commit；proposal/approval v1 单独验证 |
 
 ## 完成标准
 

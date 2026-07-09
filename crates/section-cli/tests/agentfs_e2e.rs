@@ -141,7 +141,11 @@ impl AgentFsActor {
     }
 
     fn grant(&self, agent_id: &str, role: &str) -> Value {
-        self.json_owned(vec![
+        self.grant_with_scopes(agent_id, role, &[])
+    }
+
+    fn grant_with_scopes(&self, agent_id: &str, role: &str, scopes: &[&str]) -> Value {
+        let mut args = vec![
             "--json".to_string(),
             "fs".to_string(),
             "grant".to_string(),
@@ -149,7 +153,12 @@ impl AgentFsActor {
             agent_id.to_string(),
             "--role".to_string(),
             role.to_string(),
-        ])
+        ];
+        for scope in scopes {
+            args.push("--scope".to_string());
+            args.push((*scope).to_string());
+        }
+        self.json_owned(args)
     }
 
     fn revoke(&self, agent_id: &str) -> Value {
@@ -289,6 +298,50 @@ impl AgentFsActor {
             fs_ref.to_string(),
             "--commit".to_string(),
             commit_id.to_string(),
+        ])
+    }
+
+    fn commit_propose(&self, message: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "commit".to_string(),
+            "propose".to_string(),
+            self.local_root
+                .to_str()
+                .expect("utf8 local root")
+                .to_string(),
+            "--message".to_string(),
+            message.to_string(),
+        ])
+    }
+
+    fn commit_accept(&self, fs_ref: &str, proposal_id: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "commit".to_string(),
+            "accept".to_string(),
+            fs_ref.to_string(),
+            proposal_id.to_string(),
+        ])
+    }
+
+    fn commit_accept_output(&self, fs_ref: &str, proposal_id: &str) -> Output {
+        self.run_owned(vec![
+            "--json".to_string(),
+            "commit".to_string(),
+            "accept".to_string(),
+            fs_ref.to_string(),
+            proposal_id.to_string(),
+        ])
+    }
+
+    fn commit_reject(&self, fs_ref: &str, proposal_id: &str) -> Value {
+        self.json_owned(vec![
+            "--json".to_string(),
+            "commit".to_string(),
+            "reject".to_string(),
+            fs_ref.to_string(),
+            proposal_id.to_string(),
         ])
     }
 
@@ -1637,6 +1690,221 @@ fn e2e_rejects_file_dir_type_replacement_before_acceptance() {
     assert_eq!(
         accepted_after, accepted_before,
         "type replacement must be rejected before a new accepted commit"
+    );
+}
+
+#[test]
+fn e2e_proposal_approval_flow_keeps_head_governed() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    let contributor = fixture.agent("contributor");
+    let manager = fixture.agent("manager");
+
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    let contributor_id = contributor.login("contributor");
+    owner.grant(&contributor_id, "contributor");
+    let contributor_share = owner.share(&contributor_id);
+    contributor.accept(
+        contributor_share["share"]["share_id"]
+            .as_str()
+            .expect("contributor share id"),
+    );
+    contributor.attach();
+
+    let manager_id = manager.login("manager");
+    owner.grant(&manager_id, "manager");
+    let manager_share = owner.share(&manager_id);
+    manager.accept(
+        manager_share["share"]["share_id"]
+            .as_str()
+            .expect("manager share id"),
+    );
+
+    contributor.write_local("docs/proposal.md", "from proposal");
+    let direct_commit = contributor.commit_apply_output("direct contributor commit");
+    assert_json_error(&direct_commit, "grant_denied");
+
+    let proposal = contributor.commit_propose("propose docs change");
+    let proposal_id = proposal["proposal"]["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+    assert_eq!(proposal["proposal"]["status"], "proposed");
+    assert!(
+        !fixture.path("docs/proposal.md").exists(),
+        "proposal must not advance shared truth"
+    );
+
+    contributor.write_local("docs/stale.md", "stale proposal");
+    let stale_proposal = contributor.commit_propose("second proposal before accept");
+    let stale_proposal_id = stale_proposal["proposal"]["proposal_id"]
+        .as_str()
+        .expect("stale proposal id")
+        .to_string();
+
+    let manager_accept = manager.commit_accept_output(FS_NAME, &proposal_id);
+    assert_json_error(&manager_accept, "grant_denied");
+
+    let accepted = owner.commit_accept(FS_NAME, &proposal_id);
+    let accepted_commit_id = accepted["commit"]["commit_id"]
+        .as_str()
+        .expect("accepted commit id");
+    assert_eq!(accepted["commit"]["agent_id"], contributor_id);
+    assert_eq!(accepted["commit"]["authorized_by"]["type"], "owner");
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/proposal.md")).expect("proposal materialized"),
+        "from proposal"
+    );
+
+    let stale_accept = owner.commit_accept_output(FS_NAME, &stale_proposal_id);
+    assert_json_error(&stale_accept, "stale_base");
+    assert!(
+        !fixture.path("docs/stale.md").exists(),
+        "stale proposal must not materialize"
+    );
+
+    let rejected = owner.commit_reject(FS_NAME, &stale_proposal_id);
+    assert_eq!(rejected["proposal"]["status"], "rejected");
+
+    let events = owner.fs_events(FS_NAME, None);
+    let event_kinds = events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|event| event["kind"].as_str().expect("kind").to_string())
+        .collect::<Vec<_>>();
+    assert!(event_kinds.contains(&"commit.proposed".to_string()));
+    assert!(event_kinds.contains(&"proposal.accepted".to_string()));
+    assert!(event_kinds.contains(&"proposal.rejected".to_string()));
+    assert_eq!(
+        read_json(
+            fixture
+                .remote_root
+                .join(".section/agentfs/heads/current.json"),
+        )["commit_id"],
+        accepted_commit_id
+    );
+}
+
+#[test]
+fn e2e_agents_md_protected_paths_are_enforced() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    let writer = fixture.agent("writer");
+
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+    owner.write_local(
+        "AGENTS.md",
+        r#"---
+section:
+  protected_paths:
+    - docs/locked.md
+---
+
+# Rules
+"#,
+    );
+    owner.commit_apply("define protected path");
+    owner.write_local("docs/locked.md", "owner allowed");
+    owner.commit_apply("owner changes protected path");
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/locked.md")).expect("locked path"),
+        "owner allowed"
+    );
+
+    let writer_id = writer.login("writer");
+    owner.grant(&writer_id, "writer");
+    let share = owner.share(&writer_id);
+    writer.accept(share["share"]["share_id"].as_str().expect("share id"));
+    writer.attach();
+
+    writer.write_local("docs/open.md", "allowed");
+    writer.commit_apply("change open path");
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/open.md")).expect("open path"),
+        "allowed"
+    );
+
+    writer.write_local("docs/locked.md", "denied");
+    let denied = writer.commit_apply_output("change protected path");
+    assert_json_error(&denied, "grant_denied");
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/locked.md")).expect("locked path after writer deny"),
+        "owner allowed",
+        "protected path must not be changed by writer"
+    );
+
+    writer.write_local(
+        "AGENTS.md",
+        "---
+section:
+  protected_paths: [
+---
+
+# invalid
+",
+    );
+    let invalid_rules = writer.commit_apply_output("invalid rules");
+    assert_json_error(&invalid_rules, "agent_rules_invalid");
+    assert!(
+        fs::read_to_string(fixture.path("AGENTS.md"))
+            .expect("remote AGENTS.md")
+            .contains("docs/locked.md"),
+        "invalid AGENTS.md must not replace active remote rules"
+    );
+}
+
+#[test]
+fn e2e_path_scoped_grant_restricts_commit_paths() {
+    let fixture = AgentFsFixture::new();
+    let owner = fixture.agent("owner");
+    let writer = fixture.agent("writer");
+
+    owner.login("owner");
+    owner.create_fs();
+    owner.attach();
+
+    let writer_id = writer.login("writer");
+    let grant = owner.grant_with_scopes(&writer_id, "writer", &["docs/**"]);
+    assert_eq!(grant["grant"]["path_scopes"][0], "docs/**");
+    let share = owner.share(&writer_id);
+    writer.accept(share["share"]["share_id"].as_str().expect("share id"));
+    writer.attach();
+
+    writer.write_local("docs/a.md", "allowed");
+    let commit = writer.commit_apply("allowed docs change");
+    assert_eq!(
+        commit["commit"]["authorized_by"]["path_scopes"][0],
+        "docs/**"
+    );
+    assert_eq!(
+        commit["commit"]["authorized_by"]["matched_path_scopes"][0],
+        "docs/**"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.path("docs/a.md")).expect("read scoped doc"),
+        "allowed"
+    );
+
+    writer.write_local("src/a.rs", "denied");
+    let denied = writer.commit_apply_output("denied src change");
+    assert_json_error(&denied, "path_scope_denied");
+    assert!(
+        !fixture.path("src/a.rs").exists(),
+        "out-of-scope file must not become shared truth"
+    );
+
+    writer.write_local("docs/b.md", "also allowed alone");
+    let mixed = writer.commit_apply_output("mixed scoped and unscoped change");
+    assert_json_error(&mixed, "path_scope_denied");
+    assert!(
+        !fixture.path("docs/b.md").exists(),
+        "mixed commit must be rejected as a whole"
     );
 }
 

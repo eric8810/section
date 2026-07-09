@@ -9,7 +9,8 @@ use crate::{
     agentfs, AgentFsAcceptResult, AgentFsAvailableShare, AgentFsCapability,
     AgentFsCommitPathRecord, AgentFsCommitRecord, AgentFsCommitStagingRecord, AgentFsError,
     AgentFsEventRecord, AgentFsGrantRecord, AgentFsHeadRecord, AgentFsHookRecord,
-    AgentFsMaterializationState, AgentFsRecord, AgentFsRole, AgentFsShareResult, ControlService,
+    AgentFsMaterializationState, AgentFsProposalRecord, AgentFsRecord, AgentFsRole,
+    AgentFsShareResult, ControlService,
 };
 use crate::{SectiondRuntime, SourceOrigin, StatusSnapshot};
 use anyhow::{bail, Result};
@@ -24,10 +25,14 @@ use section_provider::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const REFRESH_XATTR_NAME: &str = "section.refresh";
 const REFRESH_XATTR_NAME_LINUX: &str = "user.section.refresh";
@@ -236,13 +241,18 @@ impl SectiondControlPlane {
         fs_ref: &str,
         agent_id: &str,
         role: AgentFsRole,
+        path_scopes: Option<Vec<String>>,
     ) -> Result<AgentFsGrantRecord> {
         let actor = self.require_agent_identity()?;
         let rt = tokio::runtime::Runtime::new()?;
         let resolved = self.find_agentfs(&rt, fs_ref, &actor)?;
-        let mutation = self
-            .control_service
-            .fs_grant(&resolved.fs.fs_id, &actor, agent_id, role)?;
+        let mutation = self.control_service.fs_grant(
+            &resolved.fs.fs_id,
+            &actor,
+            agent_id,
+            role,
+            path_scopes,
+        )?;
         let _ = mirror_grant_mutation(&rt, &resolved.operator, &resolved.fs.fs_id, &mutation);
         Ok(mutation.grant)
     }
@@ -637,6 +647,15 @@ impl SectiondControlPlane {
                 local_root.display()
             );
         }
+        enforce_agentfs_rules(
+            &self.control_service,
+            &rt,
+            &resolved.operator,
+            &resolved.fs.fs_id,
+            &actor,
+            &local_root,
+            &dirty_paths,
+        )?;
         let commit_id = agentfs::new_commit_id()?;
         let prepared = prepare_staging_snapshot(
             &self.config.data_dir,
@@ -660,10 +679,16 @@ impl SectiondControlPlane {
                 agentfs::HEAD_PATH,
             )?;
             ensure_head_matches_fs(&current_head, &resolved.fs.fs_id)?;
-            let authorized_by = self.control_service.authorize_capability(
+            let commit_paths = prepared
+                .paths
+                .iter()
+                .map(|path| path.path.clone())
+                .collect::<Vec<_>>();
+            let authorized_by = self.control_service.authorize_paths(
                 &resolved.fs.fs_id,
                 &actor,
                 AgentFsCapability::Commit,
+                &commit_paths,
             )?;
             ensure_head_is_materialized(
                 &rt,
@@ -822,6 +847,369 @@ impl SectiondControlPlane {
                 .into())
             }
         }
+    }
+
+    pub fn commit_propose(
+        &self,
+        input_path: &Path,
+        message: &str,
+    ) -> Result<AgentFsProposalRecord> {
+        let summary = message.trim();
+        if summary.is_empty() {
+            bail!("proposal summary must not be empty");
+        }
+
+        let actor = self.require_agent_identity()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let marker = discover_root_marker(&absolutize_path(input_path)?)?;
+        let fs_id = marker
+            .fs_id
+            .clone()
+            .ok_or_else(|| AgentFsError::unknown_fs(&marker.source_id))?;
+        let resolved = self.find_agentfs(&rt, &fs_id, &actor)?;
+        self.control_service.authorize_capability(
+            &resolved.fs.fs_id,
+            &actor,
+            AgentFsCapability::Propose,
+        )?;
+        ensure_head_is_materialized(&rt, &resolved.operator, &resolved.head, &resolved.fs.fs_id)?;
+
+        let mount = local_mount_from_marker(&self.store, &resolved.source.name, &marker)?;
+        if mount.base_commit_id != resolved.head.commit_id {
+            anyhow::bail!(AgentFsError::stale_base(
+                &resolved.fs.fs_id,
+                mount.base_commit_id.as_deref(),
+                resolved.head.commit_id.as_deref(),
+            ));
+        }
+
+        let local_root = mount.local_root.clone();
+        let dirty_paths = collect_dirty_paths(
+            &rt,
+            &resolved.operator,
+            &self.store,
+            &resolved.source.name,
+            &local_root,
+        )?;
+        if dirty_paths.is_empty() {
+            bail!(
+                "empty proposal: no dirty paths under {}",
+                local_root.display()
+            );
+        }
+        let proposal_paths = changed_paths(&dirty_paths);
+        let authorized_by = self.control_service.authorize_paths(
+            &resolved.fs.fs_id,
+            &actor,
+            AgentFsCapability::Propose,
+            &proposal_paths,
+        )?;
+        let commit_id = agentfs::new_commit_id()?;
+        let proposal_id = agentfs::new_proposal_id()?;
+        let prepared = prepare_staging_snapshot(
+            &self.config.data_dir,
+            &resolved.fs.fs_id,
+            &commit_id,
+            &mount.base_commit_id,
+            &local_root,
+            &dirty_paths,
+        )?;
+        let staging_snapshot =
+            write_remote_proposal_snapshot(&rt, &resolved.operator, &proposal_id, &prepared)?;
+        let proposal = AgentFsProposalRecord {
+            schema_version: agentfs::SCHEMA_VERSION,
+            proposal_id: proposal_id.clone(),
+            fs_id: resolved.fs.fs_id.clone(),
+            commit_id,
+            base_commit_id: mount.base_commit_id.clone(),
+            agent_id: actor.agent_id.clone(),
+            summary: summary.to_string(),
+            paths: prepared.paths.clone(),
+            authorized_by: Some(authorized_by.clone()),
+            staging_snapshot,
+            status: "proposed".to_string(),
+            created_at_ms: agentfs::now_ms(),
+            decided_at_ms: None,
+            decided_by_agent_id: None,
+            error: None,
+        };
+        write_proposal(&rt, &resolved.operator, &proposal)?;
+        let event = agentfs::event_record(
+            &resolved.fs.fs_id,
+            "commit.proposed",
+            &actor.agent_id,
+            &proposal.proposal_id,
+            None,
+            serde_json::json!({
+                "commit_id": proposal.commit_id,
+                "summary": proposal.summary,
+                "paths": proposal.paths,
+                "authorized_by": authorized_by,
+            }),
+        )?;
+        agentfs::write_event(&rt, &resolved.operator, &event)?;
+        Ok(proposal)
+    }
+
+    pub fn commit_accept(
+        &self,
+        fs_ref: &str,
+        proposal_id: &str,
+    ) -> Result<AgentFsCommitApplyResult> {
+        let actor = self.require_agent_identity()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
+        let resolved = self.find_agentfs(&rt, &resolved_ref, &actor)?;
+        let mut proposal = read_proposal(&rt, &resolved.operator, proposal_id)?;
+        ensure_proposal_matches_fs(&proposal, &resolved.fs.fs_id, proposal_id)?;
+        if proposal.status != "proposed" {
+            anyhow::bail!(AgentFsError::new(
+                "proposal_not_open",
+                format!("proposal {proposal_id} is {}", proposal.status),
+                false,
+            ));
+        }
+
+        if actor.agent_id != resolved.fs.owner_agent_id {
+            self.control_service.authorize_capability(
+                &resolved.fs.fs_id,
+                &actor,
+                AgentFsCapability::Manage,
+            )?;
+        }
+        let commit_paths = changed_paths(&proposal.paths);
+        let authorized_by = self.control_service.authorize_paths(
+            &resolved.fs.fs_id,
+            &actor,
+            AgentFsCapability::Commit,
+            &commit_paths,
+        )?;
+
+        let lock = agentfs::acquire_head_lock(
+            &rt,
+            &resolved.operator,
+            &resolved.fs.fs_id,
+            &actor.agent_id,
+        )?;
+        let accepted = (|| -> Result<AgentFsCommitRecord> {
+            let current_head = agentfs::read_json::<AgentFsHeadRecord>(
+                &rt,
+                &resolved.operator,
+                agentfs::HEAD_PATH,
+            )?;
+            ensure_head_matches_fs(&current_head, &resolved.fs.fs_id)?;
+            ensure_head_is_materialized(
+                &rt,
+                &resolved.operator,
+                &current_head,
+                &resolved.fs.fs_id,
+            )?;
+            if proposal.base_commit_id != current_head.commit_id {
+                anyhow::bail!(AgentFsError::stale_base(
+                    &resolved.fs.fs_id,
+                    proposal.base_commit_id.as_deref(),
+                    current_head.commit_id.as_deref(),
+                ));
+            }
+
+            let commit = AgentFsCommitRecord {
+                schema_version: agentfs::SCHEMA_VERSION,
+                commit_id: proposal.commit_id.clone(),
+                fs_id: resolved.fs.fs_id.clone(),
+                parent_commit_id: current_head.commit_id.clone(),
+                base_commit_id: proposal.base_commit_id.clone(),
+                base_manifest_hash: None,
+                agent_id: proposal.agent_id.clone(),
+                summary: proposal.summary.clone(),
+                paths: proposal.paths.clone(),
+                authorized_by: Some(authorized_by.clone()),
+                staging_snapshot: Some(proposal.staging_snapshot.clone()),
+                created_at_ms: agentfs::now_ms(),
+                materialization_state: AgentFsMaterializationState::Pending,
+                materialized_at_ms: None,
+                error: None,
+            };
+            let accepted_event = agentfs::event_record(
+                &resolved.fs.fs_id,
+                "commit.accepted",
+                &actor.agent_id,
+                &commit.commit_id,
+                None,
+                serde_json::json!({
+                    "proposal_id": proposal.proposal_id,
+                    "summary": commit.summary,
+                    "paths": commit.paths,
+                    "authorized_by": authorized_by,
+                }),
+            )?;
+            agentfs::ensure_event_log_ready(&rt, &resolved.operator, &resolved.fs.fs_id)?;
+            agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+            agentfs::write_event(&rt, &resolved.operator, &accepted_event)?;
+            agentfs::write_json(
+                &rt,
+                &resolved.operator,
+                agentfs::HEAD_PATH,
+                &agentfs::head_record(&resolved.fs.fs_id, Some(commit.commit_id.clone())),
+            )?;
+            Ok(commit)
+        })();
+        let mut release_error = agentfs::release_head_lock(&rt, &resolved.operator, &lock).err();
+        let mut commit = accepted?;
+        let manifest = read_remote_staging_manifest(
+            &rt,
+            &resolved.operator,
+            &proposal.staging_snapshot.manifest_path,
+            &proposal.staging_snapshot.manifest_hash,
+        )?;
+        let local_root = resolved
+            .source
+            .local_root
+            .clone()
+            .unwrap_or_else(PathBuf::new);
+
+        match materialize_remote_proposal_commit(
+            &rt,
+            &resolved.operator,
+            &self.store,
+            &resolved.source.name,
+            &local_root,
+            proposal_root(&proposal.proposal_id),
+            &manifest,
+        ) {
+            Ok(sync) if sync.conflicts == 0 => {
+                commit.materialization_state = AgentFsMaterializationState::Materialized;
+                commit.materialized_at_ms = Some(agentfs::now_ms());
+                commit.error = None;
+                let materialized_event = agentfs::event_record(
+                    &resolved.fs.fs_id,
+                    "commit.materialized",
+                    &actor.agent_id,
+                    &commit.commit_id,
+                    None,
+                    materialized_event_data(&commit, &sync, false),
+                )?;
+                let materialized_event =
+                    agentfs::write_event(&rt, &resolved.operator, &materialized_event)?;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+                proposal.status = "accepted".to_string();
+                proposal.decided_at_ms = Some(agentfs::now_ms());
+                proposal.decided_by_agent_id = Some(actor.agent_id.clone());
+                write_proposal(&rt, &resolved.operator, &proposal)?;
+                let proposal_event = agentfs::event_record(
+                    &resolved.fs.fs_id,
+                    "proposal.accepted",
+                    &actor.agent_id,
+                    &proposal.proposal_id,
+                    None,
+                    serde_json::json!({ "commit_id": commit.commit_id }),
+                )?;
+                agentfs::write_event(&rt, &resolved.operator, &proposal_event)?;
+                if release_error.is_some() {
+                    release_error =
+                        agentfs::release_head_lock(&rt, &resolved.operator, &lock).err();
+                }
+                let mut warnings = Vec::new();
+                if let Some(err) = release_error {
+                    warnings.push(format!(
+                        "failed to release AgentFS head lock {}; lock will expire: {err}",
+                        lock.lock_token
+                    ));
+                }
+                if !local_root.as_os_str().is_empty() {
+                    warnings.extend(self.record_local_materialized_commit(
+                        &resolved.source.name,
+                        &local_root,
+                        &resolved.fs.fs_id,
+                        &resolved.fs.source_profile_id,
+                        &actor.agent_id,
+                        &actor.installation_id,
+                        &commit.commit_id,
+                    ));
+                    warnings.extend(self.run_local_post_materialized_hooks(
+                        &resolved.fs,
+                        &local_root,
+                        &actor,
+                        &materialized_event,
+                    ));
+                }
+                Ok(AgentFsCommitApplyResult {
+                    commit,
+                    sync,
+                    warnings,
+                })
+            }
+            Ok(sync) => {
+                commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
+                commit.error = Some(format!(
+                    "proposal source materialization reported {} conflict(s)",
+                    sync.conflicts
+                ));
+                write_materialization_failure_events(
+                    &rt,
+                    &resolved.operator,
+                    &resolved.fs.fs_id,
+                    &actor.agent_id,
+                    &commit,
+                )?;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+                anyhow::bail!(AgentFsError::materialization_failed(
+                    &resolved.fs.fs_id,
+                    commit.error.as_deref().unwrap_or("proposal accept failed"),
+                ));
+            }
+            Err(err) => {
+                commit.materialization_state = AgentFsMaterializationState::FailedToMaterialize;
+                commit.error = Some(err.to_string());
+                write_materialization_failure_events(
+                    &rt,
+                    &resolved.operator,
+                    &resolved.fs.fs_id,
+                    &actor.agent_id,
+                    &commit,
+                )?;
+                agentfs::write_commit(&rt, &resolved.operator, &commit)?;
+                Err(AgentFsError::materialization_failed(
+                    &resolved.fs.fs_id,
+                    commit.error.as_deref().unwrap_or("proposal accept failed"),
+                )
+                .into())
+            }
+        }
+    }
+
+    pub fn commit_reject(&self, fs_ref: &str, proposal_id: &str) -> Result<AgentFsProposalRecord> {
+        let actor = self.require_agent_identity()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let resolved_ref = self.agentfs_ref_from_local_marker(fs_ref)?;
+        let resolved = self.find_agentfs(&rt, &resolved_ref, &actor)?;
+        self.control_service.authorize_capability(
+            &resolved.fs.fs_id,
+            &actor,
+            AgentFsCapability::Manage,
+        )?;
+        let mut proposal = read_proposal(&rt, &resolved.operator, proposal_id)?;
+        ensure_proposal_matches_fs(&proposal, &resolved.fs.fs_id, proposal_id)?;
+        if proposal.status != "proposed" {
+            anyhow::bail!(AgentFsError::new(
+                "proposal_not_open",
+                format!("proposal {proposal_id} is {}", proposal.status),
+                false,
+            ));
+        }
+        proposal.status = "rejected".to_string();
+        proposal.decided_at_ms = Some(agentfs::now_ms());
+        proposal.decided_by_agent_id = Some(actor.agent_id.clone());
+        write_proposal(&rt, &resolved.operator, &proposal)?;
+        let event = agentfs::event_record(
+            &resolved.fs.fs_id,
+            "proposal.rejected",
+            &actor.agent_id,
+            &proposal.proposal_id,
+            None,
+            serde_json::json!({ "commit_id": proposal.commit_id }),
+        )?;
+        agentfs::write_event(&rt, &resolved.operator, &event)?;
+        Ok(proposal)
     }
 
     pub fn commit_repair(
@@ -1555,12 +1943,23 @@ impl SectiondControlPlane {
 }
 
 const HOOK_OUTPUT_TAIL_BYTES: usize = 8192;
+const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn execute_agentfs_hook(
     hook: &AgentFsHookRecord,
     event: &AgentFsEventRecord,
     actor: &AgentIdentityRecord,
     local_root: &Path,
+) -> Result<AgentFsHookRunRecord> {
+    execute_agentfs_hook_with_timeout(hook, event, actor, local_root, HOOK_TIMEOUT)
+}
+
+fn execute_agentfs_hook_with_timeout(
+    hook: &AgentFsHookRecord,
+    event: &AgentFsEventRecord,
+    actor: &AgentIdentityRecord,
+    local_root: &Path,
+    timeout: Duration,
 ) -> Result<AgentFsHookRunRecord> {
     let started_at_ms = agentfs::now_ms();
     let run_id = agentfs::new_hook_run_id()?;
@@ -1582,7 +1981,8 @@ fn execute_agentfs_hook(
         });
     };
 
-    let mut child = match Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(local_root)
         .env_clear()
@@ -1595,9 +1995,19 @@ fn execute_agentfs_hook(
         .env("SECTION_LOCAL_ROOT", local_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
             let finished_at_ms = agentfs::now_ms();
@@ -1616,14 +2026,49 @@ fn execute_agentfs_hook(
         }
     };
 
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = read_pipe_in_thread(stdout);
+    let stderr_handle = read_pipe_in_thread(stderr);
     let stdin_error = child
         .stdin
         .take()
         .and_then(|mut stdin| stdin.write_all(&event_json).err());
     let stdin_failed = stdin_error.is_some();
-    let output = child.wait_with_output()?;
+    drop(child.stdin.take());
+
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            #[cfg(unix)]
+            let kill_result = {
+                let pid = child.id() as libc::pid_t;
+                let result = unsafe { libc::killpg(pid, libc::SIGKILL) };
+                if result == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            };
+            #[cfg(not(unix))]
+            let kill_result = child.kill();
+            let status = child.wait()?;
+            if let Err(err) = kill_result {
+                let _ = err;
+            }
+            break status;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
     let finished_at_ms = agentfs::now_ms();
-    let mut stderr_tail = tail_text(&output.stderr);
+    let mut stderr_tail = tail_text(&stderr);
     if let Some(err) = stdin_error {
         stderr_tail = if stderr_tail.is_empty() {
             format!("stdin write failed: {err}")
@@ -1631,7 +2076,15 @@ fn execute_agentfs_hook(
             format!("stdin write failed: {err}\n{stderr_tail}")
         };
     }
-    let success = output.status.success() && !stdin_failed;
+    if timed_out {
+        let timeout_message = format!("hook timed out after {} ms", timeout.as_millis());
+        stderr_tail = if stderr_tail.is_empty() {
+            timeout_message
+        } else {
+            format!("{timeout_message}\n{stderr_tail}")
+        };
+    }
+    let success = status.success() && !stdin_failed && !timed_out;
 
     Ok(AgentFsHookRunRecord {
         run_id,
@@ -1639,11 +2092,24 @@ fn execute_agentfs_hook(
         fs_id: hook.fs_id.clone(),
         event_id: event.event_id.clone(),
         status: if success { "success" } else { "failed" }.to_string(),
-        exit_code: output.status.code(),
+        exit_code: status.code(),
         started_at_ms,
         finished_at_ms,
-        stdout_tail: tail_text(&output.stdout),
+        stdout_tail: tail_text(&stdout),
         stderr_tail,
+    })
+}
+
+fn read_pipe_in_thread<R>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut output);
+        }
+        output
     })
 }
 
@@ -2055,6 +2521,134 @@ fn materialized_event_data(
     data
 }
 
+const AGENTS_RULES_PATH: &str = "AGENTS.md";
+
+#[derive(Debug, Default, Clone)]
+struct AgentFsRules {
+    protected_paths: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AgentsMdFrontMatter {
+    #[serde(default)]
+    section: AgentsMdSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AgentsMdSection {
+    #[serde(default)]
+    protected_paths: Vec<String>,
+}
+
+fn read_active_agent_rules(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+) -> Result<AgentFsRules> {
+    match rt.block_on(operator.read(AGENTS_RULES_PATH)) {
+        Ok(data) => parse_agent_rules_bytes(data.to_bytes().as_ref()),
+        Err(err) if err.kind() == opendal::ErrorKind::NotFound => Ok(AgentFsRules::default()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn parse_agent_rules_bytes(bytes: &[u8]) -> Result<AgentFsRules> {
+    let text = std::str::from_utf8(bytes).map_err(|err| {
+        AgentFsError::agent_rules_invalid(format!("AGENTS.md must be UTF-8: {err}"))
+    })?;
+    parse_agent_rules_text(text)
+}
+
+fn parse_agent_rules_text(text: &str) -> Result<AgentFsRules> {
+    let Some(frontmatter) = extract_agents_frontmatter(text)? else {
+        return Ok(AgentFsRules::default());
+    };
+    let parsed: AgentsMdFrontMatter = serde_yaml::from_str(&frontmatter).map_err(|err| {
+        AgentFsError::agent_rules_invalid(format!("failed to parse AGENTS.md section block: {err}"))
+    })?;
+    let mut protected_paths = Vec::new();
+    for scope in parsed.section.protected_paths {
+        let scope = scope.trim().to_string();
+        agentfs::validate_path_scope(&scope).map_err(|err| {
+            AgentFsError::agent_rules_invalid(format!(
+                "invalid protected path scope {scope}: {err}"
+            ))
+        })?;
+        if !protected_paths.contains(&scope) {
+            protected_paths.push(scope);
+        }
+    }
+    Ok(AgentFsRules { protected_paths })
+}
+
+fn extract_agents_frontmatter(text: &str) -> Result<Option<String>> {
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
+        return Ok(None);
+    };
+    if first.trim_end_matches('\r') != "---" {
+        return Ok(None);
+    }
+    let mut yaml = String::new();
+    for line in lines {
+        if line.trim_end_matches('\r') == "---" {
+            return Ok(Some(yaml));
+        }
+        yaml.push_str(line);
+        yaml.push('\n');
+    }
+    Err(AgentFsError::agent_rules_invalid("AGENTS.md frontmatter is missing closing ---").into())
+}
+
+fn changed_paths(dirty_paths: &[AgentFsCommitPathRecord]) -> Vec<String> {
+    dirty_paths.iter().map(|path| path.path.clone()).collect()
+}
+
+fn matching_scopes(paths: &[String], scopes: &[String]) -> Vec<String> {
+    let mut matched = Vec::new();
+    for path in paths {
+        for scope in scopes {
+            if agentfs::path_matches_scope(path, scope) && !matched.contains(scope) {
+                matched.push(scope.clone());
+            }
+        }
+    }
+    matched
+}
+
+fn enforce_agentfs_rules(
+    control_service: &ControlService,
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    fs_id: &str,
+    actor: &AgentIdentityRecord,
+    local_root: &Path,
+    dirty_paths: &[AgentFsCommitPathRecord],
+) -> Result<()> {
+    let active_rules = read_active_agent_rules(rt, operator)?;
+    let paths = changed_paths(dirty_paths);
+    let changes_agents_md = paths.iter().any(|path| path == AGENTS_RULES_PATH);
+
+    if changes_agents_md {
+        let local_agents_path = local_root.join(AGENTS_RULES_PATH);
+        if local_agents_path.exists() {
+            let bytes = fs::read(&local_agents_path).map_err(|err| {
+                AgentFsError::agent_rules_invalid(format!(
+                    "failed to read local AGENTS.md for validation: {err}"
+                ))
+            })?;
+            parse_agent_rules_bytes(&bytes)?;
+        }
+        control_service.authorize_capability(fs_id, actor, AgentFsCapability::Manage)?;
+    }
+
+    let matched_protected = matching_scopes(&paths, &active_rules.protected_paths);
+    if !matched_protected.is_empty() {
+        control_service.authorize_capability(fs_id, actor, AgentFsCapability::Manage)?;
+    }
+
+    Ok(())
+}
+
 fn prepare_staging_snapshot(
     data_dir: &Path,
     fs_id: &str,
@@ -2147,6 +2741,107 @@ fn prepare_staging_snapshot(
     })
 }
 
+fn proposal_root(proposal_id: &str) -> String {
+    format!("{}/proposals/{proposal_id}", agentfs::METADATA_ROOT)
+}
+
+fn proposal_path(proposal_id: &str) -> String {
+    format!("{}/proposal.json", proposal_root(proposal_id))
+}
+
+fn write_proposal(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    proposal: &AgentFsProposalRecord,
+) -> Result<()> {
+    agentfs::write_json(
+        rt,
+        operator,
+        &proposal_path(&proposal.proposal_id),
+        proposal,
+    )
+}
+
+fn read_proposal(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    proposal_id: &str,
+) -> Result<AgentFsProposalRecord> {
+    agentfs::read_json(rt, operator, &proposal_path(proposal_id))
+}
+
+fn ensure_proposal_matches_fs(
+    proposal: &AgentFsProposalRecord,
+    fs_id: &str,
+    proposal_id: &str,
+) -> Result<()> {
+    if proposal.proposal_id != proposal_id {
+        anyhow::bail!(AgentFsError::malformed_metadata(format!(
+            "proposal file for {proposal_id} contains proposal {}",
+            proposal.proposal_id
+        )));
+    }
+    if proposal.fs_id != fs_id {
+        anyhow::bail!(AgentFsError::malformed_metadata(format!(
+            "proposal {} belongs to fs {}, not {}",
+            proposal.proposal_id, proposal.fs_id, fs_id
+        )));
+    }
+    Ok(())
+}
+
+fn write_remote_proposal_snapshot(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    proposal_id: &str,
+    prepared: &PreparedAgentFsCommit,
+) -> Result<AgentFsCommitStagingRecord> {
+    let root = proposal_root(proposal_id);
+    let local_staging_root = prepared
+        .manifest_path
+        .parent()
+        .ok_or_else(|| AgentFsError::missing_commit_snapshot(&prepared.commit_id))?;
+    for path in &prepared.manifest.paths {
+        if let Some(staged_path) = &path.staged_path {
+            let bytes = fs::read(local_staging_root.join(staged_path))
+                .map_err(|_| AgentFsError::missing_commit_snapshot(&path.path))?;
+            let remote_path = format!("{root}/{staged_path}");
+            ensure_remote_parent_dirs_for_agentfs(rt, operator, &remote_path)?;
+            rt.block_on(operator.write(&remote_path, bytes))?;
+        }
+    }
+    let manifest_path = format!("{root}/manifest.json");
+    agentfs::write_json(rt, operator, &manifest_path, &prepared.manifest)?;
+    Ok(AgentFsCommitStagingRecord {
+        manifest_path,
+        manifest_hash: prepared.manifest_hash.clone(),
+    })
+}
+
+fn read_remote_staging_manifest(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    manifest_path: &str,
+    expected_manifest_hash: &str,
+) -> Result<AgentFsStagingManifest> {
+    let bytes = rt
+        .block_on(operator.read(manifest_path))
+        .map_err(|_| AgentFsError::missing_commit_snapshot(manifest_path))?;
+    let bytes = bytes.to_bytes();
+    let actual_hash = hash_bytes(bytes.as_ref());
+    if actual_hash != expected_manifest_hash {
+        anyhow::bail!(AgentFsError::malformed_metadata(format!(
+            "proposal staging manifest {manifest_path} hash mismatch"
+        )));
+    }
+    serde_json::from_slice(bytes.as_ref()).map_err(|err| {
+        AgentFsError::malformed_metadata(format!(
+            "failed to parse proposal staging manifest {manifest_path}: {err}"
+        ))
+        .into()
+    })
+}
+
 fn read_staging_manifest(
     manifest_path: &Path,
     expected_manifest_hash: &str,
@@ -2174,6 +2869,126 @@ fn read_staging_manifest(
         ))
         .into()
     })
+}
+
+fn materialize_remote_proposal_commit(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    store: &ProviderStore,
+    source_name: &str,
+    local_root: &Path,
+    proposal_root: String,
+    manifest: &AgentFsStagingManifest,
+) -> Result<SourceSyncResult> {
+    let mut pushed = 0;
+    let mut events_emitted = 0;
+
+    let mut deletes = manifest
+        .paths
+        .iter()
+        .filter(|path| path.op == "delete")
+        .collect::<Vec<_>>();
+    deletes.sort_by(|left, right| {
+        right
+            .path
+            .matches('/')
+            .count()
+            .cmp(&left.path.matches('/').count())
+            .then_with(|| right.path.cmp(&left.path))
+    });
+    for path in deletes {
+        delete_remote_staged_path(rt, operator, path)?;
+        store.remove_path_sync_state(source_name, &path.path)?;
+        store.append_sync_event(
+            source_name,
+            &path.path,
+            "synced_to_remote",
+            "ready",
+            agentfs::now_ms(),
+        )?;
+        pushed += 1;
+        events_emitted += 1;
+    }
+
+    let mut creates = manifest
+        .paths
+        .iter()
+        .filter(|path| path.op != "delete")
+        .collect::<Vec<_>>();
+    creates.sort_by(|left, right| {
+        staged_kind_rank(&left.kind)
+            .cmp(&staged_kind_rank(&right.kind))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    for path in creates {
+        materialize_remote_proposal_path(rt, operator, &proposal_root, path)?;
+        store.upsert_path_sync_state(&PathSyncStateRecord {
+            source_name: source_name.to_string(),
+            path: path.path.clone(),
+            entry_kind: path.kind.clone(),
+            public_state: "ready".to_string(),
+            local_present: !local_root.as_os_str().is_empty(),
+            dirty_local: false,
+            dirty_remote: false,
+            pinned: false,
+            stale: false,
+            last_local_version: path.hash.clone(),
+            base_remote_version: path.hash.clone(),
+            current_remote_version: path.hash.clone(),
+        })?;
+        store.append_sync_event(
+            source_name,
+            &path.path,
+            "synced_to_remote",
+            "ready",
+            agentfs::now_ms(),
+        )?;
+        pushed += 1;
+        events_emitted += 1;
+    }
+
+    Ok(SourceSyncResult {
+        source_id: source_name.to_string(),
+        local_root: local_root.to_path_buf(),
+        pulled: 0,
+        pushed,
+        conflicts: 0,
+        events_emitted,
+        local_scan: LocalScanStats::default(),
+        remote_scan: RemoteScanStats::default(),
+    })
+}
+
+fn materialize_remote_proposal_path(
+    rt: &tokio::runtime::Runtime,
+    operator: &Operator,
+    proposal_root: &str,
+    path: &AgentFsStagedPathRecord,
+) -> Result<()> {
+    match path.kind.as_str() {
+        "dir" => ensure_remote_dir_for_agentfs(rt, operator, &path.path),
+        "file" => {
+            let staged_path = path
+                .staged_path
+                .as_deref()
+                .ok_or_else(|| AgentFsError::missing_commit_snapshot(&path.path))?;
+            let remote_staged_path = format!("{proposal_root}/{staged_path}");
+            let bytes = rt
+                .block_on(operator.read(&remote_staged_path))
+                .map_err(|_| AgentFsError::missing_commit_snapshot(&path.path))?;
+            let bytes = bytes.to_bytes();
+            if path.hash.as_deref() != Some(hash_bytes(bytes.as_ref()).as_str()) {
+                anyhow::bail!(AgentFsError::malformed_metadata(format!(
+                    "proposal staged file {} hash mismatch",
+                    path.path
+                )));
+            }
+            ensure_remote_parent_dirs_for_agentfs(rt, operator, &path.path)?;
+            rt.block_on(operator.write(&path.path, bytes.to_vec()))?;
+            Ok(())
+        }
+        other => bail!("unsupported AgentFS proposal staged path kind {other}"),
+    }
 }
 
 fn materialize_staged_commit(
@@ -2988,6 +3803,69 @@ mod tests {
             created_at_ms,
             data: serde_json::json!({}),
         }
+    }
+
+    fn hook_record(command: Vec<String>) -> AgentFsHookRecord {
+        AgentFsHookRecord {
+            schema_version: agentfs::SCHEMA_VERSION,
+            hook_id: "hook_11111111111111111111111111111111".to_string(),
+            fs_id: "fs_11111111111111111111111111111111".to_string(),
+            name: "test".to_string(),
+            event: "commit.materialized".to_string(),
+            command,
+            created_by_agent_id: "agt_11111111111111111111111111111111".to_string(),
+            created_at_ms: 1,
+        }
+    }
+
+    fn actor() -> AgentIdentityRecord {
+        AgentIdentityRecord {
+            agent_id: "agt_11111111111111111111111111111111".to_string(),
+            installation_id: "ins_11111111111111111111111111111111".to_string(),
+            name: "test".to_string(),
+            auth_token: "auth_test".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    fn test_shell() -> String {
+        std::env::var("SHELL")
+            .ok()
+            .filter(|shell| shell.starts_with('/') && Path::new(shell).exists())
+            .unwrap_or_else(|| "/bin/sh".to_string())
+    }
+
+    #[test]
+    fn execute_agentfs_hook_times_out_and_records_failure() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let hook = hook_record(vec![
+            test_shell(),
+            "-c".to_string(),
+            "printf start; /bin/sleep 1; printf done".to_string(),
+        ]);
+        let started = Instant::now();
+        let run = execute_agentfs_hook_with_timeout(
+            &hook,
+            &event(
+                "evt_1111111111111_1111111111111111",
+                1,
+                1,
+                "commit.materialized",
+            ),
+            &actor(),
+            temp_dir.path(),
+            Duration::from_millis(20),
+        )
+        .expect("execute hook");
+
+        assert_eq!(run.status, "failed");
+        assert!(run.stderr_tail.contains("hook timed out after 20 ms"));
+        assert_eq!(run.stdout_tail, "start");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "timeout should kill hook process group quickly"
+        );
     }
 
     #[test]

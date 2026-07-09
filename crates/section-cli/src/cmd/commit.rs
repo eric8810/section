@@ -57,6 +57,37 @@ fn run_inner(config_path: Option<&Path>, action: CommitAction, json_mode: bool) 
                 print_warnings(&result.warnings);
             }
         }
+        CommitAction::Propose { path, message } => {
+            let proposal = control_plane.commit_propose(&path, &message)?;
+            if json_mode {
+                println!("{}", json!({ "ok": true, "proposal": proposal }));
+            } else {
+                println!("Proposal {} created.", proposal.proposal_id);
+            }
+        }
+        CommitAction::Accept { fs, proposal_id } => {
+            let result = control_plane.commit_accept(&fs, &proposal_id)?;
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({ "ok": true, "commit": result.commit, "sync": result.sync, "warnings": result.warnings })
+                );
+            } else {
+                println!(
+                    "Proposal {proposal_id} accepted as commit {}.",
+                    result.commit.commit_id
+                );
+                print_warnings(&result.warnings);
+            }
+        }
+        CommitAction::Reject { fs, proposal_id } => {
+            let proposal = control_plane.commit_reject(&fs, &proposal_id)?;
+            if json_mode {
+                println!("{}", json!({ "ok": true, "proposal": proposal }));
+            } else {
+                println!("Proposal {} rejected.", proposal.proposal_id);
+            }
+        }
     }
 
     Ok(())

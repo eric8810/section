@@ -43,6 +43,7 @@ pub enum AgentFsCapability {
     Read,
     Commit,
     Manage,
+    Propose,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub enum AgentFsRole {
     Reader,
     Writer,
     Manager,
+    Contributor,
 }
 
 impl AgentFsRole {
@@ -61,10 +63,12 @@ impl AgentFsRole {
                 AgentFsCapability::Read,
                 AgentFsCapability::Commit,
                 AgentFsCapability::Manage,
+                AgentFsCapability::Propose,
             ],
             Self::Reader => vec![AgentFsCapability::Read],
             Self::Writer => vec![AgentFsCapability::Read, AgentFsCapability::Commit],
             Self::Manager => vec![AgentFsCapability::Read, AgentFsCapability::Manage],
+            Self::Contributor => vec![AgentFsCapability::Read, AgentFsCapability::Propose],
         }
     }
 
@@ -81,6 +85,8 @@ pub struct AgentFsGrantRecord {
     pub agent_id: String,
     pub role: AgentFsRole,
     pub capabilities: Vec<AgentFsCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_scopes: Option<Vec<String>>,
     pub granted_by: String,
     pub created_at_ms: i64,
     pub revoked_at_ms: Option<i64>,
@@ -184,7 +190,30 @@ pub enum AgentFsAuthorization {
         grant_id: String,
         role: AgentFsRole,
         capabilities: Vec<AgentFsCapability>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path_scopes: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matched_path_scopes: Option<Vec<String>>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentFsProposalRecord {
+    pub schema_version: u32,
+    pub proposal_id: String,
+    pub fs_id: String,
+    pub commit_id: String,
+    pub base_commit_id: Option<String>,
+    pub agent_id: String,
+    pub summary: String,
+    pub paths: Vec<AgentFsCommitPathRecord>,
+    pub authorized_by: Option<AgentFsAuthorization>,
+    pub staging_snapshot: AgentFsCommitStagingRecord,
+    pub status: String,
+    pub created_at_ms: i64,
+    pub decided_at_ms: Option<i64>,
+    pub decided_by_agent_id: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -373,6 +402,23 @@ impl AgentFsError {
         }))
     }
 
+    pub fn agent_rules_invalid(message: impl Into<String>) -> Self {
+        Self::new("agent_rules_invalid", message, false)
+    }
+
+    pub fn path_scope_denied(fs_id: &str, paths: &[String], scopes: &[String]) -> Self {
+        Self::new(
+            "path_scope_denied",
+            format!("agent grant does not allow committing one or more paths on fs {fs_id}"),
+            false,
+        )
+        .with_details(json!({
+            "fs_id": fs_id,
+            "paths": paths,
+            "path_scopes": scopes,
+        }))
+    }
+
     pub fn remote_drift(
         path: &str,
         expected_kind: Option<&str>,
@@ -452,6 +498,10 @@ pub fn new_commit_id() -> Result<String> {
     Ok(format!("cmt_{}", random_hex(16)?))
 }
 
+pub fn new_proposal_id() -> Result<String> {
+    Ok(format!("prop_{}", random_hex(16)?))
+}
+
 pub fn new_hook_id() -> Result<String> {
     Ok(format!("hook_{}", random_hex(16)?))
 }
@@ -498,6 +548,98 @@ pub fn validate_source_relative_path(path: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn validate_path_scope(scope: &str) -> Result<()> {
+    let scope = scope.trim();
+    if scope.is_empty() {
+        anyhow::bail!(AgentFsError::new(
+            "invalid_path_scope",
+            "path scope must not be empty",
+            false,
+        ));
+    }
+    if scope.starts_with('/') {
+        anyhow::bail!(AgentFsError::new(
+            "invalid_path_scope",
+            format!("path scope {scope} must be FS-root-relative"),
+            false,
+        ));
+    }
+    if is_reserved_metadata_path(scope) {
+        anyhow::bail!(AgentFsError::new(
+            "invalid_path_scope",
+            format!("path scope {scope} must not target Section metadata"),
+            false,
+        ));
+    }
+    for segment in scope.split('/') {
+        if segment.is_empty() || segment == ".." {
+            anyhow::bail!(AgentFsError::new(
+                "invalid_path_scope",
+                format!("path scope {scope} is not valid"),
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn path_matches_any_scope(path: &str, scopes: &[String]) -> bool {
+    scopes.iter().any(|scope| path_matches_scope(path, scope))
+}
+
+pub fn path_matches_scope(path: &str, scope: &str) -> bool {
+    let path_segments = path.split('/').collect::<Vec<_>>();
+    let scope_segments = scope.split('/').collect::<Vec<_>>();
+    path_segments_match(&path_segments, &scope_segments)
+}
+
+fn path_segments_match(path: &[&str], scope: &[&str]) -> bool {
+    match scope.split_first() {
+        None => path.is_empty(),
+        Some((&"**", rest)) => {
+            path_segments_match(path, rest)
+                || (!path.is_empty() && path_segments_match(&path[1..], scope))
+        }
+        Some((segment_scope, rest)) => {
+            if let Some((path_segment, path_rest)) = path.split_first() {
+                segment_matches(path_segment, segment_scope) && path_segments_match(path_rest, rest)
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn segment_matches(value: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return value == pattern;
+    }
+
+    let mut remainder = value;
+    let mut first = true;
+    for part in pattern.split('*') {
+        if part.is_empty() {
+            continue;
+        }
+        if first && !pattern.starts_with('*') {
+            let Some(stripped) = remainder.strip_prefix(part) else {
+                return false;
+            };
+            remainder = stripped;
+        } else {
+            let Some(index) = remainder.find(part) else {
+                return false;
+            };
+            remainder = &remainder[index + part.len()..];
+        }
+        first = false;
+    }
+    pattern.ends_with('*') || remainder.is_empty()
 }
 
 pub fn validate_agent_id(agent_id: &str) -> Result<()> {
@@ -657,6 +799,37 @@ impl AgentFsMetadataRecord for AgentFsHookRecord {
             32,
         )?;
         validate_timestamp(path, "created_at_ms", self.created_at_ms)
+    }
+}
+
+impl AgentFsMetadataRecord for AgentFsProposalRecord {
+    fn validate_metadata(&self, path: &str) -> Result<()> {
+        validate_schema(path, self.schema_version)?;
+        validate_id_field(path, "proposal_id", &self.proposal_id, "prop_", 32)?;
+        validate_id_field(path, "fs_id", &self.fs_id, "fs_", 32)?;
+        validate_id_field(path, "commit_id", &self.commit_id, "cmt_", 32)?;
+        if let Some(base_commit_id) = &self.base_commit_id {
+            validate_id_field(path, "base_commit_id", base_commit_id, "cmt_", 32)?;
+        }
+        validate_id_field(path, "agent_id", &self.agent_id, "agt_", 32)?;
+        validate_non_empty(path, "summary", self.summary.trim())?;
+        if self.paths.is_empty() {
+            anyhow::bail!(malformed_record(path, "proposal paths must not be empty"));
+        }
+        for commit_path in &self.paths {
+            commit_path.validate_metadata(path)?;
+        }
+        if !matches!(self.status.as_str(), "proposed" | "accepted" | "rejected") {
+            anyhow::bail!(malformed_record(path, "proposal status is invalid"));
+        }
+        validate_timestamp(path, "created_at_ms", self.created_at_ms)?;
+        if let Some(decided_at_ms) = self.decided_at_ms {
+            validate_timestamp(path, "decided_at_ms", decided_at_ms)?;
+        }
+        if let Some(decided_by_agent_id) = &self.decided_by_agent_id {
+            validate_id_field(path, "decided_by_agent_id", decided_by_agent_id, "agt_", 32)?;
+        }
+        Ok(())
     }
 }
 
@@ -866,6 +1039,7 @@ fn validate_authorization(path: &str, authorization: &AgentFsAuthorization) -> R
             grant_id,
             role,
             capabilities,
+            ..
         } => {
             validate_id_field(path, "authorized_by.grant_id", grant_id, "grt_", 32)?;
             if !capabilities.contains(&AgentFsCapability::Commit) {
@@ -893,7 +1067,13 @@ fn malformed_record(path: &str, message: impl Into<String>) -> AgentFsError {
 }
 
 pub fn owner_grant(fs: &AgentFsRecord, owner: &AgentIdentityRecord) -> Result<AgentFsGrantRecord> {
-    grant_record(fs, &owner.agent_id, AgentFsRole::Owner, &owner.agent_id)
+    grant_record(
+        fs,
+        &owner.agent_id,
+        AgentFsRole::Owner,
+        &owner.agent_id,
+        None,
+    )
 }
 
 pub fn grant_record(
@@ -901,7 +1081,20 @@ pub fn grant_record(
     agent_id: &str,
     role: AgentFsRole,
     granted_by: &str,
+    path_scopes: Option<Vec<String>>,
 ) -> Result<AgentFsGrantRecord> {
+    if let Some(scopes) = &path_scopes {
+        if scopes.is_empty() {
+            anyhow::bail!(AgentFsError::new(
+                "invalid_path_scope",
+                "path-scoped grant must include at least one scope",
+                false,
+            ));
+        }
+        for scope in scopes {
+            validate_path_scope(scope)?;
+        }
+    }
     Ok(AgentFsGrantRecord {
         schema_version: SCHEMA_VERSION,
         grant_id: new_grant_id()?,
@@ -909,6 +1102,7 @@ pub fn grant_record(
         agent_id: agent_id.to_string(),
         role,
         capabilities: role.capabilities(),
+        path_scopes,
         granted_by: granted_by.to_string(),
         created_at_ms: now_ms(),
         revoked_at_ms: None,
@@ -1415,6 +1609,7 @@ mod tests {
             agent_id: agent_id.clone(),
             role: AgentFsRole::Writer,
             capabilities: AgentFsRole::Writer.capabilities(),
+            path_scopes: None,
             granted_by: agent_id.clone(),
             created_at_ms: now,
             revoked_at_ms: None,
@@ -1495,6 +1690,8 @@ mod tests {
                 grant_id,
                 role: AgentFsRole::Writer,
                 capabilities: AgentFsRole::Writer.capabilities(),
+                path_scopes: None,
+                matched_path_scopes: None,
             }),
             staging_snapshot: Some(AgentFsCommitStagingRecord {
                 manifest_path: "agentfs/staging/manifest.json".to_string(),

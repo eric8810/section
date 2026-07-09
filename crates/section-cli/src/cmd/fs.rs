@@ -51,8 +51,18 @@ fn run_inner(config_path: Option<&Path>, action: FsAction, json_mode: bool) -> R
                 }
             }
         }
-        FsAction::Grant { fs, agent_id, role } => {
-            let grant = control_plane.fs_grant(&fs, &agent_id, role.into())?;
+        FsAction::Grant {
+            fs,
+            agent_id,
+            role,
+            scopes,
+        } => {
+            let path_scopes = if scopes.is_empty() {
+                None
+            } else {
+                Some(scopes)
+            };
+            let grant = control_plane.fs_grant(&fs, &agent_id, role.into(), path_scopes)?;
             if json_mode {
                 println!("{}", json!({ "ok": true, "grant": grant }));
             } else {
@@ -175,6 +185,7 @@ impl From<FsRoleArg> for AgentFsRole {
             FsRoleArg::Reader => Self::Reader,
             FsRoleArg::Writer => Self::Writer,
             FsRoleArg::Manager => Self::Manager,
+            FsRoleArg::Contributor => Self::Contributor,
         }
     }
 }

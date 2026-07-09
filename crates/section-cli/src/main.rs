@@ -227,6 +227,9 @@ pub enum FsAction {
         /// Role to grant
         #[arg(long, value_enum)]
         role: FsRoleArg,
+        /// Limit commit/propose authority to FS-root-relative path scopes. Repeatable.
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
     },
     /// Revoke an agent's active grants on an FS
     Revoke {
@@ -279,6 +282,7 @@ pub enum FsRoleArg {
     Reader,
     Writer,
     Manager,
+    Contributor,
 }
 
 #[derive(Subcommand)]
@@ -303,6 +307,28 @@ pub enum CommitAction {
         /// Commit id to repair. Defaults to current head.
         #[arg(long)]
         commit: Option<String>,
+    },
+    /// Propose dirty paths without advancing the FS head
+    Propose {
+        /// Attached local path or root
+        path: PathBuf,
+        /// Proposal summary
+        #[arg(long)]
+        message: String,
+    },
+    /// Accept a proposal and materialize it as an accepted commit
+    Accept {
+        /// FS name, fs_id, source name, or attached local path
+        fs: String,
+        /// Proposal id
+        proposal_id: String,
+    },
+    /// Reject a proposal without changing shared truth
+    Reject {
+        /// FS name, fs_id, source name, or attached local path
+        fs: String,
+        /// Proposal id
+        proposal_id: String,
     },
 }
 

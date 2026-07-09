@@ -1316,25 +1316,21 @@ SECTION_LOCAL_ROOT
 
 `AGENTS.md` 是 FS 本地规则，不是普通说明文档。
 
-目标：
+第一版只执行一个规则：
 
 ```text
-Agent attach 或 commit 前能知道这个 FS 的工作规则。
+protected_paths
 ```
 
-设计：
+不执行 `required_checks`。
 
-- MVP 继续把 `AGENTS.md` 当普通文件同步。
-- 后续执行规则时，先支持一个很小的机器可读块。
-- 自然语言部分继续给 Agent 阅读，不做强制解释。
+原因：`required_checks` 需要阻塞型 hook。阻塞型 hook 还没有设计 sandbox、timeout、失败语义和权限边界，不能混进 Hooks v1。
 
 示例：
 
 ```markdown
 ---
 section:
-  required_checks:
-    - cargo test
   protected_paths:
     - docs/AGENTFS_MVP_CONTRACT.md
 ---
@@ -1346,22 +1342,24 @@ Before committing, read the product contract.
 
 规则：
 
-- 修改 `AGENTS.md` 需要 `manage` 或 owner。
-- `required_checks` 可以映射到 blocking hook。
-- `protected_paths` 初期只要求 `manage` 权限，不做复杂审批。
-- 解析不了机器块时，普通 commit 返回 `agent_rules_invalid`。
-- owner 或有 `manage` 的 Agent 可以提交修复后的 `AGENTS.md`。
+- 自然语言部分只给 Agent 读，不强制解释。
+- 修改 `AGENTS.md` 需要提交者有 `manage`。
+- 修改 `protected_paths` 命中的路径，也需要提交者有 `manage`。
+- 提交仍然需要 `commit`。所以内置 `manager` 只有 manage、没有 commit，不能直接提交文件。
+- owner 同时有 `manage` 和 `commit`，可以修改受保护路径。
+- 解析不了机器块时，提交返回 `agent_rules_invalid`。
+- invalid `AGENTS.md` 不会替换远端已有规则。
 
 验收：
 
 - writer 修改普通文件可以 commit。
 - writer 修改 protected path 会被拒绝。
-- manager 修改 `AGENTS.md` 可以通过。
-- invalid `AGENTS.md` 不会静默关闭已有规则。
+- owner 修改 protected path 可以 commit。
+- invalid `AGENTS.md` 会被拒绝，远端旧规则不变。
 
 ### 16. path-scoped grants
 
-path-scoped grants 是 FS-wide grants 的扩展，不是第一版核心。
+path-scoped grants 是 FS-wide grants 的扩展。
 
 目标：
 
@@ -1369,70 +1367,73 @@ path-scoped grants 是 FS-wide grants 的扩展，不是第一版核心。
 owner 可以只允许某个 Agent 提交某些路径。
 ```
 
-设计：
+命令：
 
-- grant record 增加可选 `path_scopes`。
-- 没有 `path_scopes` 时，保持 FS-wide 行为。
-- 第一版只做 allow scopes，不做 deny scopes。
-- `commit apply` 要求本次 commit 的所有 changed paths 都落在允许范围内。
-- owner 不受 path scope 限制。
-- manager 只能管理 grant，不能因为管理了某个 path scope 就获得 commit 权限。
-
-grant 示例：
-
-```json
-{
-  "grant_id": "grt_...",
-  "fs_id": "fs_...",
-  "agent_id": "agt_...",
-  "role": "writer",
-  "capabilities": ["read", "commit"],
-  "path_scopes": ["docs/**", "README.md"]
-}
+```text
+section fs grant <fs> <agent_id> --role writer --scope docs/**
 ```
 
 规则：
 
-- path scope 使用 FS-root-relative glob。
+- `--scope` 可重复。
+- 没有 `--scope` 时，保持整个 FS 级别的 grant。
+- 第一版只做 allow scopes，不做 deny scopes。
+- scope 使用 FS-root-relative glob，支持 `*` 和 `**`。
 - scope 不能包含绝对路径、`..`、空 segment、`.section/agentfs/**`。
-- 一个 commit 里只要有一个路径越界，整个 commit 被拒绝。
-- `authorized_by` 要记录 grant id 和命中的 path scopes。
+- `commit apply` 要求本次提交的所有 changed paths 都落在允许范围内。
+- 一个 commit 里只要有一个路径越界，整个 commit 被拒绝，返回 `path_scope_denied`。
+- owner 不受 path scope 限制。
+- manager 只能管理 grant，不能因为管理了 path scope 就获得 commit 权限。
+- `authorized_by` 记录 grant id、`path_scopes` 和 `matched_path_scopes`。
 
 验收：
 
 - writer 修改 `docs/a.md` 可以 commit。
 - writer 修改 `src/a.rs` 会被拒绝。
 - 同一个 commit 同时包含允许路径和越界路径，也会被拒绝。
+- accepted commit audit 能看到命中的 path scope。
 
 ### 17. proposal/approval
 
-proposal/approval 不是当前核心路径。
+proposal/approval 是直接 commit 之外的独立路径。
 
-只有当直接 commit 不够用时再加。
+目标：
 
-设计方向：
+```text
+没有 commit 权限的 contributor 可以提出改动，owner 审核后让改动成为共享事实。
+```
 
-- 增加 `propose` capability。
-- 增加 `contributor` role：`read` + `propose`。
-- `section commit propose <root> --message <text>` 创建 proposal。
-- proposal 使用同样的 staging snapshot。
-- owner 执行 `section commit accept <proposal_id>`。
-- 非 owner 接受 proposal 必须同时具备 `manage` 和 `commit`。
-- accept 后 proposal 变成 accepted commit。
-- reject 需要 `manage`，只关闭 proposal，不改变 shared truth。
+命令：
+
+```text
+section fs grant <fs> <agent_id> --role contributor
+section commit propose <root> --message <text>
+section commit accept <fs> <proposal_id>
+section commit reject <fs> <proposal_id>
+```
 
 规则：
 
+- 增加 `propose` capability。
+- 增加 `contributor` role：`read` + `propose`，没有 `commit`。
 - proposal 不推进 head。
-- accepted proposal 必须重新检查 freshness。
-- proposal 过期后不能 accept。
-- 只有 `manage` 但没有 `commit` 的 manager 不能 accept proposal。
+- proposal snapshot 存在 backing source 的 `.section/agentfs/proposals/<proposal_id>/`。
+- accept 不依赖 proposer 的本机磁盘。
+- accept 时重新检查 head freshness。
+- accept 时检查接受者有 commit 权限。
+- 非 owner accept 还必须有 manage 权限。
+- manager-only 没有 commit，不能 accept proposal。
+- reject 需要 manage，只关闭 proposal，不改变共享事实。
 
 验收：
 
-- contributor 没有直接 commit 权限时，可以 propose。
-- owner accept 后，FS head 前进。
+- contributor 直接 commit 会被拒绝。
+- contributor 可以 propose。
+- proposal 创建后 head 不变。
 - manager-only accept 会被拒绝。
+- owner accept 后，proposal 成为 accepted commit，head 前进，文件落地。
+- stale proposal accept 会被拒绝。
+- owner 可以 reject proposal。
 
 ## 已定业务决策
 
